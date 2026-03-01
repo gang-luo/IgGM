@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from torch.distributions import Categorical
 
-from IgGM.model import DesignModel, PPIModel
+from IgGM.model import build_iggm_modules
 from IgGM.protein import ProtStruct
 from IgGM.protein.data_transform import get_asym_ids
 from IgGM.utils import to_device, IGSO3Buffer, replace_with_mask
@@ -22,16 +22,19 @@ class AbDesigner(BaseDesigner):
     def __init__(self, ppi_path, design_path, buffer_path, config):
         super().__init__()
         logging.info('restoring the pre-trained IgGM-PPI-SeqPT model ...')
-        self.plm_featurizer = PPIModel.restore(ppi_path)
-        config.c_s = self.plm_featurizer.c_s
-        config.c_p = self.plm_featurizer.c_z
+        self.plm_featurizer, self.model, c_s, c_p = build_iggm_modules(
+            ppi_path=ppi_path,
+            design_path=design_path,
+            config=config,
+        )
+        config.c_s = c_s if c_s is not None else getattr(config, 'c_s', None)
+        config.c_p = c_p if c_p is not None else getattr(config, 'c_p', None)
         self.config = config
         self.igso3_buffer = IGSO3Buffer()
         self.igso3_buffer.load(buffer_path)
         self.diffuser = Diffuser(igso3_buffer=self.igso3_buffer)
         self.buffer_path = buffer_path
-        logging.info('restoring the pre-trained IgGM design model ...')
-        self.model = DesignModel.restore(design_path, config)
+        logging.info('restoring the pre-trained IgGM design model ... done')
         self.idxs_step = self._get_idxs_step()
         self.eval()
 
