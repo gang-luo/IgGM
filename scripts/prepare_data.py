@@ -259,3 +259,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# python scripts/prepare_data.py --dataset_name sabdab --raw_root notebooks/data/sabdab/metadata --out_root notebooks/data/sabdab/processed
