@@ -70,17 +70,6 @@ If you download the weights into the `./checkpoints` folder, you can run the sub
 
 If you do not download the weights, they will be downloaded automatically when you run the code.
 
-## 🧪Data processing
-
-For training/evaluation dataset preparation conventions (SAbDab local layout, one-command `processed/` generation, notebook usage, output schema, and CI mock pipeline), see:
-
-- [`docs/data_processing.md`](docs/data_processing.md)
-
-### README and examples: scope and differences
-
-- `examples/` currently defines **inference inputs** only (FASTA/PDB usage for design and structure prediction).
-- The training `processed` schema is inferred from code/model input fields and is treated as a fixed project convention (documented in `docs/data_processing.md`).
-
 ## 📖Examples
 
 You can use a fasta file as the sequence input and a pdb file as the antigen input. Example files are located in the `examples` folder.

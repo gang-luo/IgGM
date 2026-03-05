@@ -194,33 +194,30 @@ def build_cdr_indices(chain_residues: List[Tuple[int, str]], cdr_names: List[str
     return cdr_pdb, cdr_seq
 
 
-def extract_sequences_and_cdr(entry: Dict[str, object]) -> Tuple[Dict[str, str], Dict[str, Dict[str, List[int]]], Dict[str, Dict[str, List[int]]]]:
+def extract_sequences_and_cdr(entry: Dict[str, object]) -> Tuple[Dict[str, str], Dict[str, List[int]], Dict[str, List[int]]]:
     pdb_path = Path(str(entry["pdb_path"]))
     chain_ids = parse_chain_ids(entry)
     parsed = parse_pdb_sequences(pdb_path)
 
     sequences: Dict[str, str] = {}
-    cdr_pdb: Dict[str, Dict[str, List[int]]] = {}
-    cdr_sequences: Dict[str, Dict[str, List[int]]] = {}
+    cdr_pdb: Dict[str, List[int]] = {}
+    cdr_sequences: Dict[str, List[int]] = {}
 
     for role in ("H", "L", "A"):
         chain_id = chain_ids.get(role)
         if not chain_id or chain_id not in parsed:
             continue
         residues = parsed[chain_id]
+
         sequences[role] = "".join(aa for _, aa in residues)
         if role == "H":
-            cdr_pdb["P"] = cdr_pdb.get("P", {})
-            cdr_sequences["P"] = cdr_sequences.get("P", {})
             pdb_idx, seq_idx = build_cdr_indices(residues, ["cdr_H1", "cdr_H2", "cdr_H3"])
-            cdr_pdb["P"].update(pdb_idx)
-            cdr_sequences["P"].update(seq_idx)
+            cdr_pdb.update(pdb_idx)
+            cdr_sequences.update(seq_idx)
         elif role == "L":
-            cdr_pdb["P"] = cdr_pdb.get("P", {})
-            cdr_sequences["P"] = cdr_sequences.get("P", {})
             pdb_idx, seq_idx = build_cdr_indices(residues, ["cdr_L1", "cdr_L2", "cdr_L3"])
-            cdr_pdb["P"].update(pdb_idx)
-            cdr_sequences["P"].update(seq_idx)
+            cdr_pdb.update(pdb_idx)
+            cdr_sequences.update(seq_idx)
 
     return sequences, cdr_pdb, cdr_sequences
 
@@ -360,7 +357,13 @@ def main() -> None:
         samples = list(pool.map(lambda item: finalize_sample(item, fasta_dir), entries))
 
     for idx, sample in enumerate(samples):
-        sample_path = samples_dir / f"{idx:06d}_{sample['sample_id']}.pt"
+        Hname = sample["raw_row"].get("Hchain", "NA")
+        L_name = sample["raw_row"].get("Lchain", "NA")
+        Aname = sample["raw_row"].get("antigen_chain", "NA")
+
+        sample_path = samples_dir / f"{Hname}_{L_name}_{Aname}_{sample['sample_id']}.pt"
+        print("sample_path",sample_path)
+
         if torch is not None:
             torch.save(sample, sample_path)
         else:
@@ -392,4 +395,4 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-# python scripts/prepare_data.py --dataset_name sabdab --raw_root notebooks/data/sabdab/metadata --out_root notebooks/data/sabdab/processed
+# python data/prepare_data.py --dataset_name sabdab --raw_root ./data/sabdab/metadata --out_root ./data/sabdab/processed
