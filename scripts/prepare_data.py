@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import pickle
 import random
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -15,7 +16,44 @@ try:
     import torch
 except ImportError:  # pragma: no cover - optional dependency in lightweight envs
     torch = None
-import pickle
+
+AA3_TO_1 = {
+    "ALA": "A",
+    "ARG": "R",
+    "ASN": "N",
+    "ASP": "D",
+    "CYS": "C",
+    "GLN": "Q",
+    "GLU": "E",
+    "GLY": "G",
+    "HIS": "H",
+    "ILE": "I",
+    "LEU": "L",
+    "LYS": "K",
+    "MET": "M",
+    "PHE": "F",
+    "PRO": "P",
+    "SER": "S",
+    "THR": "T",
+    "TRP": "W",
+    "TYR": "Y",
+    "VAL": "V",
+    "SEC": "U",
+    "PYL": "O",
+    "ASX": "B",
+    "GLX": "Z",
+    "XLE": "J",
+    "UNK": "X",
+}
+
+CHOTHIA_RANGES = {
+    "cdr_L1": (24, 34),
+    "cdr_L2": (50, 56),
+    "cdr_L3": (89, 97),
+    "cdr_H1": (26, 32),
+    "cdr_H2": (52, 56),
+    "cdr_H3": (95, 102),
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,6 +131,113 @@ def choose_first(row: Dict[str, str], keys: Iterable[str]) -> Optional[str]:
     return None
 
 
+def parse_chain_from_sample_id(sample_id: str) -> Dict[str, Optional[str]]:
+    parts = sample_id.split("_")
+    chain_ids = {"H": None, "L": None, "A": None}
+    if len(parts) >= 4:
+        chain_ids["H"] = parts[1] if parts[1] != "NA" else None
+        chain_ids["L"] = parts[2] if parts[2] != "NA" else None
+        chain_ids["A"] = parts[3] if parts[3] != "NA" else None
+    return chain_ids
+
+
+def parse_chain_ids(entry: Dict[str, object]) -> Dict[str, Optional[str]]:
+    row = entry.get("raw_row", {})
+    chain_ids = parse_chain_from_sample_id(str(entry["sample_id"]))
+    if isinstance(row, dict):
+        chain_ids["H"] = chain_ids["H"] or choose_first(row, ["Hchain", "heavy_chain", "heavy", "chain_h"])
+        chain_ids["L"] = chain_ids["L"] or choose_first(row, ["Lchain", "light_chain", "light", "chain_l"])
+        chain_ids["A"] = chain_ids["A"] or choose_first(
+            row, ["antigen_chain", "antigen", "chain_a", "antigen_chain_id"]
+        )
+    return chain_ids
+
+
+def parse_pdb_sequences(pdb_path: Path) -> Dict[str, List[Tuple[int, str]]]:
+    chain_residues: Dict[str, List[Tuple[int, str]]] = {}
+    seen = set()
+    with pdb_path.open("r", encoding="utf-8", errors="ignore") as fp:
+        for line in fp:
+            if not line.startswith("ATOM"):
+                continue
+            resname = line[17:20].strip().upper()
+            chain_id = line[21].strip()
+            if not chain_id:
+                continue
+            try:
+                resseq = int(line[22:26].strip())
+            except ValueError:
+                continue
+            icode = line[26].strip()
+            residue_key = (chain_id, resseq, icode)
+            if residue_key in seen:
+                continue
+            seen.add(residue_key)
+            aa = AA3_TO_1.get(resname, "X")
+            chain_residues.setdefault(chain_id, []).append((resseq, aa))
+    return chain_residues
+
+
+def build_cdr_indices(chain_residues: List[Tuple[int, str]], cdr_names: List[str]) -> Tuple[Dict[str, List[int]], Dict[str, List[int]]]:
+    cdr_pdb: Dict[str, List[int]] = {}
+    cdr_seq: Dict[str, List[int]] = {}
+    for cdr_name in cdr_names:
+        start, end = CHOTHIA_RANGES[cdr_name]
+        pdb_positions: List[int] = []
+        seq_positions: List[int] = []
+        for seq_idx, (pdb_resseq, _) in enumerate(chain_residues, start=1):
+            if start <= pdb_resseq <= end:
+                pdb_positions.append(pdb_resseq)
+                seq_positions.append(seq_idx)
+        cdr_pdb[cdr_name] = pdb_positions
+        cdr_seq[cdr_name] = seq_positions
+    return cdr_pdb, cdr_seq
+
+
+def extract_sequences_and_cdr(entry: Dict[str, object]) -> Tuple[Dict[str, str], Dict[str, Dict[str, List[int]]], Dict[str, Dict[str, List[int]]]]:
+    pdb_path = Path(str(entry["pdb_path"]))
+    chain_ids = parse_chain_ids(entry)
+    parsed = parse_pdb_sequences(pdb_path)
+
+    sequences: Dict[str, str] = {}
+    cdr_pdb: Dict[str, Dict[str, List[int]]] = {}
+    cdr_sequences: Dict[str, Dict[str, List[int]]] = {}
+
+    for role in ("H", "L", "A"):
+        chain_id = chain_ids.get(role)
+        if not chain_id or chain_id not in parsed:
+            continue
+        residues = parsed[chain_id]
+        sequences[role] = "".join(aa for _, aa in residues)
+        if role == "H":
+            cdr_pdb["P"] = cdr_pdb.get("P", {})
+            cdr_sequences["P"] = cdr_sequences.get("P", {})
+            pdb_idx, seq_idx = build_cdr_indices(residues, ["cdr_H1", "cdr_H2", "cdr_H3"])
+            cdr_pdb["P"].update(pdb_idx)
+            cdr_sequences["P"].update(seq_idx)
+        elif role == "L":
+            cdr_pdb["P"] = cdr_pdb.get("P", {})
+            cdr_sequences["P"] = cdr_sequences.get("P", {})
+            pdb_idx, seq_idx = build_cdr_indices(residues, ["cdr_L1", "cdr_L2", "cdr_L3"])
+            cdr_pdb["P"].update(pdb_idx)
+            cdr_sequences["P"].update(seq_idx)
+
+    return sequences, cdr_pdb, cdr_sequences
+
+
+def write_processed_fasta(fasta_dir: Path, sample_id: str, sequences: Dict[str, str]) -> Path:
+    fasta_dir.mkdir(parents=True, exist_ok=True)
+    fasta_path = fasta_dir / f"{sample_id}.fasta"
+    lines: List[str] = []
+    for tag in ("H", "L", "A"):
+        seq = sequences.get(tag)
+        if seq:
+            lines.append(f">{tag}")
+            lines.append(seq)
+    fasta_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return fasta_path
+
+
 def prepare_real_entries(raw_root: Path) -> List[Dict[str, object]]:
     metadata_path = find_sabdab_metadata(raw_root)
     if metadata_path is None:
@@ -119,22 +264,12 @@ def prepare_real_entries(raw_root: Path) -> List[Dict[str, object]]:
         if pdb_path is None or not pdb_path.exists():
             continue
 
-        sequence_keys = [
-            "heavy_sequence",
-            "light_sequence",
-            "antigen_sequence",
-            "sequence",
-            "seq",
-        ]
-        sequences = {k: row[k] for k in sequence_keys if row.get(k)}
-
         entries.append(
             {
                 "sample_id": entry_id,
                 "mode": "real",
                 "source_metadata": str(metadata_path),
                 "pdb_path": str(pdb_path),
-                "sequences": sequences,
                 "raw_row": row,
             }
         )
@@ -142,41 +277,35 @@ def prepare_real_entries(raw_root: Path) -> List[Dict[str, object]]:
 
 
 def prepare_mock_entries() -> List[Dict[str, object]]:
-    fasta_root = Path("examples/fasta.files.native")
     pdb_root = Path("examples/pdb.files.native")
-
-    fasta_map = {p.stem: p for p in fasta_root.glob("*.fasta")}
     entries: List[Dict[str, object]] = []
     for pdb_path in sorted(pdb_root.glob("*.pdb")):
-        fasta_path = fasta_map.get(pdb_path.stem)
-        if fasta_path is None:
-            continue
-
         entries.append(
             {
                 "sample_id": pdb_path.stem,
                 "mode": "mock",
                 "pdb_path": str(pdb_path),
-                "fasta_path": str(fasta_path),
-                "sequences": read_fasta_sequences(fasta_path),
                 "raw_row": {},
             }
         )
     return entries
 
 
-def finalize_sample(entry: Dict[str, object]) -> Dict[str, object]:
-    sequences = dict(entry.get("sequences", {}))
+def finalize_sample(entry: Dict[str, object], fasta_dir: Path) -> Dict[str, object]:
+    sequences, cdr_pdb, cdr_sequences = extract_sequences_and_cdr(entry)
     seq_lens = {name: len(seq) for name, seq in sequences.items()}
+    fasta_path = write_processed_fasta(fasta_dir, str(entry["sample_id"]), sequences)
 
     sample = {
         "sample_id": entry["sample_id"],
         "mode": entry["mode"],
         "pdb_path": entry["pdb_path"],
-        "fasta_path": entry.get("fasta_path"),
+        "fasta_path": str(fasta_path),
         "source_metadata": entry.get("source_metadata"),
         "sequences": sequences,
         "sequence_lengths": seq_lens,
+        "cdr_pdb": cdr_pdb,
+        "cdr_sequences": cdr_sequences,
         "length_tensor": (
             torch.tensor(list(seq_lens.values()), dtype=torch.int32)
             if torch is not None
@@ -222,11 +351,13 @@ def main() -> None:
 
     dataset_root = args.out_root / args.dataset_name
     samples_dir = dataset_root / "samples"
+    fasta_dir = args.out_root / "fasta"
     samples_dir.mkdir(parents=True, exist_ok=True)
+    fasta_dir.mkdir(parents=True, exist_ok=True)
 
     workers = max(1, int(args.num_workers))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        samples = list(pool.map(finalize_sample, entries))
+        samples = list(pool.map(lambda item: finalize_sample(item, fasta_dir), entries))
 
     for idx, sample in enumerate(samples):
         sample_path = samples_dir / f"{idx:06d}_{sample['sample_id']}.pt"
@@ -241,6 +372,7 @@ def main() -> None:
         "mode": mode,
         "sample_count": len(samples),
         "samples_dir": str(samples_dir),
+        "fasta_dir": str(fasta_dir),
         "seed": args.seed,
         "limit": args.limit,
         "num_workers": workers,
