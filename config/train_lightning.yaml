@@ -1,0 +1,37 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2024, Tencent Inc. All rights reserved.
+
+data:
+  metadata: data/sabdab/processed/sabdab/metadata.json
+  pdb_dir: data/sabdab/metadata
+  batch_size: 1
+  num_workers: 0
+
+model:
+  ppi_ckpt: /path/to/iggm_ppi.pt
+  design_ckpt: /path/to/iggm_design.pt
+  igso3_buffer: /path/to/igso3_buffer.pkl
+
+optimizer:
+  lr: 1.0e-4
+  grad_clip: 1.0
+
+trainer:
+  max_epochs: 20
+  precision: 16-mixed
+  accelerator: auto
+  devices: auto
+  log_every_n_steps: 1
+
+wandb:
+  disabled: false
+  project: iggm-lightning
+  run_name: iggm-stage2
+  entity: ""
+  api_key: ""
+
+runtime:
+  output_dir: outputs/lightning_train
+  seed: 42
+  resume: true
+  run_test: true
