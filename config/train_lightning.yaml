@@ -4,6 +4,10 @@
 data:
   metadata: data/sabdab/processed/sabdab/metadata.json
   pdb_dir: data/sabdab/metadata
+  train_ids: data/sabdab/processed/sabdab/split/train_prot_ids.txt
+  val_ids: data/sabdab/processed/sabdab/split/val_prot_ids.txt
+  test_ids: data/sabdab/processed/sabdab/split/test_prot_ids.txt
+  train_clusters: data/sabdab/processed/sabdab/split/train_prot_cluster.txt
   batch_size: 1
   num_workers: 0
 
@@ -14,7 +18,15 @@ model:
 
 optimizer:
   lr: 1.0e-4
+  weight_decay: 1.0e-2
   grad_clip: 1.0
+
+loss:
+  gamma: 0.8
+  loss_viol_weight: 0.02
+
+metrics:
+  dockq_threshold: 0.23
 
 trainer:
   max_epochs: 20

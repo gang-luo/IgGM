@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -32,7 +33,13 @@ if str(SRC_DIR) not in sys.path:
 from IgGM.model.arch.core.diffuser import Diffuser
 from IgGM.model.factory import build_iggm_modules
 from IgGM.utils import IGSO3Buffer
-from iggm_lightning import IgGMLightningModule, OptimizerConfig, ProcessedSabdabDataModule
+from iggm_lightning import (
+    IgGMLightningModule,
+    IgGMLossConfig,
+    MetricConfig,
+    OptimizerConfig,
+    ProcessedSabdabDataModule,
+)
 
 
 class DotConfig:
@@ -48,18 +55,25 @@ def _load_yaml_config(path: str | Path) -> Dict[str, Any]:
     return cfg
 
 
-def _build_defaulted_parser(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
+def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     data = defaults.get("data", {})
     model = defaults.get("model", {})
     optim = defaults.get("optimizer", {})
+    loss_cfg = defaults.get("loss", {})
+    metric_cfg = defaults.get("metrics", {})
     trainer = defaults.get("trainer", {})
     wandb = defaults.get("wandb", {})
     runtime = defaults.get("runtime", {})
 
     p = argparse.ArgumentParser(description="Train IgGM with PyTorch Lightning")
     p.add_argument("--config", default=defaults.get("config_path", "config/train_lightning.yaml"))
+
     p.add_argument("--metadata", default=data.get("metadata", "data/sabdab/processed/sabdab/metadata.json"))
     p.add_argument("--pdb_dir", default=data.get("pdb_dir", "data/sabdab/metadata"))
+    p.add_argument("--train_ids", default=data.get("train_ids", ""))
+    p.add_argument("--val_ids", default=data.get("val_ids", ""))
+    p.add_argument("--test_ids", default=data.get("test_ids", ""))
+    p.add_argument("--train_clusters", default=data.get("train_clusters", ""))
     p.add_argument("--batch_size", type=int, default=int(data.get("batch_size", 1)))
     p.add_argument("--num_workers", type=int, default=int(data.get("num_workers", 0)))
 
@@ -68,12 +82,12 @@ def _build_defaulted_parser(defaults: Dict[str, Any]) -> argparse.ArgumentParser
     p.add_argument("--igso3_buffer", default=model.get("igso3_buffer", ""))
 
     p.add_argument("--lr", type=float, default=float(optim.get("lr", 1e-4)))
+    p.add_argument("--weight_decay", type=float, default=float(optim.get("weight_decay", 1e-2)))
     p.add_argument("--grad_clip", type=float, default=float(optim.get("grad_clip", 1.0)))
 
-    p.add_argument("--output_dir", default=runtime.get("output_dir", "outputs/lightning_train"))
-    p.add_argument("--seed", type=int, default=int(runtime.get("seed", 42)))
-    p.add_argument("--resume", action="store_true", default=bool(runtime.get("resume", False)))
-    p.add_argument("--run_test", action="store_true", default=bool(runtime.get("run_test", False)))
+    p.add_argument("--gamma", type=float, default=float(loss_cfg.get("gamma", 0.8)))
+    p.add_argument("--loss_viol_weight", type=float, default=float(loss_cfg.get("loss_viol_weight", 0.02)))
+    p.add_argument("--dockq_threshold", type=float, default=float(metric_cfg.get("dockq_threshold", 0.23)))
 
     p.add_argument("--max_epochs", type=int, default=int(trainer.get("max_epochs", 1)))
     p.add_argument("--precision", default=trainer.get("precision", "16-mixed"))
@@ -86,6 +100,11 @@ def _build_defaulted_parser(defaults: Dict[str, Any]) -> argparse.ArgumentParser
     p.add_argument("--entity", default=wandb.get("entity", ""))
     p.add_argument("--api_key", default=wandb.get("api_key", ""))
     p.add_argument("--no_wandb", action="store_true", default=bool(wandb.get("disabled", False)))
+
+    p.add_argument("--output_dir", default=runtime.get("output_dir", "outputs/lightning_train"))
+    p.add_argument("--seed", type=int, default=int(runtime.get("seed", 42)))
+    p.add_argument("--resume", action="store_true", default=bool(runtime.get("resume", False)))
+    p.add_argument("--run_test", action="store_true", default=bool(runtime.get("run_test", False)))
     return p
 
 
@@ -95,7 +114,7 @@ def _parse_args() -> argparse.Namespace:
     boot_args, _ = bootstrap.parse_known_args()
     defaults = _load_yaml_config(boot_args.config)
     defaults["config_path"] = boot_args.config
-    parser = _build_defaulted_parser(defaults)
+    parser = _parser_with_defaults(defaults)
     args = parser.parse_args()
     if not args.ppi_ckpt or not args.design_ckpt:
         raise ValueError("Both --ppi_ckpt and --design_ckpt are required (via YAML or CLI)")
@@ -114,6 +133,10 @@ def main() -> None:
         pdb_dir=args.pdb_dir,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        train_ids_path=(args.train_ids or None),
+        val_ids_path=(args.val_ids or None),
+        test_ids_path=(args.test_ids or None),
+        train_cluster_path=(args.train_clusters or None),
     )
     dm.setup()
 
@@ -134,8 +157,10 @@ def main() -> None:
         model=design_model,
         plm_featurizer=plm_featurizer,
         diffuser=diffuser,
-        optimizer_cfg=OptimizerConfig(lr=args.lr),
+        optimizer_cfg=OptimizerConfig(lr=args.lr, weight_decay=args.weight_decay),
         grad_clip_val=args.grad_clip,
+        loss_cfg=IgGMLossConfig(gamma=args.gamma, loss_viol_weight=args.loss_viol_weight),
+        metric_cfg=MetricConfig(dockq_threshold=args.dockq_threshold),
     )
 
     ckpt_dir = out / "checkpoints"
@@ -143,9 +168,9 @@ def main() -> None:
     callbacks = [
         ModelCheckpoint(
             dirpath=str(ckpt_dir),
-            filename="best-{epoch:02d}-{val_loss:.4f}",
-            monitor="val/loss",
-            mode="min",
+            filename="best-{epoch:02d}-{val_tm_score:.4f}",
+            monitor="val/tm_score",
+            mode="max",
             save_top_k=1,
             save_last=True,
         ),
@@ -156,8 +181,6 @@ def main() -> None:
         logger = CSVLogger(str(out), name="csv_logs")
     else:
         if args.api_key:
-            import os
-
             os.environ["WANDB_API_KEY"] = args.api_key
         logger = WandbLogger(
             project=args.project,
