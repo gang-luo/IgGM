@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# Copyright (c) 2024, Tencent Inc. All rights reserved.
 """PyTorch Lightning wrapper for IgGM training.
 
 This module maps the legacy IgGM train/eval forward path into Lightning hooks
@@ -13,7 +14,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 try:
@@ -22,6 +22,9 @@ except ImportError:  # pragma: no cover
     import pytorch_lightning as pl
 
 from IgGM.model import DesignModel
+from IgGM.protein.prot_constants import RESD_NAMES_1C
+from .losses import IgGMLossConfig, IgGMPaperLoss
+from .metrics import MetricConfig, StructureMetrics
 
 
 @dataclass
@@ -66,6 +69,8 @@ class IgGMLightningModule(pl.LightningModule):
         use_amp: bool = True,
         ema_decay: Optional[float] = None,
         debug_shapes: bool = False,
+        loss_cfg: Optional[IgGMLossConfig] = None,
+        metric_cfg: Optional[MetricConfig] = None,
     ) -> None:
         super().__init__()
         if not isinstance(model, nn.Module):
@@ -80,6 +85,8 @@ class IgGMLightningModule(pl.LightningModule):
         self.debug_shapes = debug_shapes
         self._shape_printed = False
         self.ema = ModelEMA(self.model, ema_decay) if ema_decay is not None else None
+        self.loss_fn = IgGMPaperLoss(loss_cfg)
+        self.metric_fn = StructureMetrics(metric_cfg)
 
     def _assert_and_log_shapes(self, inputs: Dict[str, Any], outputs: Dict[str, Any]) -> None:
         # batch/residue/atom asserts
@@ -125,25 +132,12 @@ class IgGMLightningModule(pl.LightningModule):
         return inputs
 
     def _compute_loss(self, inputs: Dict[str, Any], outputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        # sequence CE (available from existing 1d logits)
-        logits_1d = outputs["1d"]  # N x L x C
-        seq_o = inputs["seq-o"]
-        aa_to_idx = {aa: i for i, aa in enumerate("ACDEFGHIKLMNPQRSTVWY")}
-        tgt_idx = torch.tensor(
-            [[aa_to_idx.get(aa, 0) for aa in seq] for seq in seq_o],
-            device=logits_1d.device,
-            dtype=torch.long,
-        )
-        seq_loss = F.cross_entropy(logits_1d.reshape(-1, logits_1d.size(-1)), tgt_idx.reshape(-1))
+        return self.loss_fn(inputs, outputs)
 
-        # structure MSE against x0 coords (masked)
-        pred_cord = outputs["3d"]["cord"][-1]
-        tgt_cord = inputs["cord-o"]
-        c_mask = inputs["cmsk-p"].unsqueeze(-1).to(pred_cord.dtype)
-        struct_loss = (((pred_cord - tgt_cord) ** 2) * c_mask).sum() / c_mask.sum().clamp_min(1.0)
-
-        loss = seq_loss + struct_loss
-        return {"loss": loss, "seq_loss": seq_loss, "struct_loss": struct_loss}
+    @staticmethod
+    def _decode_pred_seq(logits_1d: torch.Tensor) -> str:
+        token_ids = logits_1d.argmax(dim=1).detach().cpu().tolist()
+        return ''.join(RESD_NAMES_1C[i] for i in token_ids)
 
     def _shared_step(self, batch: Dict[str, Any], stage: str) -> torch.Tensor:
         idx_step = int(batch["idx_step"])
@@ -158,8 +152,23 @@ class IgGMLightningModule(pl.LightningModule):
             loss_dict = self._compute_loss(inputs, outputs)
 
         self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=(stage == "train"), on_epoch=True)
-        self.log(f"{stage}/seq_loss", loss_dict["seq_loss"], prog_bar=False, on_step=False, on_epoch=True)
-        self.log(f"{stage}/struct_loss", loss_dict["struct_loss"], prog_bar=False, on_step=False, on_epoch=True)
+        self.log(f"{stage}/loss_geo", loss_dict["loss_geo"], prog_bar=False, on_step=False, on_epoch=True)
+        self.log(f"{stage}/loss_frame", loss_dict["loss_frame"], prog_bar=False, on_step=False, on_epoch=True)
+        self.log(f"{stage}/loss_iframe", loss_dict["loss_iframe"], prog_bar=False, on_step=False, on_epoch=True)
+        self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=False, on_step=False, on_epoch=True)
+        self.log(f"{stage}/loss_srcv", loss_dict["loss_srcv"], prog_bar=False, on_step=False, on_epoch=True)
+
+        if stage in {"val", "test"}:
+            pred_cord = outputs["3d"]["cord"][-1][0]
+            tgt_cord = inputs["cord-o"]
+            if tgt_cord.ndim == 4:
+                tgt_cord = tgt_cord[0]
+            pred_seq = self._decode_pred_seq(outputs["1d"][0])
+            true_seq = batch.get("seq_true", inputs["seq-o"][0])
+            metric_dict = self.metric_fn(pred_cord, tgt_cord, pred_seq, true_seq, batch.get("cdr_h3_idx"))
+            for k, v in metric_dict.items():
+                self.log(f"{stage}/{k}", v, prog_bar=(k == "tm_score"), on_step=False, on_epoch=True)
+
         return loss_dict["loss"]
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
@@ -167,6 +176,9 @@ class IgGMLightningModule(pl.LightningModule):
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, stage="val")
+
+    def test_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
+        return self._shared_step(batch, stage="test")
 
     def configure_optimizers(self):
         cfg = self.optimizer_cfg

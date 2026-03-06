@@ -8,6 +8,9 @@ import csv
 import json
 import pickle
 import random
+import shutil
+import subprocess
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -70,6 +73,14 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Reserved switch for downloading data (not required when local raw data exists)",
     )
+    parser.add_argument("--build_splits", action="store_true", default=False, help="Build train/val/test prot_ids and train clusters")
+    parser.add_argument("--split_out_dir", type=Path, default=None, help="Output directory for split files")
+    parser.add_argument("--train_date_end", type=str, default="2022-12-31")
+    parser.add_argument("--val_date_start", type=str, default="2023-01-01")
+    parser.add_argument("--val_date_end", type=str, default="2023-06-30")
+    parser.add_argument("--test_date_start", type=str, default="2023-07-01")
+    parser.add_argument("--test_date_end", type=str, default="2023-12-30")
+    parser.add_argument("--cluster_identity", type=float, default=0.95)
     return parser.parse_args()
 
 
@@ -326,6 +337,157 @@ def summarize_sample(sample: Dict[str, object]) -> Dict[str, object]:
     return summary
 
 
+def _parse_date_safe(text: Optional[str]) -> Optional[datetime]:
+    if not text:
+        return None
+    value = str(text).strip()
+    fmts = ["%m/%d/%y", "%Y-%m-%d", "%m/%d/%Y"]
+    for fmt in fmts:
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _seq_identity(seq_a: str, seq_b: str) -> float:
+    if not seq_a or not seq_b:
+        return 0.0
+    n = min(len(seq_a), len(seq_b))
+    if n == 0:
+        return 0.0
+    matches = sum(1 for a, b in zip(seq_a[:n], seq_b[:n]) if a == b)
+    return matches / n
+
+
+def _greedy_cluster(ids: List[str], seqs: Dict[str, str], identity: float) -> List[List[str]]:
+    clusters: List[List[str]] = []
+    for prot_id in ids:
+        assigned = False
+        for cluster in clusters:
+            rep = cluster[0]
+            if _seq_identity(seqs.get(prot_id, ""), seqs.get(rep, "")) >= identity:
+                cluster.append(prot_id)
+                assigned = True
+                break
+        if not assigned:
+            clusters.append([prot_id])
+    return clusters
+
+
+def _cluster_with_cdhit(ids: List[str], seqs: Dict[str, str], split_dir: Path, identity: float) -> List[List[str]]:
+    cdhit = shutil.which("cd-hit")
+    if cdhit is None:
+        return _greedy_cluster(ids, seqs, identity)
+
+    fas = split_dir / "train_heavy.fasta"
+    out = split_dir / "train_heavy_cdhit.fasta"
+    clstr = Path(str(out) + ".clstr")
+    with fas.open("w", encoding="utf-8") as handle:
+        for prot_id in ids:
+            handle.write(f">{prot_id}\n{seqs.get(prot_id, '')}\n")
+
+    cmd = [cdhit, "-i", str(fas), "-o", str(out), "-c", f"{identity:.2f}", "-n", "5", "-d", "0"]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception:
+        return _greedy_cluster(ids, seqs, identity)
+
+    if not clstr.exists():
+        return _greedy_cluster(ids, seqs, identity)
+
+    clusters: List[List[str]] = []
+    curr: List[str] = []
+    for line in clstr.read_text(encoding="utf-8").splitlines():
+        if line.startswith(">Cluster"):
+            if curr:
+                clusters.append(curr)
+            curr = []
+            continue
+        if ">" in line:
+            token = line.split(">", 1)[1].split("...", 1)[0]
+            curr.append(token.strip())
+    if curr:
+        clusters.append(curr)
+    return clusters if clusters else _greedy_cluster(ids, seqs, identity)
+
+
+def build_paper_style_splits(entries: List[Dict[str, object]], args: argparse.Namespace, split_out_dir: Path) -> Dict[str, int]:
+    split_out_dir.mkdir(parents=True, exist_ok=True)
+    train_end = datetime.strptime(args.train_date_end, "%Y-%m-%d")
+    val_start = datetime.strptime(args.val_date_start, "%Y-%m-%d")
+    val_end = datetime.strptime(args.val_date_end, "%Y-%m-%d")
+    test_start = datetime.strptime(args.test_date_start, "%Y-%m-%d")
+    test_end = datetime.strptime(args.test_date_end, "%Y-%m-%d")
+
+    train_ids: List[str] = []
+    val_ids_raw: List[str] = []
+    test_ids_raw: List[str] = []
+    heavy_seq: Dict[str, str] = {}
+
+    for entry in entries:
+        row = entry.get("raw_row", {})
+        if not isinstance(row, dict):
+            continue
+        dt = _parse_date_safe(row.get("date"))
+        if dt is None:
+            continue
+        chain_ids = parse_chain_ids(entry)
+        heavy_chain = chain_ids.get("H")
+        light_chain = chain_ids.get("L")
+        ag_chain = chain_ids.get("A")
+        if not heavy_chain or not ag_chain:
+            continue
+        if light_chain in {"0", "", None}:
+            light_chain = None
+        parsed = parse_pdb_sequences(Path(str(entry["pdb_path"])))
+        if heavy_chain not in parsed:
+            continue
+        h_seq = "".join(aa for _, aa in parsed[heavy_chain])
+        if not h_seq:
+            continue
+        l_tok = light_chain if light_chain is not None else "NA"
+        prot_id = f"{str(entry['sample_id']).lower()}_{heavy_chain}_{l_tok}_{ag_chain}"
+        heavy_seq[prot_id] = h_seq
+        if dt <= train_end:
+            train_ids.append(prot_id)
+        elif val_start <= dt <= val_end:
+            val_ids_raw.append(prot_id)
+        elif test_start <= dt <= test_end:
+            test_ids_raw.append(prot_id)
+
+    train_ids = sorted(set(train_ids))
+    clusters = _cluster_with_cdhit(train_ids, heavy_seq, split_out_dir, args.cluster_identity)
+
+    train_path = split_out_dir / "train_prot_ids.txt"
+    train_path.write_text("\n".join(train_ids) + ("\n" if train_ids else ""), encoding="utf-8")
+
+    cluster_path = split_out_dir / "train_prot_cluster.txt"
+    with cluster_path.open("w", encoding="utf-8") as handle:
+        for idx, cluster in enumerate(clusters):
+            handle.write(f"cluster_{idx}\t" + " ".join(cluster) + "\n")
+
+    def _dedup(ids: List[str], train_ids_all: List[str]) -> List[str]:
+        out: List[str] = []
+        train_seq = [heavy_seq[x] for x in train_ids_all if x in heavy_seq]
+        for pid in sorted(set(ids)):
+            seq = heavy_seq.get(pid, "")
+            if not seq:
+                continue
+            if any(_seq_identity(seq, t) >= args.cluster_identity for t in train_seq):
+                continue
+            out.append(pid)
+        return out
+
+    val_ids = _dedup(val_ids_raw, train_ids)
+    test_ids = _dedup(test_ids_raw, train_ids)
+
+    (split_out_dir / "val_prot_ids.txt").write_text("\n".join(val_ids) + ("\n" if val_ids else ""), encoding="utf-8")
+    (split_out_dir / "test_prot_ids.txt").write_text("\n".join(test_ids) + ("\n" if test_ids else ""), encoding="utf-8")
+
+    return {"train": len(train_ids), "val": len(val_ids), "test": len(test_ids), "clusters": len(clusters)}
+
+
 def main() -> None:
     args = parse_args()
 
@@ -384,6 +546,12 @@ def main() -> None:
     }
     metadata_path = dataset_root / "metadata.json"
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if args.build_splits:
+        split_out_dir = args.split_out_dir or dataset_root / "split"
+        split_stat = build_paper_style_splits(entries, args, split_out_dir)
+        print(f"Split files saved to: {split_out_dir}")
+        print(json.dumps(split_stat, ensure_ascii=False, indent=2))
 
     first_summary = summarize_sample(samples[0])
     print(f"Sample count: {len(samples)}")
