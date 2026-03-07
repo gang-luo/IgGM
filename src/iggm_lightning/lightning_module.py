@@ -9,9 +9,13 @@ DesignModel forward implementation.
 
 from __future__ import annotations
 
+import pickle
+import random
+from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch import nn
@@ -21,6 +25,7 @@ try:
 except ImportError:  # pragma: no cover
     import pytorch_lightning as pl
 
+from IgGM.data.convert_to_example_format import convert_entry_to_sample
 from IgGM.model import DesignModel
 from IgGM.protein.prot_constants import RESD_NAMES_1C
 from .losses import IgGMLossConfig, IgGMPaperLoss
@@ -34,6 +39,25 @@ class OptimizerConfig:
     weight_decay: float = 1e-2
     betas: tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8
+
+
+@dataclass
+class StageTrainingConfig:
+    """Two-phase training controls aligned with paper-style training."""
+
+    stage1_epochs: int = 0
+    stage2_enable_seq_recovery: bool = True
+    stage2_mix_weights: Dict[str, int] | None = None
+
+    def __post_init__(self):
+        if self.stage2_mix_weights is None:
+            # default ratio: CDR-H3 : CDR-H1 : CDR-H2 : all-CDR = 4:2:2:2
+            self.stage2_mix_weights = {
+                "cdr_h3": 4,
+                "cdr_h1": 2,
+                "cdr_h2": 2,
+                "cdr_all": 2,
+            }
 
 
 class ModelEMA:
@@ -71,6 +95,8 @@ class IgGMLightningModule(pl.LightningModule):
         debug_shapes: bool = False,
         loss_cfg: Optional[IgGMLossConfig] = None,
         metric_cfg: Optional[MetricConfig] = None,
+        stage_cfg: Optional[StageTrainingConfig] = None,
+        lazy_cache_size: int = 128,
     ) -> None:
         super().__init__()
         if not isinstance(model, nn.Module):
@@ -87,16 +113,17 @@ class IgGMLightningModule(pl.LightningModule):
         self.ema = ModelEMA(self.model, ema_decay) if ema_decay is not None else None
         self.loss_fn = IgGMPaperLoss(loss_cfg)
         self.metric_fn = StructureMetrics(metric_cfg)
+        self.stage_cfg = stage_cfg or StageTrainingConfig()
+        self._cache_size = max(1, int(lazy_cache_size))
+        self._sample_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
 
     def _assert_and_log_shapes(self, inputs: Dict[str, Any], outputs: Dict[str, Any]) -> None:
-        # batch/residue/atom asserts
         cord_p = inputs["cord-p"]
         assert cord_p.ndim == 4 and cord_p.shape[-1] == 3, f"cord-p shape invalid: {cord_p.shape}"
         bsz, n_res, n_atom, _ = cord_p.shape
         assert inputs["cmsk-p"].shape == (bsz, n_res, n_atom), "cmsk-p shape mismatch"
         assert inputs["sfea-i"].shape[:2] == (bsz, n_res), "sfea-i batch/residue mismatch"
         assert inputs["pfea-i"].shape[:3] == (bsz, n_res, n_res), "pfea-i shape mismatch"
-        # time dimension assert (diffusion step vector)
         assert len(inputs["step"]) == bsz, "step length must match batch size"
 
         if "3d" in outputs and "cord" in outputs["3d"]:
@@ -114,8 +141,139 @@ class IgGMLightningModule(pl.LightningModule):
             )
             self._shape_printed = True
 
+    def _load_pt_record(self, sample_path: str) -> Dict[str, Any]:
+        if sample_path.endswith('.pt'):
+            return torch.load(sample_path, map_location='cpu')
+        with Path(sample_path).open('rb') as fp:
+            return pickle.load(fp)
+
+    def _move_to_device(self, obj: Any) -> Any:
+        if torch.is_tensor(obj):
+            return obj.to(self.device)
+        if isinstance(obj, dict):
+            return {k: self._move_to_device(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._move_to_device(v) for v in obj]
+        if isinstance(obj, tuple):
+            return tuple(self._move_to_device(v) for v in obj)
+        return obj
+
+    def _cache_put(self, key: str, value: Dict[str, Any]) -> None:
+        self._sample_cache[key] = value
+        self._sample_cache.move_to_end(key)
+        while len(self._sample_cache) > self._cache_size:
+            self._sample_cache.popitem(last=False)
+
+    def _resolve_sample_payload(self, batch: Dict[str, Any]) -> Dict[str, Any]:
+        sample_path = batch.get("sample_path")
+        processed_pdb_path = batch.get("processed_pdb_path")
+        prot_id = str(batch.get("prot_id", ""))
+        cache_key = sample_path or processed_pdb_path or prot_id
+        if cache_key in self._sample_cache:
+            self._sample_cache.move_to_end(cache_key)
+            return self._sample_cache[cache_key]
+
+        record: Dict[str, Any] = {}
+        if sample_path and Path(sample_path).exists():
+            record = self._load_pt_record(sample_path)
+
+        if not processed_pdb_path:
+            processed_pdb_path = record.get("processed_pdb_path")
+        if not processed_pdb_path:
+            raise RuntimeError(f"Missing processed PDB path for sample: {prot_id}")
+
+        seqs = record.get("sequences", {})
+        light_chain_id = "L" if isinstance(seqs, dict) and seqs.get("L") else None
+        if light_chain_id is None:
+            parts = prot_id.split("_")
+            if len(parts) >= 3 and parts[2].upper() != "NA":
+                light_chain_id = "L"
+        entry = {
+            "pdb_id": str(record.get("sample_id") or batch.get("pdb_id") or prot_id.split("_")[0]).lower(),
+            "heavy_chain_id": "H",
+            "light_chain_id": light_chain_id,
+            "antigen_chain_ids": ["A"],
+        }
+        converted = convert_entry_to_sample(entry, processed_pdb_path)
+        if converted is None:
+            raise RuntimeError(f"Failed to convert processed PDB sample: {processed_pdb_path}")
+
+        complex_data = converted["complex"]
+        payload = {
+            "seq_true": complex_data["seq"],
+            "prot_data_curr": {
+                "seq": complex_data["seq"],
+                "cord": complex_data["cord"],
+                "cmsk": complex_data["cmsk"],
+                "mask_design": complex_data["mask_design"],
+                "mask_ab": complex_data["mask_ab"],
+                "asym_id": complex_data["asym_id"],
+                "a-cord": complex_data["a-cord"],
+                "a-cmsk": complex_data["a-cmsk"],
+                "epitope": complex_data["epitope"],
+                "contact": None,
+            },
+            "cdr_sequences": (record.get("cdr_sequences") or {}),
+            "sequence_lengths": (record.get("sequence_lengths") or {}),
+        }
+        self._cache_put(cache_key, payload)
+        return payload
+
+    def _is_stage2(self) -> bool:
+        return self.current_epoch >= int(self.stage_cfg.stage1_epochs)
+
+    @staticmethod
+    def _cdr_mask_from_payload(payload: Dict[str, Any], mode: str) -> Optional[List[int]]:
+        cdr = payload.get("cdr_sequences") or {}
+        seq_lens = payload.get("sequence_lengths") or {}
+        h_len = int(seq_lens.get("H", 0))
+        l_len = int(seq_lens.get("L", 0))
+
+        def _offset_indices(keys: List[str], offset: int) -> List[int]:
+            out: List[int] = []
+            for key in keys:
+                for idx in cdr.get(key, []):
+                    ii = int(idx) - 1 + offset
+                    if ii >= offset:
+                        out.append(ii)
+            return out
+
+        h1 = _offset_indices(["cdr_H1"], 0)
+        h2 = _offset_indices(["cdr_H2"], 0)
+        h3 = _offset_indices(["cdr_H3"], 0)
+        l_all = _offset_indices(["cdr_L1", "cdr_L2", "cdr_L3"], h_len)
+
+        if mode == "cdr_h1":
+            return h1 or None
+        if mode == "cdr_h2":
+            return h2 or None
+        if mode == "cdr_h3":
+            return h3 or None
+        if mode == "cdr_all":
+            all_idx = sorted(set(h1 + h2 + h3 + l_all))
+            return all_idx or None
+        return None
+
+    def _apply_stage_mask(self, prot_data_curr: Dict[str, Any], payload: Dict[str, Any]) -> None:
+        if not self._is_stage2():
+            return
+        mix = self.stage_cfg.stage2_mix_weights or {}
+        keys = [k for k, w in mix.items() if int(w) > 0]
+        if not keys:
+            return
+        weights = [int(mix[k]) for k in keys]
+        mode = random.choices(keys, weights=weights, k=1)[0]
+        idxs = self._cdr_mask_from_payload(payload, mode)
+        if not idxs:
+            return
+        mask_design = torch.zeros_like(prot_data_curr["mask_design"])
+        valid = [i for i in idxs if 0 <= i < mask_design.shape[0]]
+        if not valid:
+            return
+        mask_design[valid] = 1
+        prot_data_curr["mask_design"] = mask_design
+
     def _build_inputs_cm(self, prot_data_curr: Dict[str, Any], idx_step: int) -> Dict[str, Any]:
-        # keep original perturb/schedule pipeline untouched
         prot_data_pert = self.diffuser.run(prot_data_curr, idx_step)
         inputs = DesignModel.featurize(self.plm_featurizer, prot_data_pert)
 
@@ -132,7 +290,13 @@ class IgGMLightningModule(pl.LightningModule):
         return inputs
 
     def _compute_loss(self, inputs: Dict[str, Any], outputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        return self.loss_fn(inputs, outputs)
+        use_seq = self._is_stage2() and bool(self.stage_cfg.stage2_enable_seq_recovery)
+        original = self.loss_fn.cfg.enable_seq_recovery
+        self.loss_fn.cfg.enable_seq_recovery = use_seq
+        try:
+            return self.loss_fn(inputs, outputs)
+        finally:
+            self.loss_fn.cfg.enable_seq_recovery = original
 
     @staticmethod
     def _decode_pred_seq(logits_1d: torch.Tensor) -> str:
@@ -141,7 +305,10 @@ class IgGMLightningModule(pl.LightningModule):
 
     def _shared_step(self, batch: Dict[str, Any], stage: str) -> torch.Tensor:
         idx_step = int(batch["idx_step"])
-        prot_data_curr = batch["prot_data_curr"]
+        payload = self._resolve_sample_payload(batch)
+        prot_data_curr = self._move_to_device(payload["prot_data_curr"])
+        self._apply_stage_mask(prot_data_curr, payload)
+
         inputs_addi = batch.get("inputs_addi")
         inputs = self._build_inputs_cm(prot_data_curr, idx_step)
 
@@ -164,8 +331,9 @@ class IgGMLightningModule(pl.LightningModule):
             if tgt_cord.ndim == 4:
                 tgt_cord = tgt_cord[0]
             pred_seq = self._decode_pred_seq(outputs["1d"][0])
-            true_seq = batch.get("seq_true", inputs["seq-o"][0])
-            metric_dict = self.metric_fn(pred_cord, tgt_cord, pred_seq, true_seq, batch.get("cdr_h3_idx"))
+            true_seq = payload.get("seq_true", inputs["seq-o"][0])
+            cdr_h3 = (payload.get("cdr_sequences") or {}).get("cdr_H3", [])
+            metric_dict = self.metric_fn(pred_cord, tgt_cord, pred_seq, true_seq, cdr_h3)
             for k, v in metric_dict.items():
                 self.log(f"{stage}/{k}", v, prog_bar=(k == "tm_score"), on_step=False, on_epoch=True)
 

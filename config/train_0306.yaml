@@ -1,13 +1,15 @@
 
 data:
-  metadata: data/sabdab_zip/processed/sabdab_debug20/metadata2.json
+  metadata: data/sabdab_zip/processed/sabdab_debug20/metadata.json
   pdb_dir: data/sabdab_zip/processed/pdb
+  samples_dir: data/sabdab_zip/processed/sabdab_debug20/samples
   train_ids: data/sabdab_zip/processed/sabdab_debug20/split/train_prot_ids.txt
   val_ids: data/sabdab_zip/processed/sabdab_debug20/split/val_prot_ids.txt
   test_ids: data/sabdab_zip/processed/sabdab_debug20/split/test_prot_ids.txt
   train_clusters: data/sabdab_zip/processed/sabdab_debug20/split/train_prot_cluster.txt
   batch_size: 2
   num_workers: 4
+  n_steps: 200
 
 
 model:
@@ -50,3 +52,12 @@ runtime:
   seed: 42
   resume: False
   run_test: true
+
+stage_training:
+  stage1_epochs: 3
+  stage2_enable_seq_recovery: true
+  mix_cdr_h3: 4
+  mix_cdr_h1: 2
+  mix_cdr_h2: 2
+  mix_cdr_all: 2
+  lazy_cache_size: 128
