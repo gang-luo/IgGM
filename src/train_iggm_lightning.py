@@ -41,12 +41,24 @@ from iggm_lightning import (
     MetricConfig,
     OptimizerConfig,
     ProcessedSabdabDataModule,
+    StageTrainingConfig,
 )
 
 
 class DotConfig:
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
+
+
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
 
 
 def _load_yaml_config(path: str | Path) -> Dict[str, Any]:
@@ -66,6 +78,7 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     trainer = defaults.get("trainer", {})
     wandb = defaults.get("wandb", {})
     runtime = defaults.get("runtime", {})
+    stage_training = defaults.get("stage_training", {})
 
     p = argparse.ArgumentParser(description="Train IgGM with PyTorch Lightning")
     p.add_argument("--config", default=defaults.get("config_path", "config/train_lightning.yaml"))
@@ -78,6 +91,8 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--train_clusters", default=data.get("train_clusters", ""))
     p.add_argument("--batch_size", type=int, default=int(data.get("batch_size", 1)))
     p.add_argument("--num_workers", type=int, default=int(data.get("num_workers", 0)))
+    p.add_argument("--samples_dir", default=data.get("samples_dir", ""))
+    p.add_argument("--n_steps", type=int, default=int(data.get("n_steps", 200)))
 
     p.add_argument("--ppi_ckpt", default=model.get("ppi_ckpt", ""))
     p.add_argument("--design_ckpt", default=model.get("design_ckpt", ""))
@@ -107,6 +122,14 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=int(runtime.get("seed", 42)))
     p.add_argument("--resume", action="store_true", default=bool(runtime.get("resume", False)))
     p.add_argument("--run_test", action="store_true", default=bool(runtime.get("run_test", False)))
+
+    p.add_argument("--stage1_epochs", type=int, default=int(stage_training.get("stage1_epochs", 0)))
+    p.add_argument("--stage2_enable_seq_recovery", type=_parse_bool, default=bool(stage_training.get("stage2_enable_seq_recovery", True)))
+    p.add_argument("--mix_cdr_h3", type=int, default=int(stage_training.get("mix_cdr_h3", 4)))
+    p.add_argument("--mix_cdr_h1", type=int, default=int(stage_training.get("mix_cdr_h1", 2)))
+    p.add_argument("--mix_cdr_h2", type=int, default=int(stage_training.get("mix_cdr_h2", 2)))
+    p.add_argument("--mix_cdr_all", type=int, default=int(stage_training.get("mix_cdr_all", 2)))
+    p.add_argument("--lazy_cache_size", type=int, default=int(stage_training.get("lazy_cache_size", 128)))
     return p
 
 
@@ -137,6 +160,9 @@ def main() -> None:
         val_ids_path=(args.val_ids or None),
         test_ids_path=(args.test_ids or None),
         train_cluster_path=(args.train_clusters or None),
+        samples_dir=(args.samples_dir or None),
+        n_steps=args.n_steps,
+        lazy_cache_size=args.lazy_cache_size,
     )
     dm.setup()
 
@@ -170,6 +196,16 @@ def main() -> None:
         grad_clip_val=args.grad_clip,
         loss_cfg=IgGMLossConfig(gamma=args.gamma, loss_viol_weight=args.loss_viol_weight),
         metric_cfg=MetricConfig(dockq_threshold=args.dockq_threshold),
+        stage_cfg=StageTrainingConfig(
+            stage1_epochs=args.stage1_epochs,
+            stage2_enable_seq_recovery=args.stage2_enable_seq_recovery,
+            stage2_mix_weights={
+                "cdr_h3": args.mix_cdr_h3,
+                "cdr_h1": args.mix_cdr_h1,
+                "cdr_h2": args.mix_cdr_h2,
+                "cdr_all": args.mix_cdr_all,
+            },
+        ),
     )
 
     ckpt_dir = out / "checkpoints"

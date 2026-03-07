@@ -9,9 +9,10 @@ DesignModel forward implementation.
 
 from __future__ import annotations
 
+import random
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch import nn
@@ -34,6 +35,25 @@ class OptimizerConfig:
     weight_decay: float = 1e-2
     betas: tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8
+
+
+@dataclass
+class StageTrainingConfig:
+    """Two-phase training controls aligned with paper-style training."""
+
+    stage1_epochs: int = 0
+    stage2_enable_seq_recovery: bool = True
+    stage2_mix_weights: Dict[str, int] | None = None
+
+    def __post_init__(self):
+        if self.stage2_mix_weights is None:
+            # default ratio: CDR-H3 : CDR-H1 : CDR-H2 : all-CDR = 4:2:2:2
+            self.stage2_mix_weights = {
+                "cdr_h3": 4,
+                "cdr_h1": 2,
+                "cdr_h2": 2,
+                "cdr_all": 2,
+            }
 
 
 class ModelEMA:
@@ -71,6 +91,7 @@ class IgGMLightningModule(pl.LightningModule):
         debug_shapes: bool = False,
         loss_cfg: Optional[IgGMLossConfig] = None,
         metric_cfg: Optional[MetricConfig] = None,
+        stage_cfg: Optional[StageTrainingConfig] = None,
     ) -> None:
         super().__init__()
         if not isinstance(model, nn.Module):
@@ -78,25 +99,27 @@ class IgGMLightningModule(pl.LightningModule):
         self.model = model
         self.plm_featurizer = plm_featurizer
         self.diffuser = diffuser
+        for param in self.plm_featurizer.parameters():
+            param.requires_grad = False
+        self.plm_featurizer.eval()
         self.optimizer_cfg = optimizer_cfg or OptimizerConfig()
         self.scheduler_cfg = scheduler_cfg or {}
         self.grad_clip_val = grad_clip_val
-        self.use_amp = use_amp
+        self.enable_amp = use_amp
         self.debug_shapes = debug_shapes
         self._shape_printed = False
         self.ema = ModelEMA(self.model, ema_decay) if ema_decay is not None else None
         self.loss_fn = IgGMPaperLoss(loss_cfg)
         self.metric_fn = StructureMetrics(metric_cfg)
+        self.stage_cfg = stage_cfg or StageTrainingConfig()
 
     def _assert_and_log_shapes(self, inputs: Dict[str, Any], outputs: Dict[str, Any]) -> None:
-        # batch/residue/atom asserts
         cord_p = inputs["cord-p"]
         assert cord_p.ndim == 4 and cord_p.shape[-1] == 3, f"cord-p shape invalid: {cord_p.shape}"
         bsz, n_res, n_atom, _ = cord_p.shape
         assert inputs["cmsk-p"].shape == (bsz, n_res, n_atom), "cmsk-p shape mismatch"
         assert inputs["sfea-i"].shape[:2] == (bsz, n_res), "sfea-i batch/residue mismatch"
         assert inputs["pfea-i"].shape[:3] == (bsz, n_res, n_res), "pfea-i shape mismatch"
-        # time dimension assert (diffusion step vector)
         assert len(inputs["step"]) == bsz, "step length must match batch size"
 
         if "3d" in outputs and "cord" in outputs["3d"]:
@@ -114,10 +137,75 @@ class IgGMLightningModule(pl.LightningModule):
             )
             self._shape_printed = True
 
+    def _move_to_device(self, obj: Any) -> Any:
+        if torch.is_tensor(obj):
+            return obj.to(self.device)
+        if isinstance(obj, dict):
+            return {k: self._move_to_device(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._move_to_device(v) for v in obj]
+        if isinstance(obj, tuple):
+            return tuple(self._move_to_device(v) for v in obj)
+        return obj
+
+    def _is_stage2(self) -> bool:
+        return self.current_epoch >= int(self.stage_cfg.stage1_epochs)
+
+    @staticmethod
+    def _cdr_mask_from_payload(payload: Dict[str, Any], mode: str) -> Optional[List[int]]:
+        cdr = payload.get("cdr_sequences") or {}
+        seq_lens = payload.get("sequence_lengths") or {}
+        h_len = int(seq_lens.get("H", 0))
+        l_len = int(seq_lens.get("L", 0))
+
+        def _offset_indices(keys: List[str], offset: int) -> List[int]:
+            out: List[int] = []
+            for key in keys:
+                for idx in cdr.get(key, []):
+                    ii = int(idx) - 1 + offset
+                    if ii >= offset:
+                        out.append(ii)
+            return out
+
+        h1 = _offset_indices(["cdr_H1"], 0)
+        h2 = _offset_indices(["cdr_H2"], 0)
+        h3 = _offset_indices(["cdr_H3"], 0)
+        l_all = _offset_indices(["cdr_L1", "cdr_L2", "cdr_L3"], h_len)
+
+        if mode == "cdr_h1":
+            return h1 or None
+        if mode == "cdr_h2":
+            return h2 or None
+        if mode == "cdr_h3":
+            return h3 or None
+        if mode == "cdr_all":
+            all_idx = sorted(set(h1 + h2 + h3 + l_all))
+            return all_idx or None
+        return None
+
+    def _apply_stage_mask(self, prot_data_curr: Dict[str, Any], payload: Dict[str, Any]) -> None:
+        if not self._is_stage2():
+            return
+        mix = self.stage_cfg.stage2_mix_weights or {}
+        keys = [k for k, w in mix.items() if int(w) > 0]
+        if not keys:
+            return
+        weights = [int(mix[k]) for k in keys]
+        mode = random.choices(keys, weights=weights, k=1)[0]
+        idxs = self._cdr_mask_from_payload(payload, mode)
+        if not idxs:
+            return
+        mask_design = torch.zeros_like(prot_data_curr["mask_design"])
+        valid = [i for i in idxs if 0 <= i < mask_design.shape[0]]
+        if not valid:
+            return
+        mask_design[valid] = 1
+        prot_data_curr["mask_design"] = mask_design
+
     def _build_inputs_cm(self, prot_data_curr: Dict[str, Any], idx_step: int) -> Dict[str, Any]:
-        # keep original perturb/schedule pipeline untouched
         prot_data_pert = self.diffuser.run(prot_data_curr, idx_step)
-        inputs = DesignModel.featurize(self.plm_featurizer, prot_data_pert)
+        with torch.no_grad():
+            inputs = DesignModel.featurize(self.plm_featurizer, prot_data_pert)
 
         if prot_data_curr["contact"] is None:
             ic_feat = torch.zeros_like(prot_data_curr["asym_id"])
@@ -132,20 +220,36 @@ class IgGMLightningModule(pl.LightningModule):
         return inputs
 
     def _compute_loss(self, inputs: Dict[str, Any], outputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        return self.loss_fn(inputs, outputs)
+        use_seq = self._is_stage2() and bool(self.stage_cfg.stage2_enable_seq_recovery)
+        original = self.loss_fn.cfg.enable_seq_recovery
+        self.loss_fn.cfg.enable_seq_recovery = use_seq
+        try:
+            return self.loss_fn(inputs, outputs)
+        finally:
+            self.loss_fn.cfg.enable_seq_recovery = original
 
     @staticmethod
     def _decode_pred_seq(logits_1d: torch.Tensor) -> str:
-        token_ids = logits_1d.argmax(dim=1).detach().cpu().tolist()
+        if logits_1d.ndim != 2:
+            raise ValueError(f"Unexpected sequence logit rank: {tuple(logits_1d.shape)}")
+        # Support both [L, C] and [C, L] layouts from different model checkpoints.
+        if logits_1d.shape[0] == len(RESD_NAMES_1C) and logits_1d.shape[1] != len(RESD_NAMES_1C):
+            logits_1d = logits_1d.transpose(0, 1)
+        token_ids = logits_1d.argmax(dim=-1).detach().cpu().tolist()
         return ''.join(RESD_NAMES_1C[i] for i in token_ids)
 
     def _shared_step(self, batch: Dict[str, Any], stage: str) -> torch.Tensor:
         idx_step = int(batch["idx_step"])
-        prot_data_curr = batch["prot_data_curr"]
+        payload = batch.get("payload")
+        if payload is None:
+            raise RuntimeError("Dataset must provide resolved `payload` for lazy loading.")
+        prot_data_curr = self._move_to_device(payload["prot_data_curr"])
+        self._apply_stage_mask(prot_data_curr, payload)
+
         inputs_addi = batch.get("inputs_addi")
         inputs = self._build_inputs_cm(prot_data_curr, idx_step)
 
-        amp_ctx = torch.autocast(device_type=self.device.type, enabled=self.use_amp) if self.device.type in ("cuda", "cpu") else nullcontext()
+        amp_ctx = torch.autocast(device_type=self.device.type, enabled=self.enable_amp) if self.device.type in ("cuda", "cpu") else nullcontext()
         with amp_ctx:
             outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
             self._assert_and_log_shapes(inputs, outputs)
@@ -164,8 +268,9 @@ class IgGMLightningModule(pl.LightningModule):
             if tgt_cord.ndim == 4:
                 tgt_cord = tgt_cord[0]
             pred_seq = self._decode_pred_seq(outputs["1d"][0])
-            true_seq = batch.get("seq_true", inputs["seq-o"][0])
-            metric_dict = self.metric_fn(pred_cord, tgt_cord, pred_seq, true_seq, batch.get("cdr_h3_idx"))
+            true_seq = payload.get("seq_true", inputs["seq-o"][0])
+            cdr_h3 = (payload.get("cdr_sequences") or {}).get("cdr_H3", [])
+            metric_dict = self.metric_fn(pred_cord, tgt_cord, pred_seq, true_seq, cdr_h3)
             for k, v in metric_dict.items():
                 self.log(f"{stage}/{k}", v, prog_bar=(k == "tm_score"), on_step=False, on_epoch=True)
 
@@ -179,6 +284,12 @@ class IgGMLightningModule(pl.LightningModule):
 
     def test_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, stage="test")
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        # Keep PLM featurizer frozen in eval mode while DesignModel trains.
+        self.plm_featurizer.eval()
+        return self
 
     def configure_optimizers(self):
         cfg = self.optimizer_cfg

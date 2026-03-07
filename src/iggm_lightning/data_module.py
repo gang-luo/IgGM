@@ -5,11 +5,14 @@
 from __future__ import annotations
 
 import json
+import pickle
 import random
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
+import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
 
 from IgGM.data.convert_to_example_format import convert_entry_to_sample
@@ -25,33 +28,94 @@ class SplitConfig:
 
 
 class _ProteinSampleDataset(Dataset):
-    def __init__(self, items: List[Dict[str, object]], n_steps: int = 200):
+    """Lazy dataset that resolves a sample payload only when indexed."""
+
+    def __init__(self, items: List[Dict[str, object]], n_steps: int = 200, cache_size: int = 128):
         self.items = items
         self.n_steps = n_steps
+        self._cache_size = max(1, int(cache_size))
+        self._sample_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
 
     def __len__(self):
         return len(self.items)
 
+    @staticmethod
+    def _load_pt_record(sample_path: str) -> Dict[str, Any]:
+        if sample_path.endswith(".pt"):
+            return torch.load(sample_path, map_location="cpu")
+        with Path(sample_path).open("rb") as fp:
+            return pickle.load(fp)
+
+    def _cache_put(self, key: str, value: Dict[str, Any]) -> None:
+        self._sample_cache[key] = value
+        self._sample_cache.move_to_end(key)
+        while len(self._sample_cache) > self._cache_size:
+            self._sample_cache.popitem(last=False)
+
+    def _resolve_sample_payload(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        sample_path = item.get("sample_path")
+        processed_pdb_path = item.get("processed_pdb_path")
+        prot_id = str(item.get("prot_id", ""))
+        cache_key = str(sample_path or processed_pdb_path or prot_id)
+        if cache_key in self._sample_cache:
+            self._sample_cache.move_to_end(cache_key)
+            return self._sample_cache[cache_key]
+
+        record: Dict[str, Any] = {}
+        if sample_path and Path(str(sample_path)).exists():
+            record = self._load_pt_record(str(sample_path))
+
+        if not processed_pdb_path:
+            processed_pdb_path = record.get("processed_pdb_path")
+        if not processed_pdb_path:
+            raise RuntimeError(f"Missing processed PDB path for sample: {prot_id}")
+
+        seqs = record.get("sequences", {})
+        light_chain_id = "L" if isinstance(seqs, dict) and seqs.get("L") else None
+        if light_chain_id is None:
+            parts = prot_id.split("_")
+            if len(parts) >= 3 and parts[2].upper() != "NA":
+                light_chain_id = "L"
+
+        entry = {
+            "pdb_id": str(record.get("sample_id") or item.get("pdb_id") or prot_id.split("_")[0]).lower(),
+            "heavy_chain_id": "H",
+            "light_chain_id": light_chain_id,
+            "antigen_chain_ids": ["A"],
+        }
+        converted = convert_entry_to_sample(entry, str(processed_pdb_path))
+        if converted is None:
+            raise RuntimeError(f"Failed to convert processed PDB sample: {processed_pdb_path}")
+
+        complex_data = converted["complex"]
+        payload = {
+            "seq_true": complex_data["seq"],
+            "prot_data_curr": {
+                "seq": complex_data["seq"],
+                "cord": complex_data["cord"],
+                "cmsk": complex_data["cmsk"],
+                "mask_design": complex_data["mask_design"],
+                "mask_ab": complex_data["mask_ab"],
+                "asym_id": complex_data["asym_id"],
+                "a-cord": complex_data["a-cord"],
+                "a-cmsk": complex_data["a-cmsk"],
+                "epitope": complex_data["epitope"],
+                "contact": None,
+            },
+            "cdr_sequences": (record.get("cdr_sequences") or {}),
+            "sequence_lengths": (record.get("sequence_lengths") or {}),
+        }
+        self._cache_put(cache_key, payload)
+        return payload
+
     def __getitem__(self, index):
         item = self.items[index]
         step = random.randint(1, self.n_steps)
+        payload = self._resolve_sample_payload(item)
         return {
             "idx_step": step,
             "prot_id": item["prot_id"],
-            "seq_true": item["seq"],
-            "cdr_h3_idx": item.get("cdr_h3_idx", []),
-            "prot_data_curr": {
-                "seq": item["seq"],
-                "cord": item["cord"],
-                "cmsk": item["cmsk"],
-                "mask_design": item["mask_design"],
-                "mask_ab": item["mask_ab"],
-                "asym_id": item["asym_id"],
-                "a-cord": item["a-cord"],
-                "a-cmsk": item["a-cmsk"],
-                "epitope": item["epitope"],
-                "contact": item["contact"],
-            },
+            "payload": payload,
             "inputs_addi": None,
             "chunk_size": None,
         }
@@ -90,10 +154,21 @@ def _load_id_set(path: Optional[str | Path]) -> Optional[set[str]]:
     return ids if ids else None
 
 
-def _build_prot_id(entry: Dict[str, object], sample: Dict[str, object]) -> str:
-    chain_ids = sample["base"]["chain_ids"]
-    pdb_id = str(entry.get("pdb_id", "")).lower()
-    return f"{pdb_id}_{'_'.join(chain_ids)}"
+def _parse_prot_id(prot_id: str) -> Optional[Dict[str, object]]:
+    """Parse split `prot_id` string to a minimal metadata-like entry."""
+    parts = prot_id.strip().split("_")
+    if len(parts) != 4:
+        return None
+    pdb_id, heavy_id, light_id, antigen_id = parts
+    light = None if light_id.upper() == "NA" else light_id
+    return {
+        "pdb_id": pdb_id.lower(),
+        "heavy_chain_id": heavy_id,
+        "light_chain_id": light,
+        "antigen_chain_ids": [antigen_id],
+        "prot_id": prot_id,
+        "file_stem": prot_id,
+    }
 
 
 class ProcessedSabdabDataModule:
@@ -108,6 +183,9 @@ class ProcessedSabdabDataModule:
         val_ids_path: Optional[str | Path] = None,
         test_ids_path: Optional[str | Path] = None,
         train_cluster_path: Optional[str | Path] = None,
+        samples_dir: Optional[str | Path] = None,
+        n_steps: int = 200,
+        lazy_cache_size: int = 128,
     ):
         self.metadata_path = Path(metadata_path)
         self.pdb_dir = Path(pdb_dir)
@@ -118,16 +196,55 @@ class ProcessedSabdabDataModule:
         self.val_ids = _load_id_set(val_ids_path)
         self.test_ids = _load_id_set(test_ids_path)
         self.train_cluster_path = Path(train_cluster_path) if train_cluster_path else None
+        self.samples_dir = Path(samples_dir) if samples_dir else None
+        self.n_steps = n_steps
+        self.lazy_cache_size = lazy_cache_size
         self.train_ds: Optional[Dataset] = None
         self.val_ds: Optional[Dataset] = None
         self.test_ds: Optional[Dataset] = None
         self._train_sampler: Optional[Sampler[int]] = None
+
+    def _resolve_samples_dir(self, meta: Dict[str, object]) -> Optional[Path]:
+        if self.samples_dir is not None:
+            return self.samples_dir
+        sample_dir = meta.get("samples_dir")
+        if sample_dir:
+            p = Path(str(sample_dir))
+            if p.exists():
+                return p
+            p2 = self.metadata_path.parents[2] / p.relative_to("data") if str(p).startswith("data/") else None
+            if p2 is not None and p2.exists():
+                return p2
+        candidate = self.metadata_path.parent / "samples"
+        return candidate if candidate.exists() else None
 
     def _load_entries(self) -> List[Dict[str, object]]:
         meta = json.loads(self.metadata_path.read_text(encoding="utf-8"))
         entries = meta.get("entries", [])
         if entries:
             return entries
+
+        split_ids: set[str] = set()
+        for id_set in (self.train_ids, self.val_ids, self.test_ids):
+            if id_set:
+                split_ids.update(id_set)
+        if split_ids:
+            parsed = [_parse_prot_id(x) for x in sorted(split_ids)]
+            return [x for x in parsed if x is not None]
+
+        sample_ids = meta.get("sample_ids", [])
+        if sample_ids:
+            stems = {Path(p).stem for p in self.pdb_dir.glob("*.pdb")}
+            parsed = []
+            for stem in sorted(stems):
+                if not any(stem == sid or stem.startswith(f"{sid}_") for sid in sample_ids):
+                    continue
+                item = _parse_prot_id(stem)
+                if item is not None:
+                    parsed.append(item)
+            if parsed:
+                return parsed
+
         tsv_path = self.metadata_path.parents[2] / "metadata" / "sabdab.tsv"
         if tsv_path.exists():
             entries = load_sabdab_metadata(tsv_path)
@@ -136,36 +253,37 @@ class ProcessedSabdabDataModule:
                 entries = [e for e in entries if e.get("pdb_id") in sample_ids]
         return entries
 
-    def _iter_items(self, entries: Iterable[Dict[str, object]]) -> List[Dict[str, object]]:
+    def _build_items(self, entries: Iterable[Dict[str, object]], samples_dir: Optional[Path]) -> List[Dict[str, object]]:
         items = []
+        sample_index: Dict[str, Path] = {}
+        if samples_dir is not None and samples_dir.exists():
+            sample_index = {p.stem: p for p in samples_dir.glob("*.pt")}
+
         for entry in entries:
-            if str(entry.get("light_chain_id", "")).strip() in {"0", "None", "none", ""}:
-                entry = {**entry, "light_chain_id": None}
-            pdb_id = entry.get("pdb_id")
-            if not pdb_id:
+            prot_id = str(entry.get("prot_id") or "").strip()
+            if not prot_id:
+                pdb_id = str(entry.get("pdb_id", "")).lower()
+                heavy = str(entry.get("heavy_chain_id") or "").strip()
+                light = str(entry.get("light_chain_id") or "NA").strip() or "NA"
+                if light in {"0", "None", "none"}:
+                    light = "NA"
+                ag_list = entry.get("antigen_chain_ids") or []
+                ag = str(ag_list[0]).strip() if ag_list else ""
+                if not pdb_id or not heavy or not ag:
+                    continue
+                prot_id = f"{pdb_id}_{heavy}_{light}_{ag}"
+
+            sample_path = sample_index.get(prot_id)
+            processed_pdb_path = self.pdb_dir / f"{prot_id}.pdb"
+            if not processed_pdb_path.exists():
                 continue
-            pdb_path = self.pdb_dir / f"{pdb_id}.pdb"
-            if not pdb_path.exists():
-                continue
-            sample = convert_entry_to_sample(entry, pdb_path)
-            if sample is None:
-                continue
-            prot_id = _build_prot_id(entry, sample)
-            c = sample["complex"]
+
             items.append(
                 {
                     "prot_id": prot_id,
-                    "seq": c["seq"],
-                    "cord": c["cord"],
-                    "cmsk": c["cmsk"],
-                    "mask_design": c["mask_design"],
-                    "mask_ab": c["mask_ab"],
-                    "asym_id": c["asym_id"],
-                    "a-cord": c["a-cord"],
-                    "a-cmsk": c["a-cmsk"],
-                    "epitope": c["epitope"],
-                    "contact": None,
-                    "cdr_h3_idx": sample.get("cdr_sequences", {}).get("cdr_H3", []),
+                    "pdb_id": str(entry.get("pdb_id", "")).lower(),
+                    "sample_path": str(sample_path) if sample_path is not None else None,
+                    "processed_pdb_path": str(processed_pdb_path),
                 }
             )
         return items
@@ -187,8 +305,10 @@ class ProcessedSabdabDataModule:
         return ClusterEpochSampler(clusters, seed=self.split_cfg.seed) if clusters else None
 
     def setup(self, stage: Optional[str] = None):
+        meta = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+        samples_dir = self._resolve_samples_dir(meta)
         entries = self._load_entries()
-        items = self._iter_items(entries)
+        items = self._build_items(entries, samples_dir)
         if not items:
             raise RuntimeError(f"No valid samples found from {self.metadata_path} and {self.pdb_dir}")
 
@@ -206,9 +326,9 @@ class ProcessedSabdabDataModule:
             val_items = items[n_train:n_train + n_val]
             test_items = items[n_train + n_val:] if (n_train + n_val) < n else items[-1:]
 
-        self.train_ds = _ProteinSampleDataset(train_items)
-        self.val_ds = _ProteinSampleDataset(val_items if val_items else train_items[:1])
-        self.test_ds = _ProteinSampleDataset(test_items if test_items else train_items[:1])
+        self.train_ds = _ProteinSampleDataset(train_items, n_steps=self.n_steps, cache_size=self.lazy_cache_size)
+        self.val_ds = _ProteinSampleDataset(val_items if val_items else train_items[:1], n_steps=self.n_steps, cache_size=self.lazy_cache_size)
+        self.test_ds = _ProteinSampleDataset(test_items if test_items else train_items[:1], n_steps=self.n_steps, cache_size=self.lazy_cache_size)
         self._train_sampler = self._build_sampler_from_cluster_file(train_items)
 
     def train_dataloader(self):
