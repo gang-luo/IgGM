@@ -85,6 +85,7 @@ python data/prepare_data.py \
 - Lightning summary 中只显示 `nn.Module` 子模块，因此会显示 `model` 与 `plm_featurizer`；
 - `diffuser` 是采样/扰动调度对象，不是可训练 `nn.Module`，所以不会出现在参数表中；
 - 当前训练已默认冻结 `plm_featurizer`（`requires_grad=False` 且固定 `eval` 模式），仅训练 `DesignModel`。
+- `L_srcv` 实现同时兼容 `outputs["1d"]` 的两种布局（`[B,L,C]` 与 `[B,C,L]`），并会对 `seq-o/pmsk` 做批维与长度归一化，避免常见的 `(L,1)` vs `(L,)` 形状报错。
 
 ### 3.1 `prepare_data_fromzip.py` 产物在训练中的作用
 

@@ -45,22 +45,82 @@ class IgGMPaperLoss:
             "loss_srcv": srcv,
         }
 
-    def _loss_srcv(self, inputs, outputs):
-        logits = outputs["1d"]
+    def _normalize_logits_1d(self, logits: torch.Tensor) -> torch.Tensor:
+        """Normalize sequence logits into shape [B, L, C]."""
+        if logits.ndim == 2:
+            logits = logits.unsqueeze(0)
         if logits.ndim != 3:
             raise ValueError(f"Unexpected logits shape for sequence recovery: {tuple(logits.shape)}")
+        if logits.shape[-1] == len(self._aa_to_idx):
+            return logits
+        if logits.shape[1] == len(self._aa_to_idx):
+            return logits.transpose(1, 2)
+        raise ValueError(f"Cannot infer class dimension from logits shape: {tuple(logits.shape)}")
 
-        seq_o = inputs["seq-o"]
-        tgt = torch.tensor([[self._aa_to_idx.get(aa, 0) for aa in seq] for seq in seq_o], device=logits.device)
-        mask = inputs["pmsk"].to(torch.bool)
+    @staticmethod
+    def _normalize_mask(mask: torch.Tensor, batch_size: int, seq_len: int) -> torch.Tensor:
+        """Normalize perturbation mask into shape [B, L]."""
+        mask = mask.to(torch.bool)
+        while mask.ndim > 2:
+            mask = mask.squeeze(-1)
+        if mask.ndim == 1:
+            if mask.shape[0] == seq_len:
+                mask = mask.unsqueeze(0)
+            elif batch_size == 1:
+                mask = mask.view(1, -1)
+        if mask.ndim != 2:
+            raise ValueError(f"Unexpected mask shape: {tuple(mask.shape)}")
 
-        if tgt.shape != mask.shape:
-            raise ValueError(f"Target/mask shape mismatch: tgt={tuple(tgt.shape)}, mask={tuple(mask.shape)}")
-        if logits.shape[:2] != mask.shape:
-            raise ValueError(f"Logits/mask shape mismatch: logits={tuple(logits.shape)}, mask={tuple(mask.shape)}")
+        if mask.shape == (seq_len, 1):
+            mask = mask.transpose(0, 1)
+        if mask.shape[0] == 1 and batch_size > 1:
+            mask = mask.expand(batch_size, mask.shape[1])
 
-        flat_logits = logits.reshape(-1, logits.shape[-1])[mask.reshape(-1)]
-        flat_tgt = tgt.reshape(-1)[mask.reshape(-1)]
+        if mask.shape[0] != batch_size or mask.shape[1] != seq_len:
+            raise ValueError(
+                f"Mask shape mismatch after normalization: mask={tuple(mask.shape)}, expected=({batch_size}, {seq_len})"
+            )
+        return mask
+
+    def _build_seq_targets(self, seq_o, batch_size: int, seq_len: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build AA index targets and valid-token mask with shape [B, L]."""
+        if isinstance(seq_o, str):
+            seq_batch = [seq_o]
+        elif isinstance(seq_o, (list, tuple)) and seq_o and all(isinstance(x, str) and len(x) == 1 for x in seq_o):
+            # Common edge case in this repo: a single sequence represented as list[char].
+            seq_batch = ["".join(seq_o)]
+        elif isinstance(seq_o, (list, tuple)):
+            seq_batch = list(seq_o)
+        else:
+            raise ValueError(f"Unsupported sequence container type for `seq-o`: {type(seq_o)}")
+
+        if len(seq_batch) == 1 and batch_size > 1:
+            seq_batch = seq_batch * batch_size
+        if len(seq_batch) != batch_size:
+            raise ValueError(f"Sequence batch size mismatch: got {len(seq_batch)}, expected {batch_size}")
+
+        tgt = torch.zeros((batch_size, seq_len), dtype=torch.long, device=device)
+        valid = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=device)
+        for i, seq in enumerate(seq_batch):
+            if isinstance(seq, (list, tuple)):
+                seq = "".join(str(x) for x in seq)
+            seq = str(seq)
+            n = min(len(seq), seq_len)
+            if n == 0:
+                continue
+            tgt[i, :n] = torch.tensor([self._aa_to_idx.get(aa, 0) for aa in seq[:n]], device=device)
+            valid[i, :n] = True
+        return tgt, valid
+
+    def _loss_srcv(self, inputs, outputs):
+        logits = self._normalize_logits_1d(outputs["1d"])  # [B, L, C]
+        batch_size, seq_len, _ = logits.shape
+        mask = self._normalize_mask(inputs["pmsk"], batch_size=batch_size, seq_len=seq_len)
+        tgt, valid_seq = self._build_seq_targets(inputs["seq-o"], batch_size=batch_size, seq_len=seq_len, device=logits.device)
+        eff_mask = mask & valid_seq
+
+        flat_logits = logits.reshape(-1, logits.shape[-1])[eff_mask.reshape(-1)]
+        flat_tgt = tgt.reshape(-1)[eff_mask.reshape(-1)]
         if flat_logits.numel() == 0:
             return logits.new_zeros(())
         return F.cross_entropy(flat_logits, flat_tgt)
