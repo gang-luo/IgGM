@@ -81,6 +81,11 @@ python data/prepare_data.py \
 - Dataset 内置 LRU 缓存（`lazy_cache_size`），避免重复解析同一样本；
 - `IgGMLightningModule` 只消费 `payload`、执行扩散/前向/损失，保持“数据解析”和“训练逻辑”解耦。
 
+补充说明（模型参数统计）：
+- Lightning summary 中只显示 `nn.Module` 子模块，因此会显示 `model` 与 `plm_featurizer`；
+- `diffuser` 是采样/扰动调度对象，不是可训练 `nn.Module`，所以不会出现在参数表中；
+- 当前训练已默认冻结 `plm_featurizer`（`requires_grad=False` 且固定 `eval` 模式），仅训练 `DesignModel`。
+
 ### 3.1 `prepare_data_fromzip.py` 产物在训练中的作用
 
 你列出的几个目录里，当前 Lightning 训练链路**真正强依赖**的是：

@@ -46,12 +46,21 @@ class IgGMPaperLoss:
         }
 
     def _loss_srcv(self, inputs, outputs):
-        logits = outputs["1d"].permute(0, 2, 1)
+        logits = outputs["1d"]
+        if logits.ndim != 3:
+            raise ValueError(f"Unexpected logits shape for sequence recovery: {tuple(logits.shape)}")
+
         seq_o = inputs["seq-o"]
         tgt = torch.tensor([[self._aa_to_idx.get(aa, 0) for aa in seq] for seq in seq_o], device=logits.device)
         mask = inputs["pmsk"].to(torch.bool)
-        flat_logits = logits[mask]
-        flat_tgt = tgt[mask]
+
+        if tgt.shape != mask.shape:
+            raise ValueError(f"Target/mask shape mismatch: tgt={tuple(tgt.shape)}, mask={tuple(mask.shape)}")
+        if logits.shape[:2] != mask.shape:
+            raise ValueError(f"Logits/mask shape mismatch: logits={tuple(logits.shape)}, mask={tuple(mask.shape)}")
+
+        flat_logits = logits.reshape(-1, logits.shape[-1])[mask.reshape(-1)]
+        flat_tgt = tgt.reshape(-1)[mask.reshape(-1)]
         if flat_logits.numel() == 0:
             return logits.new_zeros(())
         return F.cross_entropy(flat_logits, flat_tgt)

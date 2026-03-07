@@ -99,10 +99,13 @@ class IgGMLightningModule(pl.LightningModule):
         self.model = model
         self.plm_featurizer = plm_featurizer
         self.diffuser = diffuser
+        for param in self.plm_featurizer.parameters():
+            param.requires_grad = False
+        self.plm_featurizer.eval()
         self.optimizer_cfg = optimizer_cfg or OptimizerConfig()
         self.scheduler_cfg = scheduler_cfg or {}
         self.grad_clip_val = grad_clip_val
-        self.use_amp = use_amp
+        self.enable_amp = use_amp
         self.debug_shapes = debug_shapes
         self._shape_printed = False
         self.ema = ModelEMA(self.model, ema_decay) if ema_decay is not None else None
@@ -201,7 +204,8 @@ class IgGMLightningModule(pl.LightningModule):
 
     def _build_inputs_cm(self, prot_data_curr: Dict[str, Any], idx_step: int) -> Dict[str, Any]:
         prot_data_pert = self.diffuser.run(prot_data_curr, idx_step)
-        inputs = DesignModel.featurize(self.plm_featurizer, prot_data_pert)
+        with torch.no_grad():
+            inputs = DesignModel.featurize(self.plm_featurizer, prot_data_pert)
 
         if prot_data_curr["contact"] is None:
             ic_feat = torch.zeros_like(prot_data_curr["asym_id"])
@@ -240,7 +244,7 @@ class IgGMLightningModule(pl.LightningModule):
         inputs_addi = batch.get("inputs_addi")
         inputs = self._build_inputs_cm(prot_data_curr, idx_step)
 
-        amp_ctx = torch.autocast(device_type=self.device.type, enabled=self.use_amp) if self.device.type in ("cuda", "cpu") else nullcontext()
+        amp_ctx = torch.autocast(device_type=self.device.type, enabled=self.enable_amp) if self.device.type in ("cuda", "cpu") else nullcontext()
         with amp_ctx:
             outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
             self._assert_and_log_shapes(inputs, outputs)
@@ -275,6 +279,12 @@ class IgGMLightningModule(pl.LightningModule):
 
     def test_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, stage="test")
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        # Keep PLM featurizer frozen in eval mode while DesignModel trains.
+        self.plm_featurizer.eval()
+        return self
 
     def configure_optimizers(self):
         cfg = self.optimizer_cfg
