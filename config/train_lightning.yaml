@@ -12,9 +12,12 @@ data:
   num_workers: 0
 
 model:
-  ppi_ckpt: /path/to/iggm_ppi.pt
-  design_ckpt: /path/to/iggm_design.pt
-  igso3_buffer: /path/to/igso3_buffer.pkl
+  # ppi_ckpt留空时，将自动下载并使用官方PPI预训练权重
+  ppi_ckpt: ""
+  # design_ckpt可选：留空表示从随机初始化开始训练DesignModel
+  design_ckpt: ""
+  # 可选SO3 buffer，加速扩散旋转采样；留空则运行时动态计算
+  igso3_buffer: ""
 
 optimizer:
   lr: 1.0e-4

@@ -1,5 +1,16 @@
 # IgGM Lightning 训练与测试说明
 
+
+## 0. 关于 `ppi_ckpt / design_ckpt / igso3_buffer` 的说明
+
+- `ppi_ckpt`：建议使用预训练权重；若留空，训练脚本会自动下载并使用官方 `esm_ppi_650m_ab`。
+- `design_ckpt`：**可选**；若留空，将从随机初始化的 `DesignModel` 开始训练（适合你说的“主干部分需要训练和优化”场景）。
+- `igso3_buffer`：仅用于加速 SO(3) 采样，**可选**。
+
+因此，不再强制你必须提供这三个路径。
+
+---
+
 ## 1. 配置管理（YAML）
 
 统一配置文件：`config/train_lightning.yaml`。
@@ -97,16 +108,18 @@ checkpoint 选择改为：
 
 ## 5. 训练 / 验证 / 测试
 
-1）先在 YAML 中填写：
-- `model.ppi_ckpt`
-- `model.design_ckpt`
-- （可选）`model.igso3_buffer`
-- （可选）`wandb.api_key`
+1）按需在 YAML 中填写：
+- `model.ppi_ckpt`（可空，空则自动下载官方PPI预训练）
+- `model.design_ckpt`（可空，空则随机初始化DesignModel）
+- `model.igso3_buffer`（可选）
+- `wandb.api_key`（可选）
 
 2）启动：
 
 ```bash
 python scripts/train_iggm_lightning.py --config config/train_lightning.yaml
+
+python src/train_iggm_lightning.py --config config/train_0306.yaml
 ```
 
 3）可通过 CLI 临时覆盖：

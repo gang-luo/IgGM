@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (c) 2024, Tencent Inc. All rights reserved.
 """Main entrypoint for IgGM Lightning training/validation/testing."""
 
 from __future__ import annotations
@@ -25,13 +22,18 @@ except ImportError:  # pragma: no cover
     from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
     from pytorch_lightning.loggers import CSVLogger, WandbLogger
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC_DIR = ROOT / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+# ROOT = Path(__file__).resolve().parents[1]
+# SRC_DIR = ROOT / "src"
+# if str(SRC_DIR) not in sys.path:
+#     sys.path.insert(0, str(SRC_DIR))
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+    
+from IgGM.model import DesignModel, esm_ppi_650m_ab
 from IgGM.model.arch.core.diffuser import Diffuser
-from IgGM.model.factory import build_iggm_modules
+from IgGM.model.factory import build_design_model_module, build_ppi_featurizer_module
 from IgGM.utils import IGSO3Buffer
 from iggm_lightning import (
     IgGMLightningModule,
@@ -116,8 +118,6 @@ def _parse_args() -> argparse.Namespace:
     defaults["config_path"] = boot_args.config
     parser = _parser_with_defaults(defaults)
     args = parser.parse_args()
-    if not args.ppi_ckpt or not args.design_ckpt:
-        raise ValueError("Both --ppi_ckpt and --design_ckpt are required (via YAML or CLI)")
     return args
 
 
@@ -141,11 +141,20 @@ def main() -> None:
     dm.setup()
 
     model_cfg = DotConfig(c_s=None, c_p=None)
-    plm_featurizer, design_model, _, _ = build_iggm_modules(
-        ppi_path=args.ppi_ckpt,
-        design_path=args.design_ckpt,
-        config=model_cfg,
-    )
+
+    ppi_ckpt_path = args.ppi_ckpt or esm_ppi_650m_ab()
+    plm_featurizer = build_ppi_featurizer_module(ppi_ckpt_path)
+    c_s = getattr(plm_featurizer, "c_s", None)
+    c_p = getattr(plm_featurizer, "c_z", None)
+    if c_s is not None:
+        model_cfg.c_s = c_s
+    if c_p is not None:
+        model_cfg.c_p = c_p
+
+    if args.design_ckpt:
+        design_model = build_design_model_module(args.design_ckpt, model_cfg)
+    else:
+        design_model = DesignModel(n_dims_sfea_init=model_cfg.c_s, n_dims_pfea_init=model_cfg.c_p)
 
     igso3 = None
     if args.igso3_buffer:

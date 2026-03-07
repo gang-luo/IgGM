@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import zipfile
+from functools import lru_cache
 import argparse
 import csv
 import json
@@ -14,6 +16,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+from tqdm import tqdm
 
 try:
     import torch
@@ -114,7 +117,7 @@ def find_sabdab_metadata(raw_root: Path) -> Optional[Path]:
 
 def detect_mode(raw_root: Path) -> str:
     metadata = find_sabdab_metadata(raw_root)
-    has_structure = any(raw_root.rglob("*.pdb"))
+    has_structure = any(raw_root.rglob("*.pdb")) or (find_structure_zip(raw_root) is not None)
     if metadata is not None and has_structure:
         return "real"
     return "mock"
@@ -125,6 +128,166 @@ def load_metadata_rows(metadata_path: Path) -> List[Dict[str, str]]:
     with metadata_path.open("r", encoding="utf-8", newline="") as fp:
         reader = csv.DictReader(fp, delimiter=delimiter)
         return [dict(row) for row in reader]
+
+def find_structure_zip(raw_root: Path) -> Optional[Path]:
+    zip_files = sorted(raw_root.glob("*.zip"))
+    return zip_files[0] if zip_files else None
+    
+@lru_cache(maxsize=4096)
+def _read_zip_member_lines(zip_path: str, member: str):
+    """
+    缓存 zip 内 pdb 文件内容，避免重复解压。
+    """
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        with zf.open(member, "r") as fp:
+            return tuple(
+                line.decode("utf-8", errors="ignore")
+                for line in fp
+            )
+
+def build_pdb_zip_index(zip_path: Path) -> Dict[str, Tuple[str, str]]:
+    """
+    返回:
+        {
+            pdb_stem_lower: (zip_path_str, inner_member_path)
+        }
+    仅索引 zip 内 all_structures/chothia/*.pdb
+    """
+    index: Dict[str, Tuple[str, str]] = {}
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for name in zf.namelist():
+            norm = name.replace("\\", "/")
+            if not norm.startswith("all_structures/chothia/"):
+                continue
+            if not norm.endswith(".pdb"):
+                continue
+            stem = Path(norm).stem.lower()
+            index.setdefault(stem, (str(zip_path), norm))
+    return index
+
+
+def parse_pdb_sequences_from_lines(lines: Iterable[str]) -> Dict[str, List[Tuple[int, str]]]:
+    chain_residues: Dict[str, List[Tuple[int, str]]] = {}
+    seen = set()
+    for line in lines:
+        if not line.startswith("ATOM"):
+            continue
+        resname = line[17:20].strip().upper()
+        chain_id = line[21].strip()
+        if not chain_id:
+            continue
+        try:
+            resseq = int(line[22:26].strip())
+        except ValueError:
+            continue
+        icode = line[26].strip()
+        residue_key = (chain_id, resseq, icode)
+        if residue_key in seen:
+            continue
+        seen.add(residue_key)
+        aa = AA3_TO_1.get(resname, "X")
+        chain_residues.setdefault(chain_id, []).append((resseq, aa))
+    return chain_residues
+
+def read_pdb_lines_any(entry: Dict[str, object]) -> List[str]:
+    zip_path = entry.get("pdb_zip_path")
+    zip_member = entry.get("pdb_zip_member")
+
+    if zip_path and zip_member:
+        return list(_read_zip_member_lines(str(zip_path), str(zip_member)))
+
+    pdb_path = Path(str(entry["pdb_path"]))
+    return pdb_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+
+def _rewrite_pdb_atom_line(line: str, atom_serial: int, new_chain_id: str, new_resseq: int) -> str:
+    line = line.rstrip("\n")
+    if len(line) < 80:
+        line = line.ljust(80)
+
+    # PDB fixed columns:
+    #  1-6   record name
+    #  7-11  atom serial
+    # 22     chain id
+    # 23-26  residue seq
+    # 27     insertion code
+    out = list(line)
+    out[6:11] = f"{atom_serial:5d}"
+    out[21] = new_chain_id
+    out[22:26] = f"{new_resseq:4d}"
+    out[26] = " "
+    return "".join(out)
+
+def write_processed_pdb(entry: Dict[str, object], pdb_dir: Path) -> Path:
+    pdb_dir.mkdir(parents=True, exist_ok=True)
+
+    chain_ids = parse_chain_ids(entry)
+    file_stem = str(entry["file_stem"]) if "file_stem" in entry else build_sample_stem(entry)
+    out_path = pdb_dir / f"{file_stem}.pdb"
+
+    # 原始链 -> 新链名
+    chain_plan: List[Tuple[str, str]] = []
+    if chain_ids.get("H"):
+        chain_plan.append((str(chain_ids["H"]), "H"))
+    if chain_ids.get("L"):
+        chain_plan.append((str(chain_ids["L"]), "L"))
+    if chain_ids.get("A"):
+        chain_plan.append((str(chain_ids["A"]), "A"))
+
+    lines = read_pdb_lines_any(entry)
+
+    out_lines: List[str] = []
+    atom_serial = 1
+
+    for old_chain, new_chain in chain_plan:
+        residue_map: Dict[Tuple[int, str], int] = {}
+        next_resseq = 1
+        wrote_any = False
+
+        for line in lines:
+            if not (line.startswith("ATOM") or line.startswith("HETATM")):
+                continue
+            if len(line) < 27:
+                continue
+
+            chain_id = line[21].strip()
+            if chain_id != old_chain:
+                continue
+
+            try:
+                old_resseq = int(line[22:26].strip())
+            except ValueError:
+                continue
+            icode = line[26].strip()
+
+            residue_key = (old_resseq, icode)
+            if residue_key not in residue_map:
+                residue_map[residue_key] = next_resseq
+                next_resseq += 1
+
+            new_resseq = residue_map[residue_key]
+            out_lines.append(_rewrite_pdb_atom_line(line, atom_serial, new_chain, new_resseq))
+            atom_serial += 1
+            wrote_any = True
+
+        if wrote_any:
+            out_lines.append(f"TER   {atom_serial:5d}")
+            atom_serial += 1
+
+    out_lines.append("END")
+    out_path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    return out_path
+
+def parse_pdb_sequences_any(entry: Dict[str, object]) -> Dict[str, List[Tuple[int, str]]]:
+    zip_path = entry.get("pdb_zip_path")
+    zip_member = entry.get("pdb_zip_member")
+
+    if zip_path and zip_member:
+        with zipfile.ZipFile(str(zip_path), "r") as zf:
+            with zf.open(str(zip_member), "r") as fp:
+                lines = (line.decode("utf-8", errors="ignore") for line in fp)
+                return parse_pdb_sequences_from_lines(lines)
+
+    return parse_pdb_sequences(Path(str(entry["pdb_path"])))
 
 
 def build_pdb_index(raw_root: Path) -> Dict[str, Path]:
@@ -142,6 +305,22 @@ def choose_first(row: Dict[str, str], keys: Iterable[str]) -> Optional[str]:
     return None
 
 
+def parse_final_antigen_chain(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    parts = [x.strip() for x in text.split("|")]
+    chain = parts[-1] if parts else None
+
+    if chain in {"0", "NA", "None", "", None}:
+        return None
+
+    return chain
+
 def parse_chain_from_sample_id(sample_id: str) -> Dict[str, Optional[str]]:
     parts = sample_id.split("_")
     chain_ids = {"H": None, "L": None, "A": None}
@@ -158,11 +337,29 @@ def parse_chain_ids(entry: Dict[str, object]) -> Dict[str, Optional[str]]:
     if isinstance(row, dict):
         chain_ids["H"] = chain_ids["H"] or choose_first(row, ["Hchain", "heavy_chain", "heavy", "chain_h"])
         chain_ids["L"] = chain_ids["L"] or choose_first(row, ["Lchain", "light_chain", "light", "chain_l"])
-        chain_ids["A"] = chain_ids["A"] or choose_first(
-            row, ["antigen_chain", "antigen", "chain_a", "antigen_chain_id"]
-        )
+        # chain_ids["A"] = chain_ids["A"] or choose_first(
+        #     row, ["antigen_chain", "antigen", "chain_a", "antigen_chain_id"]
+        # )
+
+        raw_antigen = choose_first(row, ["antigen_chain", "antigen", "chain_a", "antigen_chain_id"])
+        final_antigen = parse_final_antigen_chain(raw_antigen)
+
+        chain_ids["A"] = chain_ids["A"] or final_antigen
+
     return chain_ids
 
+def _norm_chain_name(chain: Optional[str]) -> str:
+    value = str(chain).strip() if chain is not None else ""
+    return value if value and value != "0" else "NA"
+
+
+def build_sample_stem(entry_or_sample: Dict[str, object]) -> str:
+    chain_ids = parse_chain_ids(entry_or_sample)
+    h = _norm_chain_name(chain_ids.get("H"))
+    l = _norm_chain_name(chain_ids.get("L"))
+    a = _norm_chain_name(chain_ids.get("A"))
+    pdb_name = str(entry_or_sample["sample_id"])
+    return f"{pdb_name}_{h}_{l}_{a}"
 
 def parse_pdb_sequences(pdb_path: Path) -> Dict[str, List[Tuple[int, str]]]:
     chain_residues: Dict[str, List[Tuple[int, str]]] = {}
@@ -206,9 +403,8 @@ def build_cdr_indices(chain_residues: List[Tuple[int, str]], cdr_names: List[str
 
 
 def extract_sequences_and_cdr(entry: Dict[str, object]) -> Tuple[Dict[str, str], Dict[str, List[int]], Dict[str, List[int]]]:
-    pdb_path = Path(str(entry["pdb_path"]))
     chain_ids = parse_chain_ids(entry)
-    parsed = parse_pdb_sequences(pdb_path)
+    parsed = parse_pdb_sequences_any(entry)
 
     sequences: Dict[str, str] = {}
     cdr_pdb: Dict[str, List[int]] = {}
@@ -233,9 +429,9 @@ def extract_sequences_and_cdr(entry: Dict[str, object]) -> Tuple[Dict[str, str],
     return sequences, cdr_pdb, cdr_sequences
 
 
-def write_processed_fasta(fasta_dir: Path, sample_id: str, sequences: Dict[str, str]) -> Path:
+def write_processed_fasta(fasta_dir: Path, file_stem: str, sequences: Dict[str, str]) -> Path:
     fasta_dir.mkdir(parents=True, exist_ok=True)
-    fasta_path = fasta_dir / f"{sample_id}.fasta"
+    fasta_path = fasta_dir / f"{file_stem}.fasta"
     lines: List[str] = []
     for tag in ("H", "L", "A"):
         seq = sequences.get(tag)
@@ -253,23 +449,43 @@ def prepare_real_entries(raw_root: Path) -> List[Dict[str, object]]:
 
     rows = load_metadata_rows(metadata_path)
     pdb_index = build_pdb_index(raw_root)
+    structure_zip = find_structure_zip(raw_root)
+    pdb_zip_index = build_pdb_zip_index(structure_zip) if structure_zip is not None else {}
+
+    if structure_zip is not None:
+        print(f"[INFO] Using structure zip: {structure_zip}, indexed pdb count: {len(pdb_zip_index)}")
+
     entries: List[Dict[str, object]] = []
     for row in rows:
+        antigen_raw = choose_first(row, ["antigen_chain", "antigen", "chain_a", "antigen_chain_id"])
+        final_antigen = parse_final_antigen_chain(antigen_raw)
+        if final_antigen is None:
+            continue
+
         entry_id = choose_first(row, ["pdb", "pdb_id", "pdb_code", "id", "entry", "name"])
         if not entry_id:
             continue
 
         pdb_path_raw = choose_first(row, ["pdb_path", "structure_path", "pdb_file", "file"])
         pdb_path: Optional[Path] = None
+        pdb_zip_path: Optional[str] = None
+        pdb_zip_member: Optional[str] = None
+
         if pdb_path_raw:
             candidate = Path(pdb_path_raw)
             pdb_path = candidate if candidate.is_absolute() else (raw_root / candidate)
             if not pdb_path.exists():
                 pdb_path = None
+
         if pdb_path is None:
             pdb_path = pdb_index.get(entry_id.lower())
 
-        if pdb_path is None or not pdb_path.exists():
+        if pdb_path is None:
+            zip_hit = pdb_zip_index.get(entry_id.lower())
+            if zip_hit is not None:
+                pdb_zip_path, pdb_zip_member = zip_hit
+
+        if pdb_path is None and pdb_zip_member is None:
             continue
 
         entries.append(
@@ -277,7 +493,9 @@ def prepare_real_entries(raw_root: Path) -> List[Dict[str, object]]:
                 "sample_id": entry_id,
                 "mode": "real",
                 "source_metadata": str(metadata_path),
-                "pdb_path": str(pdb_path),
+                "pdb_path": str(pdb_path) if pdb_path is not None else "",
+                "pdb_zip_path": pdb_zip_path,
+                "pdb_zip_member": pdb_zip_member,
                 "raw_row": row,
             }
         )
@@ -302,12 +520,16 @@ def prepare_mock_entries() -> List[Dict[str, object]]:
 def finalize_sample(entry: Dict[str, object], fasta_dir: Path) -> Dict[str, object]:
     sequences, cdr_pdb, cdr_sequences = extract_sequences_and_cdr(entry)
     seq_lens = {name: len(seq) for name, seq in sequences.items()}
-    fasta_path = write_processed_fasta(fasta_dir, str(entry["sample_id"]), sequences)
+    file_stem = build_sample_stem(entry)
+    fasta_path = write_processed_fasta(fasta_dir, file_stem, sequences)
 
     sample = {
         "sample_id": entry["sample_id"],
+        "file_stem": file_stem,
         "mode": entry["mode"],
         "pdb_path": entry["pdb_path"],
+        "pdb_zip_path": entry.get("pdb_zip_path"),
+        "pdb_zip_member": entry.get("pdb_zip_member"),
         "fasta_path": str(fasta_path),
         "source_metadata": entry.get("source_metadata"),
         "sequences": sequences,
@@ -317,7 +539,7 @@ def finalize_sample(entry: Dict[str, object], fasta_dir: Path) -> Dict[str, obje
         "length_tensor": (
             torch.tensor(list(seq_lens.values()), dtype=torch.int32)
             if torch is not None
-            else {"data": list(seq_lens.values()), "shape": [len(seq_lens)], "dtype": "int32"}
+            else {"data": list(seq_lens.values()), "shape": [len(seq_lens)], "dtype": "int32" }
         ),
         "raw_row": entry.get("raw_row", {}),
     }
@@ -376,7 +598,8 @@ def _greedy_cluster(ids: List[str], seqs: Dict[str, str], identity: float) -> Li
 
 
 def _cluster_with_cdhit(ids: List[str], seqs: Dict[str, str], split_dir: Path, identity: float) -> List[List[str]]:
-    cdhit = shutil.which("cd-hit")
+    # cdhit = shutil.which("cd-hit")
+    cdhit = shutil.which("/root/private_data/luog/codex/cd-hit-v4.8.1-2019-0228/cd-hit")
     if cdhit is None:
         return _greedy_cluster(ids, seqs, identity)
 
@@ -430,6 +653,12 @@ def build_paper_style_splits(entries: List[Dict[str, object]], args: argparse.Na
         if not isinstance(row, dict):
             continue
         dt = _parse_date_safe(row.get("date"))
+        antigen_raw = choose_first(row, ["antigen_chain", "antigen", "chain_a", "antigen_chain_id"])
+        final_antigen = parse_final_antigen_chain(antigen_raw)
+
+        if final_antigen is None:
+            continue
+
         if dt is None:
             continue
         chain_ids = parse_chain_ids(entry)
@@ -440,7 +669,7 @@ def build_paper_style_splits(entries: List[Dict[str, object]], args: argparse.Na
             continue
         if light_chain in {"0", "", None}:
             light_chain = None
-        parsed = parse_pdb_sequences(Path(str(entry["pdb_path"])))
+        parsed = parse_pdb_sequences_any(entry)
         if heavy_chain not in parsed:
             continue
         h_seq = "".join(aa for _, aa in parsed[heavy_chain])
@@ -511,20 +740,33 @@ def main() -> None:
     dataset_root = args.out_root / args.dataset_name
     samples_dir = dataset_root / "samples"
     fasta_dir = args.out_root / "fasta"
+    pdb_dir = args.out_root / "pdb"
     samples_dir.mkdir(parents=True, exist_ok=True)
     fasta_dir.mkdir(parents=True, exist_ok=True)
+    pdb_dir.mkdir(parents=True, exist_ok=True)
 
     workers = max(1, int(args.num_workers))
+    # with ThreadPoolExecutor(max_workers=workers) as pool:
+    #     samples = list(pool.map(lambda item: finalize_sample(item, fasta_dir), entries))
+
+    # for idx, sample in enumerate(samples):
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        samples = list(pool.map(lambda item: finalize_sample(item, fasta_dir), entries))
+        samples = list(
+            tqdm(
+                pool.map(lambda item: finalize_sample(item, fasta_dir), entries),
+                total=len(entries),
+                desc="Processing samples",
+            )
+        )
+    for sample in tqdm(samples, total=len(samples), desc="Saving samples"):
 
-    for idx, sample in enumerate(samples):
-        Hname = sample["raw_row"].get("Hchain", "NA")
-        L_name = sample["raw_row"].get("Lchain", "NA")
-        Aname = sample["raw_row"].get("antigen_chain", "NA")
+        sample_path = samples_dir / f"{sample['file_stem']}.pt"
+        processed_pdb_path = write_processed_pdb(sample, pdb_dir)
+        sample["processed_pdb_path"] = str(processed_pdb_path)
 
-        sample_path = samples_dir / f"{Hname}_{L_name}_{Aname}_{sample['sample_id']}.pt"
-        print("sample_path",sample_path)
+        # print("sample_path", sample_path)
+        # print("processed_pdb_path", processed_pdb_path)
 
         if torch is not None:
             torch.save(sample, sample_path)
@@ -563,4 +805,13 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-# python data/prepare_data.py --dataset_name sabdab --raw_root ./data/sabdab/metadata --out_root ./data/sabdab/processed
+# python data/prepare_data_fromzip.py \
+#   --dataset_name sabdab_debug20 \
+#   --raw_root ./data/origin_file \
+#   --out_root ./data/sabdab_zip/processed \
+#   --limit 20 \
+#   --build_splits \
+#   --split_out_dir ./data/sabdab_zip/processed/sabdab_debug20/split \
+#   --cluster_identity 0.95
+
+# 代表性测试结果，7mi3文件
