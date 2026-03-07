@@ -230,7 +230,12 @@ class IgGMLightningModule(pl.LightningModule):
 
     @staticmethod
     def _decode_pred_seq(logits_1d: torch.Tensor) -> str:
-        token_ids = logits_1d.argmax(dim=1).detach().cpu().tolist()
+        if logits_1d.ndim != 2:
+            raise ValueError(f"Unexpected sequence logit rank: {tuple(logits_1d.shape)}")
+        # Support both [L, C] and [C, L] layouts from different model checkpoints.
+        if logits_1d.shape[0] == len(RESD_NAMES_1C) and logits_1d.shape[1] != len(RESD_NAMES_1C):
+            logits_1d = logits_1d.transpose(0, 1)
+        token_ids = logits_1d.argmax(dim=-1).detach().cpu().tolist()
         return ''.join(RESD_NAMES_1C[i] for i in token_ids)
 
     def _shared_step(self, batch: Dict[str, Any], stage: str) -> torch.Tensor:
