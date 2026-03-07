@@ -162,6 +162,7 @@ def main() -> None:
         train_cluster_path=(args.train_clusters or None),
         samples_dir=(args.samples_dir or None),
         n_steps=args.n_steps,
+        lazy_cache_size=args.lazy_cache_size,
     )
     dm.setup()
 
@@ -205,7 +206,6 @@ def main() -> None:
                 "cdr_all": args.mix_cdr_all,
             },
         ),
-        lazy_cache_size=args.lazy_cache_size,
     )
 
     ckpt_dir = out / "checkpoints"

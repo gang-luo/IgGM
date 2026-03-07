@@ -5,13 +5,17 @@
 from __future__ import annotations
 
 import json
+import pickle
 import random
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
+import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
 
+from IgGM.data.convert_to_example_format import convert_entry_to_sample
 from IgGM.data.sabdab import load_sabdab_metadata
 
 
@@ -24,24 +28,94 @@ class SplitConfig:
 
 
 class _ProteinSampleDataset(Dataset):
-    """Lazy dataset that keeps only metadata and sample paths in memory."""
+    """Lazy dataset that resolves a sample payload only when indexed."""
 
-    def __init__(self, items: List[Dict[str, object]], n_steps: int = 200):
+    def __init__(self, items: List[Dict[str, object]], n_steps: int = 200, cache_size: int = 128):
         self.items = items
         self.n_steps = n_steps
+        self._cache_size = max(1, int(cache_size))
+        self._sample_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
 
     def __len__(self):
         return len(self.items)
 
+    @staticmethod
+    def _load_pt_record(sample_path: str) -> Dict[str, Any]:
+        if sample_path.endswith(".pt"):
+            return torch.load(sample_path, map_location="cpu")
+        with Path(sample_path).open("rb") as fp:
+            return pickle.load(fp)
+
+    def _cache_put(self, key: str, value: Dict[str, Any]) -> None:
+        self._sample_cache[key] = value
+        self._sample_cache.move_to_end(key)
+        while len(self._sample_cache) > self._cache_size:
+            self._sample_cache.popitem(last=False)
+
+    def _resolve_sample_payload(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        sample_path = item.get("sample_path")
+        processed_pdb_path = item.get("processed_pdb_path")
+        prot_id = str(item.get("prot_id", ""))
+        cache_key = str(sample_path or processed_pdb_path or prot_id)
+        if cache_key in self._sample_cache:
+            self._sample_cache.move_to_end(cache_key)
+            return self._sample_cache[cache_key]
+
+        record: Dict[str, Any] = {}
+        if sample_path and Path(str(sample_path)).exists():
+            record = self._load_pt_record(str(sample_path))
+
+        if not processed_pdb_path:
+            processed_pdb_path = record.get("processed_pdb_path")
+        if not processed_pdb_path:
+            raise RuntimeError(f"Missing processed PDB path for sample: {prot_id}")
+
+        seqs = record.get("sequences", {})
+        light_chain_id = "L" if isinstance(seqs, dict) and seqs.get("L") else None
+        if light_chain_id is None:
+            parts = prot_id.split("_")
+            if len(parts) >= 3 and parts[2].upper() != "NA":
+                light_chain_id = "L"
+
+        entry = {
+            "pdb_id": str(record.get("sample_id") or item.get("pdb_id") or prot_id.split("_")[0]).lower(),
+            "heavy_chain_id": "H",
+            "light_chain_id": light_chain_id,
+            "antigen_chain_ids": ["A"],
+        }
+        converted = convert_entry_to_sample(entry, str(processed_pdb_path))
+        if converted is None:
+            raise RuntimeError(f"Failed to convert processed PDB sample: {processed_pdb_path}")
+
+        complex_data = converted["complex"]
+        payload = {
+            "seq_true": complex_data["seq"],
+            "prot_data_curr": {
+                "seq": complex_data["seq"],
+                "cord": complex_data["cord"],
+                "cmsk": complex_data["cmsk"],
+                "mask_design": complex_data["mask_design"],
+                "mask_ab": complex_data["mask_ab"],
+                "asym_id": complex_data["asym_id"],
+                "a-cord": complex_data["a-cord"],
+                "a-cmsk": complex_data["a-cmsk"],
+                "epitope": complex_data["epitope"],
+                "contact": None,
+            },
+            "cdr_sequences": (record.get("cdr_sequences") or {}),
+            "sequence_lengths": (record.get("sequence_lengths") or {}),
+        }
+        self._cache_put(cache_key, payload)
+        return payload
+
     def __getitem__(self, index):
         item = self.items[index]
         step = random.randint(1, self.n_steps)
+        payload = self._resolve_sample_payload(item)
         return {
             "idx_step": step,
             "prot_id": item["prot_id"],
-            "sample_path": item.get("sample_path"),
-            "processed_pdb_path": item.get("processed_pdb_path"),
-            "pdb_id": item.get("pdb_id"),
+            "payload": payload,
             "inputs_addi": None,
             "chunk_size": None,
         }
@@ -111,6 +185,7 @@ class ProcessedSabdabDataModule:
         train_cluster_path: Optional[str | Path] = None,
         samples_dir: Optional[str | Path] = None,
         n_steps: int = 200,
+        lazy_cache_size: int = 128,
     ):
         self.metadata_path = Path(metadata_path)
         self.pdb_dir = Path(pdb_dir)
@@ -123,6 +198,7 @@ class ProcessedSabdabDataModule:
         self.train_cluster_path = Path(train_cluster_path) if train_cluster_path else None
         self.samples_dir = Path(samples_dir) if samples_dir else None
         self.n_steps = n_steps
+        self.lazy_cache_size = lazy_cache_size
         self.train_ds: Optional[Dataset] = None
         self.val_ds: Optional[Dataset] = None
         self.test_ds: Optional[Dataset] = None
@@ -250,9 +326,9 @@ class ProcessedSabdabDataModule:
             val_items = items[n_train:n_train + n_val]
             test_items = items[n_train + n_val:] if (n_train + n_val) < n else items[-1:]
 
-        self.train_ds = _ProteinSampleDataset(train_items, n_steps=self.n_steps)
-        self.val_ds = _ProteinSampleDataset(val_items if val_items else train_items[:1], n_steps=self.n_steps)
-        self.test_ds = _ProteinSampleDataset(test_items if test_items else train_items[:1], n_steps=self.n_steps)
+        self.train_ds = _ProteinSampleDataset(train_items, n_steps=self.n_steps, cache_size=self.lazy_cache_size)
+        self.val_ds = _ProteinSampleDataset(val_items if val_items else train_items[:1], n_steps=self.n_steps, cache_size=self.lazy_cache_size)
+        self.test_ds = _ProteinSampleDataset(test_items if test_items else train_items[:1], n_steps=self.n_steps, cache_size=self.lazy_cache_size)
         self._train_sampler = self._build_sampler_from_cluster_file(train_items)
 
     def train_dataloader(self):

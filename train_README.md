@@ -75,10 +75,11 @@ python data/prepare_data.py \
 
 `src/iggm_lightning/data_module.py` 支持读取 `train_ids/val_ids/test_ids` 以及 `train_clusters`。
 
-当前实现改为 **Lazy Loading**：
+当前实现改为 **Dataset 侧 Lazy Loading**：
 - DataModule 只在 `setup` 阶段建立 `prot_id -> (sample_path, processed_pdb_path)` 轻量索引；
-- 不在 dataloader 预先解析整套结构张量；
-- 在 `IgGMLightningModule` 内针对当前 batch 动态加载 `.pt` 与 `.pdb` 并做 LRU 缓存（`lazy_cache_size`）。
+- `_ProteinSampleDataset.__getitem__` 才会按需读取当前样本的 `.pt/.pdb` 并构建模型输入所需 `payload`；
+- Dataset 内置 LRU 缓存（`lazy_cache_size`），避免重复解析同一样本；
+- `IgGMLightningModule` 只消费 `payload`、执行扩散/前向/损失，保持“数据解析”和“训练逻辑”解耦。
 
 ### 3.1 `prepare_data_fromzip.py` 产物在训练中的作用
 

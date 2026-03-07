@@ -9,12 +9,9 @@ DesignModel forward implementation.
 
 from __future__ import annotations
 
-import pickle
 import random
-from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -25,7 +22,6 @@ try:
 except ImportError:  # pragma: no cover
     import pytorch_lightning as pl
 
-from IgGM.data.convert_to_example_format import convert_entry_to_sample
 from IgGM.model import DesignModel
 from IgGM.protein.prot_constants import RESD_NAMES_1C
 from .losses import IgGMLossConfig, IgGMPaperLoss
@@ -96,7 +92,6 @@ class IgGMLightningModule(pl.LightningModule):
         loss_cfg: Optional[IgGMLossConfig] = None,
         metric_cfg: Optional[MetricConfig] = None,
         stage_cfg: Optional[StageTrainingConfig] = None,
-        lazy_cache_size: int = 128,
     ) -> None:
         super().__init__()
         if not isinstance(model, nn.Module):
@@ -114,8 +109,6 @@ class IgGMLightningModule(pl.LightningModule):
         self.loss_fn = IgGMPaperLoss(loss_cfg)
         self.metric_fn = StructureMetrics(metric_cfg)
         self.stage_cfg = stage_cfg or StageTrainingConfig()
-        self._cache_size = max(1, int(lazy_cache_size))
-        self._sample_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
 
     def _assert_and_log_shapes(self, inputs: Dict[str, Any], outputs: Dict[str, Any]) -> None:
         cord_p = inputs["cord-p"]
@@ -141,12 +134,6 @@ class IgGMLightningModule(pl.LightningModule):
             )
             self._shape_printed = True
 
-    def _load_pt_record(self, sample_path: str) -> Dict[str, Any]:
-        if sample_path.endswith('.pt'):
-            return torch.load(sample_path, map_location='cpu')
-        with Path(sample_path).open('rb') as fp:
-            return pickle.load(fp)
-
     def _move_to_device(self, obj: Any) -> Any:
         if torch.is_tensor(obj):
             return obj.to(self.device)
@@ -157,67 +144,6 @@ class IgGMLightningModule(pl.LightningModule):
         if isinstance(obj, tuple):
             return tuple(self._move_to_device(v) for v in obj)
         return obj
-
-    def _cache_put(self, key: str, value: Dict[str, Any]) -> None:
-        self._sample_cache[key] = value
-        self._sample_cache.move_to_end(key)
-        while len(self._sample_cache) > self._cache_size:
-            self._sample_cache.popitem(last=False)
-
-    def _resolve_sample_payload(self, batch: Dict[str, Any]) -> Dict[str, Any]:
-        sample_path = batch.get("sample_path")
-        processed_pdb_path = batch.get("processed_pdb_path")
-        prot_id = str(batch.get("prot_id", ""))
-        cache_key = sample_path or processed_pdb_path or prot_id
-        if cache_key in self._sample_cache:
-            self._sample_cache.move_to_end(cache_key)
-            return self._sample_cache[cache_key]
-
-        record: Dict[str, Any] = {}
-        if sample_path and Path(sample_path).exists():
-            record = self._load_pt_record(sample_path)
-
-        if not processed_pdb_path:
-            processed_pdb_path = record.get("processed_pdb_path")
-        if not processed_pdb_path:
-            raise RuntimeError(f"Missing processed PDB path for sample: {prot_id}")
-
-        seqs = record.get("sequences", {})
-        light_chain_id = "L" if isinstance(seqs, dict) and seqs.get("L") else None
-        if light_chain_id is None:
-            parts = prot_id.split("_")
-            if len(parts) >= 3 and parts[2].upper() != "NA":
-                light_chain_id = "L"
-        entry = {
-            "pdb_id": str(record.get("sample_id") or batch.get("pdb_id") or prot_id.split("_")[0]).lower(),
-            "heavy_chain_id": "H",
-            "light_chain_id": light_chain_id,
-            "antigen_chain_ids": ["A"],
-        }
-        converted = convert_entry_to_sample(entry, processed_pdb_path)
-        if converted is None:
-            raise RuntimeError(f"Failed to convert processed PDB sample: {processed_pdb_path}")
-
-        complex_data = converted["complex"]
-        payload = {
-            "seq_true": complex_data["seq"],
-            "prot_data_curr": {
-                "seq": complex_data["seq"],
-                "cord": complex_data["cord"],
-                "cmsk": complex_data["cmsk"],
-                "mask_design": complex_data["mask_design"],
-                "mask_ab": complex_data["mask_ab"],
-                "asym_id": complex_data["asym_id"],
-                "a-cord": complex_data["a-cord"],
-                "a-cmsk": complex_data["a-cmsk"],
-                "epitope": complex_data["epitope"],
-                "contact": None,
-            },
-            "cdr_sequences": (record.get("cdr_sequences") or {}),
-            "sequence_lengths": (record.get("sequence_lengths") or {}),
-        }
-        self._cache_put(cache_key, payload)
-        return payload
 
     def _is_stage2(self) -> bool:
         return self.current_epoch >= int(self.stage_cfg.stage1_epochs)
@@ -305,7 +231,9 @@ class IgGMLightningModule(pl.LightningModule):
 
     def _shared_step(self, batch: Dict[str, Any], stage: str) -> torch.Tensor:
         idx_step = int(batch["idx_step"])
-        payload = self._resolve_sample_payload(batch)
+        payload = batch.get("payload")
+        if payload is None:
+            raise RuntimeError("Dataset must provide resolved `payload` for lazy loading.")
         prot_data_curr = self._move_to_device(payload["prot_data_curr"])
         self._apply_stage_mask(prot_data_curr, payload)
 
