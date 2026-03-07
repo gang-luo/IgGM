@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import torch
+import pytorch_lightning as pl
 from torch.utils.data import DataLoader, Dataset, Sampler
 
 from IgGM.data.convert_to_example_format import convert_entry_to_sample
@@ -171,7 +172,7 @@ def _parse_prot_id(prot_id: str) -> Optional[Dict[str, object]]:
     }
 
 
-class ProcessedSabdabDataModule:
+class ProcessedSabdabDataModule(pl.LightningDataModule):
     def __init__(
         self,
         metadata_path: str | Path,
@@ -187,6 +188,7 @@ class ProcessedSabdabDataModule:
         n_steps: int = 200,
         lazy_cache_size: int = 128,
     ):
+        super().__init__()
         self.metadata_path = Path(metadata_path)
         self.pdb_dir = Path(pdb_dir)
         self.batch_size = batch_size

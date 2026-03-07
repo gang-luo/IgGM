@@ -5,3 +5,4 @@ sabdab_summary_all.tsv
 zz_trash
 *.pth
 *.gz
+outputs/
