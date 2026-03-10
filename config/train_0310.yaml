@@ -1,14 +1,14 @@
 
 data:
-  metadata: data/sabdab_zip/processed/sabdab_debug20/metadata.json
+  metadata: data/sabdab_zip/processed/sabdab_debug/metadata.json
   pdb_dir: data/sabdab_zip/processed/pdb
-  samples_dir: data/sabdab_zip/processed/sabdab_debug20/samples
-  train_ids: data/sabdab_zip/processed/sabdab_debug20/split/train_prot_ids.txt
-  val_ids: data/sabdab_zip/processed/sabdab_debug20/split/val_prot_ids.txt
-  test_ids: data/sabdab_zip/processed/sabdab_debug20/split/test_prot_ids.txt
-  train_clusters: data/sabdab_zip/processed/sabdab_debug20/split/train_prot_cluster.txt
+  samples_dir: data/sabdab_zip/processed/sabdab_debug/samples
+  train_ids: data/sabdab_zip/processed/sabdab_debug/split/train_prot_ids.txt
+  val_ids: data/sabdab_zip/processed/sabdab_debug/split/val_prot_ids.txt
+  test_ids: data/sabdab_zip/processed/sabdab_debug/split/test_prot_ids.txt
+  train_clusters: data/sabdab_zip/processed/sabdab_debug/split/train_prot_cluster.txt
   batch_size: 1
-  num_workers: 0
+  num_workers: 8
   n_steps: 200
   forward_chunk_size: 32
 
@@ -39,25 +39,25 @@ trainer:
   accelerator: gpu
   devices: [0]
   log_every_n_steps: 5
-  accumulate_grad_batches: 1
+  accumulate_grad_batches: 2
   num_sanity_val_steps: 1
 
 wandb:
-  disabled: true
+  disabled: False
   project: IgGM
-  run_name: iggm-stage_time
+  run_name: iggm-stage_time_0310
   entity: "mllm-csu"
   api_key: "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"
 
 
 runtime:
-  output_dir: outputs/lightning_train
+  output_dir: outputs/lightning_train0310
   seed: 42
   resume: False
   run_test: true
 
 stage_training:
-  stage1_epochs: 1
+  stage1_epochs: 2
   stage2_enable_seq_recovery: true
   mix_cdr_h3: 4
   mix_cdr_h1: 2

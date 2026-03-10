@@ -31,11 +31,12 @@ class SplitConfig:
 class _ProteinSampleDataset(Dataset):
     """Lazy dataset that resolves a sample payload only when indexed."""
 
-    def __init__(self, items: List[Dict[str, object]], n_steps: int = 200, cache_size: int = 128):
+    def __init__(self, items: List[Dict[str, object]], n_steps: int = 200, cache_size: int = 128, chunk_size: Optional[int] = None):
         self.items = items
         self.n_steps = n_steps
         self._cache_size = max(1, int(cache_size))
-        self._sample_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
+        self._sample_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()        
+        self._chunk_size = None if chunk_size is None else max(1, int(chunk_size))
 
     def __len__(self):
         return len(self.items)
@@ -43,7 +44,7 @@ class _ProteinSampleDataset(Dataset):
     @staticmethod
     def _load_pt_record(sample_path: str) -> Dict[str, Any]:
         if sample_path.endswith(".pt"):
-            return torch.load(sample_path, map_location="cpu")
+            return torch.load(sample_path, map_location="cpu",weights_only=True)
         with Path(sample_path).open("rb") as fp:
             return pickle.load(fp)
 
@@ -118,7 +119,7 @@ class _ProteinSampleDataset(Dataset):
             "prot_id": item["prot_id"],
             "payload": payload,
             "inputs_addi": None,
-            "chunk_size": None,
+            "chunk_size": self._chunk_size,
         }
 
 
@@ -187,6 +188,7 @@ class ProcessedSabdabDataModule(pl.LightningDataModule):
         samples_dir: Optional[str | Path] = None,
         n_steps: int = 200,
         lazy_cache_size: int = 128,
+        forward_chunk_size: Optional[int] = None,
     ):
         super().__init__()
         self.metadata_path = Path(metadata_path)
@@ -201,6 +203,7 @@ class ProcessedSabdabDataModule(pl.LightningDataModule):
         self.samples_dir = Path(samples_dir) if samples_dir else None
         self.n_steps = n_steps
         self.lazy_cache_size = lazy_cache_size
+        self.forward_chunk_size = None if forward_chunk_size is None else max(1, int(forward_chunk_size))
         self.train_ds: Optional[Dataset] = None
         self.val_ds: Optional[Dataset] = None
         self.test_ds: Optional[Dataset] = None
@@ -328,9 +331,10 @@ class ProcessedSabdabDataModule(pl.LightningDataModule):
             val_items = items[n_train:n_train + n_val]
             test_items = items[n_train + n_val:] if (n_train + n_val) < n else items[-1:]
 
-        self.train_ds = _ProteinSampleDataset(train_items, n_steps=self.n_steps, cache_size=self.lazy_cache_size)
-        self.val_ds = _ProteinSampleDataset(val_items if val_items else train_items[:1], n_steps=self.n_steps, cache_size=self.lazy_cache_size)
-        self.test_ds = _ProteinSampleDataset(test_items if test_items else train_items[:1], n_steps=self.n_steps, cache_size=self.lazy_cache_size)
+        self.train_ds = _ProteinSampleDataset(train_items, n_steps=self.n_steps, cache_size=self.lazy_cache_size, chunk_size=self.forward_chunk_size)
+        self.val_ds = _ProteinSampleDataset(val_items if val_items else train_items[:1], n_steps=self.n_steps, cache_size=self.lazy_cache_size, chunk_size=self.forward_chunk_size)
+        self.test_ds = _ProteinSampleDataset(test_items if test_items else train_items[:1], n_steps=self.n_steps, cache_size=self.lazy_cache_size, chunk_size=self.forward_chunk_size)
+
         self._train_sampler = self._build_sampler_from_cluster_file(train_items)
 
     def train_dataloader(self):
@@ -338,8 +342,14 @@ class ProcessedSabdabDataModule(pl.LightningDataModule):
             return DataLoader(self.train_ds, batch_size=1, shuffle=False, sampler=self._train_sampler, num_workers=self.num_workers, collate_fn=_batch_one)
         return DataLoader(self.train_ds, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, collate_fn=_batch_one)
 
+    # def val_dataloader(self):
+    #     return DataLoader(self.val_ds, batch_size=1, shuffle=False, num_workers=self.num_workers, collate_fn=_batch_one)
+
+    # def test_dataloader(self):
+    #     return DataLoader(self.test_ds, batch_size=1, shuffle=False, num_workers=self.num_workers, collate_fn=_batch_one)
+    
     def val_dataloader(self):
-        return DataLoader(self.val_ds, batch_size=1, shuffle=False, num_workers=self.num_workers, collate_fn=_batch_one)
+        return DataLoader(self.val_ds, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, collate_fn=_batch_one)
 
     def test_dataloader(self):
-        return DataLoader(self.test_ds, batch_size=1, shuffle=False, num_workers=self.num_workers, collate_fn=_batch_one)
+        return DataLoader(self.test_ds,batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, collate_fn=_batch_one)

@@ -704,7 +704,7 @@ class IGSO3Buffer():
     def load(self, path):
         """Load buffered rotational matrices from file."""
 
-        snapshot = torch.load(path, map_location='cpu')
+        snapshot = torch.load(path, map_location='cpu',weights_only=False)
         self.sigmas = snapshot['sigmas']
         self.buf_size = snapshot['buf_size']
         self.buf_list = snapshot['buf_list']

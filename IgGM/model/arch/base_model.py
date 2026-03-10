@@ -25,7 +25,7 @@ class BaseModel(nn.Module):
 
     @classmethod
     def restore(cls, path, config=None):
-        state = torch.load(path, map_location='cpu')
+        state = torch.load(path, map_location='cpu',weights_only=False) # 加入weights_only=False，避免警告
         config = get_config()
         config.update(state['config'])
         logging.info(config)

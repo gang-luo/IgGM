@@ -122,6 +122,16 @@ python data/prepare_data.py \
 `prepare_data_fromzip.py` 在导出 `processed/pdb/*.pdb` 时会把链名规范化为 `H/L/A`，并重排残基编号。
 因此训练读取 processed PDB 时，不再依赖原始链名（如 `K/F/e` 等），而是固定使用 `H/L/A` 进行解析。
 
+
+### 3.4 显存优化建议（与论文训练设置对齐）
+
+如果你遇到单卡 OOM，优先调整以下三项（已接入当前训练脚本）：
+- `data.forward_chunk_size`：控制 Evoformer/结构模块的前向分块大小，推荐从 `64` 或 `32` 开始；
+- `trainer.accumulate_grad_batches`：用梯度累积模拟论文的大 batch（例如单卡 `batch_size=1` + `accumulate_grad_batches=4`）；
+- `trainer.num_sanity_val_steps=0`：关闭启动时 sanity validation，避免在训练前先触发一次高显存验证前向。
+
+说明：当前 DataLoader 的样本是变长复合体，不同样本长度差异大，显存峰值主要受 `L^2` 级别的 pair/attention 特征影响，因此 `forward_chunk_size` 通常是最有效的降显存开关。
+
 ---
 
 ## 4. 损失与评估指标

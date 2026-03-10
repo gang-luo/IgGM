@@ -28,6 +28,20 @@ from .losses import IgGMLossConfig, IgGMPaperLoss
 from .metrics import MetricConfig, StructureMetrics
 
 
+def mem(tag):
+    a = torch.cuda.memory_allocated() / 1024**3
+    r = torch.cuda.memory_reserved() / 1024**3
+    p = torch.cuda.max_memory_allocated() / 1024**3
+    print(f"[{tag}] alloc={a:.2f} GB reserved={r:.2f} GB peak={p:.2f} GB")
+
+#  maxlen filter
+def _should_skip_batch(prot_data_curr: Dict[str, Any]) -> bool:
+    asym_id = prot_data_curr.get("asym_id")
+    if asym_id is None:
+        return False
+    seq_len = int(asym_id.shape[-1])
+    return seq_len > int(600)
+
 @dataclass
 class OptimizerConfig:
     name: str = "adamw"
@@ -244,6 +258,19 @@ class IgGMLightningModule(pl.LightningModule):
         if payload is None:
             raise RuntimeError("Dataset must provide resolved `payload` for lazy loading.")
         prot_data_curr = self._move_to_device(payload["prot_data_curr"])
+        if _should_skip_batch(prot_data_curr):
+            seq_len = int(prot_data_curr["asym_id"].shape[-1])
+            self.log(
+                f"{stage}/skip_long_batch",
+                torch.tensor(1.0, device=self.device),
+                prog_bar=False,
+                on_step=(stage == "train"),
+                on_epoch=True,
+                batch_size=1,
+            )
+            print( f"[IgGMLightningModule] skip {stage} batch:{idx_step},seqlen={seq_len} ")
+            return None
+    
         self._apply_stage_mask(prot_data_curr, payload)
 
         inputs_addi = batch.get("inputs_addi")
@@ -293,9 +320,14 @@ class IgGMLightningModule(pl.LightningModule):
 
     def configure_optimizers(self):
         cfg = self.optimizer_cfg
+
+        trainable_params = [p for p in self.parameters() if p.requires_grad]
+        if not trainable_params:
+            raise RuntimeError("No trainable parameters found for optimizer setup.")
+
         if cfg.name.lower() == "adamw":
             optimizer = torch.optim.AdamW(
-                self.parameters(),
+                trainable_params,
                 lr=cfg.lr,
                 betas=cfg.betas,
                 eps=cfg.eps,

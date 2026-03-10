@@ -4,9 +4,20 @@ from __future__ import annotations
 
 import argparse
 import os
+
+os.environ["HSAKMT_DEBUG_LEVEL"] = "3"   # 只输出 error，不输出 warning
+os.environ["HSA_ENABLE_INTERRUPT"] = "0" # 可选
+
 import sys
 from pathlib import Path
 from typing import Any, Dict
+
+import os
+import warnings
+
+# 屏蔽常见 Python warning
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 try:
     import yaml
@@ -21,11 +32,6 @@ except ImportError:  # pragma: no cover
     import pytorch_lightning as pl
     from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
     from pytorch_lightning.loggers import CSVLogger, WandbLogger
-
-# ROOT = Path(__file__).resolve().parents[1]
-# SRC_DIR = ROOT / "src"
-# if str(SRC_DIR) not in sys.path:
-#     sys.path.insert(0, str(SRC_DIR))
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -93,6 +99,7 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--num_workers", type=int, default=int(data.get("num_workers", 0)))
     p.add_argument("--samples_dir", default=data.get("samples_dir", ""))
     p.add_argument("--n_steps", type=int, default=int(data.get("n_steps", 200)))
+    p.add_argument("--forward_chunk_size", type=int, default=int(data.get("forward_chunk_size", 64)))
 
     p.add_argument("--ppi_ckpt", default=model.get("ppi_ckpt", ""))
     p.add_argument("--design_ckpt", default=model.get("design_ckpt", ""))
@@ -111,6 +118,8 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--accelerator", default=trainer.get("accelerator", "auto"))
     p.add_argument("--devices", default=trainer.get("devices", "auto"))
     p.add_argument("--log_every_n_steps", type=int, default=int(trainer.get("log_every_n_steps", 1)))
+    p.add_argument("--accumulate_grad_batches", type=int, default=int(trainer.get("accumulate_grad_batches", 1)))
+    p.add_argument("--num_sanity_val_steps", type=int, default=int(trainer.get("num_sanity_val_steps", 0)))
 
     p.add_argument("--project", default=wandb.get("project", "iggm-lightning"))
     p.add_argument("--run_name", default=wandb.get("run_name", "iggm-train"))
@@ -145,6 +154,8 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+
+
     args = _parse_args()
     pl.seed_everything(args.seed, workers=True)
 
@@ -163,6 +174,7 @@ def main() -> None:
         samples_dir=(args.samples_dir or None),
         n_steps=args.n_steps,
         lazy_cache_size=args.lazy_cache_size,
+        forward_chunk_size=(args.forward_chunk_size if args.forward_chunk_size > 0 else None),
     )
     dm.setup()
 
@@ -244,6 +256,8 @@ def main() -> None:
         logger=logger,
         callbacks=callbacks,
         log_every_n_steps=args.log_every_n_steps,
+        accumulate_grad_batches=max(1, args.accumulate_grad_batches),
+        num_sanity_val_steps=max(0, args.num_sanity_val_steps),
     )
 
     last_ckpt = ckpt_dir / "last.ckpt"

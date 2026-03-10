@@ -806,12 +806,12 @@ if __name__ == "__main__":
     main()
 
 # python data/prepare_data_fromzip.py \
-#   --dataset_name sabdab_debug20 \
+#   --dataset_name sabdab_debug \
 #   --raw_root ./data/origin_file \
 #   --out_root ./data/sabdab_zip/processed \
-#   --limit 20 \
+#   --limit 500 \
 #   --build_splits \
-#   --split_out_dir ./data/sabdab_zip/processed/sabdab_debug20/split \
+#   --split_out_dir ./data/sabdab_zip/processed/sabdab_debug/split \
 #   --cluster_identity 0.95
 
 # 代表性测试结果，7mi3文件

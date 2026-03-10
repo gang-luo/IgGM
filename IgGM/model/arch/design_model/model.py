@@ -20,6 +20,21 @@ class DesignModel(BaseModel):
     """The antibody design model
     """
 
+    # def __init__(
+    #         self,
+    #         n_dims_sfea_init=-1,  # number of dimensions in initial single features (D_si)
+    #         n_dims_pfea_init=-1,  # number of dimensions in initial pair features (D_pi)
+    #         n_steps=200,  # number of time steps in the diffusion process
+    #         n_dims_sfea=192,  # number of dimensions in single features (D_s)
+    #         n_dims_pfea=128,  # number of dimensions in pair features (D_p)
+    #         n_dims_penc=64,  # number of dimensions in positional encodings
+    #         n_lyrs_2d=16,  # number of <EvoformerBlockSS> layers
+    #         n_lyrs_3d=8,  # number of <AF2SMod> layers
+    #         pred_oxyg=True,  # whether to predict backbone oxygen atoms' 3D coordinates
+    #         use_icf=True,  # whether to use inter-chain interface feature as extra input
+    #         feat_type='mix-4',  # inter-chain interface feature
+
+    # ):    
     def __init__(
             self,
             n_dims_sfea_init=-1,  # number of dimensions in initial single features (D_si)
@@ -28,8 +43,8 @@ class DesignModel(BaseModel):
             n_dims_sfea=192,  # number of dimensions in single features (D_s)
             n_dims_pfea=128,  # number of dimensions in pair features (D_p)
             n_dims_penc=64,  # number of dimensions in positional encodings
-            n_lyrs_2d=16,  # number of <EvoformerBlockSS> layers
-            n_lyrs_3d=8,  # number of <AF2SMod> layers
+            n_lyrs_2d=4,  # number of <EvoformerBlockSS> layers
+            n_lyrs_3d=2,  # number of <AF2SMod> layers
             pred_oxyg=True,  # whether to predict backbone oxygen atoms' 3D coordinates
             use_icf=True,  # whether to use inter-chain interface feature as extra input
             feat_type='mix-4',  # inter-chain interface feature
