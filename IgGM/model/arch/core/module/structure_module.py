@@ -63,9 +63,15 @@ class StructureModule(nn.Module):
         # PLddtNet - predict lDDT-CA scores
         self.net['plddt'] = PLDDTHead(c_s=self.n_dims_sfea)
 
+        self.activation_checkpoint = False
+
+    def enable_activation_checkpoint(self, enabled=True):
+        self.activation_checkpoint = enabled
+
     def forward(
             self, aa_seqs, sfea_tns, pfea_tns, encd_tns,
             n_lyrs=-1, cord_tns_init=None, cmsk_tns_init=None, rmsk_vec_motf=None,
+            return_param=True, return_plddt=True,
     ):  # pylint: disable=too-many-arguments,too-many-locals,too-many-statements
         """Perform the forward pass.
 
@@ -128,14 +134,26 @@ class StructureModule(nn.Module):
         # perform multiple forward passes
         quat_tns = quat_tns_init.detach().clone()
         trsl_tns = trsl_tns_init.detach().clone()
-        cord_list, param_list, plddt_list, fram_tns_sc = [], [], [], None
+        cord_list = []
+        param_list = [] if return_param else None
+        plddt_list = [] if return_plddt else None
+        fram_tns_sc = None
         for idx_lyr in range(n_lyrs):
             # perform a single forward pass
             quat_tns = quat_tns.detach()  # no gradient propagation
-            sfea_tns = self.net['ipa'](sfea_tns, pfea_tns, quat_tns, trsl_tns)
-            quat_tns, trsl_tns, angl_tns, quat_tns_upd = \
-                self.net['fa'](aa_seqs, sfea_tns, sfea_tns_init, encd_tns, quat_tns, trsl_tns)
-            plddt_dict = self.net['plddt'](sfea_tns.detach())
+            def _layer_forward(sfea_curr, quat_curr, trsl_curr):
+                sfea_next = self.net['ipa'](sfea_curr, pfea_tns, quat_curr, trsl_curr)
+                quat_next, trsl_next, angl_next, quat_upd_next = self.net['fa'](
+                    aa_seqs, sfea_next, sfea_tns_init, encd_tns, quat_curr, trsl_curr)
+                return sfea_next, quat_next, trsl_next, angl_next, quat_upd_next
+
+            if self.training and self.activation_checkpoint:
+                sfea_tns, quat_tns, trsl_tns, angl_tns, quat_tns_upd = torch.utils.checkpoint.checkpoint(
+                    _layer_forward, sfea_tns, quat_tns, trsl_tns, use_reentrant=False)
+            else:
+                sfea_tns, quat_tns, trsl_tns, angl_tns, quat_tns_upd = _layer_forward(sfea_tns, quat_tns, trsl_tns)
+
+            plddt_dict = self.net['plddt'](sfea_tns.detach()) if return_plddt else None
 
             # replace motif residues' local frames
             if rmsk_vec_motf is not None:
@@ -167,8 +185,10 @@ class StructureModule(nn.Module):
 
             # record predictions from the current layer
             cord_list.append(cord_tns)
-            param_list.append(param_dict)
-            plddt_list.append(plddt_dict)
+            if return_param:
+                param_list.append(param_dict)
+            if return_plddt:
+                plddt_list.append(plddt_dict)
 
         return sfea_tns, cord_list, param_list, plddt_list, fram_tns_sc
 
