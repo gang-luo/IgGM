@@ -125,6 +125,19 @@ class IgGMPaperLoss:
             return logits.new_zeros(())
         return F.cross_entropy(flat_logits, flat_tgt)
 
+
+    @staticmethod
+    def _pairwise_mse_chunked(pred_ca: torch.Tensor, tgt_ca: torch.Tensor, pair_mask: torch.Tensor, chunk_size: int = 256) -> torch.Tensor:
+        total = pred_ca.new_zeros(())
+        denom = pair_mask.sum().clamp_min(1.0)
+        n = pred_ca.shape[1]
+        for i in range(0, n, chunk_size):
+            j = min(i + chunk_size, n)
+            pd = torch.cdist(pred_ca[:, i:j], pred_ca)
+            td = torch.cdist(tgt_ca[:, i:j], tgt_ca)
+            total = total + (((pd - td) ** 2) * pair_mask[:, i:j]).sum()
+        return total / denom
+
     def _loss_geo(self, inputs, outputs):
         pred = outputs["3d"]["cord"][-1]
         tgt = inputs["cord-o"].unsqueeze(0) if inputs["cord-o"].ndim == 3 else inputs["cord-o"]
@@ -134,9 +147,7 @@ class IgGMPaperLoss:
         tgt_ca = tgt[:, :, 1]
         pair_mask = (cmsk[:, :, 1].unsqueeze(2) * cmsk[:, :, 1].unsqueeze(1)).to(pred.dtype)
 
-        pred_d = torch.cdist(pred_ca, pred_ca)
-        tgt_d = torch.cdist(tgt_ca, tgt_ca)
-        return (((pred_d - tgt_d) ** 2) * pair_mask).sum() / pair_mask.sum().clamp_min(1.0)
+        return self._pairwise_mse_chunked(pred_ca, tgt_ca, pair_mask, chunk_size=256)
 
     def _loss_frame(self, inputs, outputs, interface_only: bool):
         seqs = inputs["seq-p"]
@@ -189,10 +200,16 @@ class IgGMPaperLoss:
         loss_len = (((n_to_c - 1.33) ** 2) * valid_link).sum() / valid_link.sum().clamp_min(1.0)
         loss_ang = (((ca_to_c[:, :-1] - n_to_ca[:, 1:]) ** 2) * valid_link).sum() / valid_link.sum().clamp_min(1.0)
 
-        ca = pred_ca
-        dmat = torch.cdist(ca, ca)
         pair_mask = cmsk[:, :, 1].unsqueeze(2) * cmsk[:, :, 1].unsqueeze(1)
-        eye = torch.eye(dmat.shape[-1], device=dmat.device, dtype=dmat.dtype).unsqueeze(0)
-        clash = F.relu(2.0 - dmat) * pair_mask * (1.0 - eye)
-        loss_clash = clash.sum() / (pair_mask.sum() - eye.sum()).clamp_min(1.0)
+        loss_clash_sum = pred.new_zeros(())
+        diag_count = pred.new_tensor(float(pred_ca.shape[1]))
+        for i in range(0, pred_ca.shape[1], 256):
+            j = min(i + 256, pred_ca.shape[1])
+            dmat = torch.cdist(pred_ca[:, i:j], pred_ca)
+            block_mask = pair_mask[:, i:j]
+            block_clash = F.relu(2.0 - dmat) * block_mask
+            row_idx = torch.arange(i, j, device=pred.device)
+            block_clash[:, torch.arange(j - i, device=pred.device), row_idx] = 0
+            loss_clash_sum = loss_clash_sum + block_clash.sum()
+        loss_clash = loss_clash_sum / (pair_mask.sum() - diag_count).clamp_min(1.0)
         return loss_len + loss_ang + loss_clash

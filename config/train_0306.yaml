@@ -1,4 +1,3 @@
-
 data:
   metadata: data/sabdab_zip/processed/sabdab_debug20/metadata.json
   pdb_dir: data/sabdab_zip/processed/pdb
@@ -10,15 +9,12 @@ data:
   batch_size: 1
   num_workers: 0
   n_steps: 200
-  forward_chunk_size: 32
-
+  # Smaller chunk lowers pair-attention peak memory at a moderate speed cost.
+  forward_chunk_size: 16
 
 model:
-  # ppi_ckpt留空时，将自动下载并使用官方PPI预训练权重
   ppi_ckpt: "/root/private_data/luog/codex/IgGM/checkpoints/esm_ppi_650m_ab.pth"
-  # design_ckpt可选：留空表示从随机初始化开始训练DesignModel
   design_ckpt: ""
-  # 可选SO3 buffer，加速扩散旋转采样；留空则运行时动态计算
   igso3_buffer: "/root/private_data/luog/codex/IgGM/checkpoints/igso3_buffer.pth"
 
 optimizer:
@@ -35,7 +31,7 @@ metrics:
 
 trainer:
   max_epochs: 10
-  precision: bf16-mixed # 16-mixed
+  precision: bf16-mixed
   accelerator: gpu
   devices: [0]
   log_every_n_steps: 5
@@ -47,13 +43,12 @@ wandb:
   project: IgGM
   run_name: iggm-stage_time
   entity: "mllm-csu"
-  api_key: "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"
-
+  api_key: ""
 
 runtime:
   output_dir: outputs/lightning_train
   seed: 42
-  resume: False
+  resume: false
   run_test: true
 
 stage_training:
@@ -64,3 +59,20 @@ stage_training:
   mix_cdr_h2: 2
   mix_cdr_all: 2
   lazy_cache_size: 128
+
+memory:
+  # 0 disables hard filtering; set e.g. 1800 for explicit upper-bound handling.
+  max_total_len: 0
+  enable_activation_checkpoint: true
+  # Graceful fallback on rare OOM spikes instead of terminating the entire epoch.
+  skip_oom_batch: true
+  clear_cache_on_oom: true
+  # Debug-only memory diagnostics (off by default for speed).
+  profiler_enabled: false
+  profiler_log_every_n_steps: 10
+  profiler_top_k_tensors: 6
+  auto_chunk_on_oom: true
+  min_chunk_size: 2
+  featurizer_cpu_offload_on_oom: true
+  feature_fp16: false
+  enable_structure_checkpoint: true

@@ -123,6 +123,12 @@ class DesignModel(BaseModel):
         aa_len = len(asym_id)
         seqs = prot_data['seq-p']
 
+        try:
+            fea_device = next(plm_featurizer.parameters()).device
+        except StopIteration:
+            fea_device = torch.device('cpu')
+        amp_ctx = torch.autocast(device_type=fea_device.type, dtype=torch.bfloat16, enabled=(fea_device.type == 'cuda'))
+
         if asym_id.max() == 1:
             h_seqs = [''.join(seq[i] for i in range(aa_len) if asym_id[i] == 1) for seq in seqs]
             a_seqs = [''.join(seq[i] for i in range(aa_len) if asym_id[i] == 0) for seq in seqs]
@@ -130,7 +136,7 @@ class DesignModel(BaseModel):
             for h_seq, a_seq in zip(h_seqs, a_seqs):
                 aa_seq_ab = [h_seq]
                 aa_seq_ag = [a_seq]
-                with torch.no_grad():
+                with torch.no_grad(), amp_ctx:
                     plm_out_ab = plm_featurizer(aa_seq_ab)
                     plm_out_ag = plm_featurizer(aa_seq_ag)
                 plm_outs.append((plm_out_ab, plm_out_ag))
@@ -158,7 +164,7 @@ class DesignModel(BaseModel):
             for h_seq, l_seq, a_seq in zip(h_seqs, l_seqs, a_seqs):
                 aa_seq_ab = [h_seq, l_seq]
                 aa_seq_ag = [a_seq]
-                with torch.no_grad():
+                with torch.no_grad(), amp_ctx:
                     plm_out_ab = plm_featurizer(aa_seq_ab)
                     plm_out_ag = plm_featurizer(aa_seq_ag)
                 plm_outs.append((plm_out_ab, plm_out_ag))
@@ -181,10 +187,9 @@ class DesignModel(BaseModel):
             }
         else:
             raise ValueError('Invalid asym-id')
-        torch.cuda.empty_cache()
         return inputs
 
-    def forward(self, inputs, inputs_addi=None, chunk_size=None):
+    def forward(self, inputs, inputs_addi=None, chunk_size=None, return_full_aux=True):
         """Perform the forward pass.
 
         Args:
@@ -219,7 +224,7 @@ class DesignModel(BaseModel):
 
         if inputs_addi is None:  # no additional inputs
             self.net['evoformer'].requires_grad_(self.training)
-            outputs = self.__forward_impl(inputs, chunk_size=chunk_size)
+            outputs = self.__forward_impl(inputs, chunk_size=chunk_size, return_full_aux=return_full_aux)
         else:
             # build self-conditioning inputs
             if all(x == 0 for x in inputs_addi['step']):  # $\hat{x}_{0}$
@@ -240,11 +245,11 @@ class DesignModel(BaseModel):
 
             # perform the forward pass w/ self-conditioning inputs
             self.net['evoformer'].requires_grad_(self.training)
-            outputs = self.__forward_impl(inputs, inputs_sc=inputs_sc, chunk_size=chunk_size)
+            outputs = self.__forward_impl(inputs, inputs_sc=inputs_sc, chunk_size=chunk_size, return_full_aux=return_full_aux)
 
         return outputs
 
-    def __forward_impl(self, inputs, inputs_sc=None, chunk_size=None):
+    def __forward_impl(self, inputs, inputs_sc=None, chunk_size=None, return_full_aux=True):
         """Perform the forward pass - core implementation."""
 
         # build per-residue motif-or-not masks
@@ -321,6 +326,8 @@ class DesignModel(BaseModel):
             cord_tns_init=inputs['cord-p'],
             cmsk_tns_init=inputs['cmsk-p'],
             rmsk_vec_motf=rmsk_vec_motf,
+            return_param=return_full_aux,
+            return_plddt=return_full_aux,
         )
 
         # predict denoised amino-acid sequences
@@ -344,6 +351,11 @@ class DesignModel(BaseModel):
             '3d': {'cord': cord_list, 'param': param_list, 'plddt': plddt_list},
         }
         return outputs
+
+    def enable_activation_checkpoint(self, enabled=True, structure=True):
+        self.net['evoformer'].enable_activation_checkpoint(enabled)
+        if structure and hasattr(self.net['af2_smod'], "enable_activation_checkpoint"):
+            self.net['af2_smod'].enable_activation_checkpoint(enabled)
 
     def __build_model(self):
         """Build the antibody structure prediction model."""

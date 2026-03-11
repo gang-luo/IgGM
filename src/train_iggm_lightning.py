@@ -15,6 +15,8 @@ from typing import Any, Dict
 import os
 import warnings
 
+import torch
+
 # 屏蔽常见 Python warning
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -48,6 +50,7 @@ from iggm_lightning import (
     OptimizerConfig,
     ProcessedSabdabDataModule,
     StageTrainingConfig,
+    MemoryConfig,
 )
 
 
@@ -85,6 +88,7 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     wandb = defaults.get("wandb", {})
     runtime = defaults.get("runtime", {})
     stage_training = defaults.get("stage_training", {})
+    memory_cfg = defaults.get("memory", {})
 
     p = argparse.ArgumentParser(description="Train IgGM with PyTorch Lightning")
     p.add_argument("--config", default=defaults.get("config_path", "config/train_lightning.yaml"))
@@ -139,6 +143,19 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--mix_cdr_h2", type=int, default=int(stage_training.get("mix_cdr_h2", 2)))
     p.add_argument("--mix_cdr_all", type=int, default=int(stage_training.get("mix_cdr_all", 2)))
     p.add_argument("--lazy_cache_size", type=int, default=int(stage_training.get("lazy_cache_size", 128)))
+
+    p.add_argument("--max_total_len", type=int, default=int(memory_cfg.get("max_total_len", 0)))
+    p.add_argument("--enable_activation_checkpoint", type=_parse_bool, default=bool(memory_cfg.get("enable_activation_checkpoint", True)))
+    p.add_argument("--skip_oom_batch", type=_parse_bool, default=bool(memory_cfg.get("skip_oom_batch", True)))
+    p.add_argument("--clear_cache_on_oom", type=_parse_bool, default=bool(memory_cfg.get("clear_cache_on_oom", True)))
+    p.add_argument("--memory_debug", type=_parse_bool, default=bool(memory_cfg.get("profiler_enabled", False)))
+    p.add_argument("--memory_log_every_n_steps", type=int, default=int(memory_cfg.get("profiler_log_every_n_steps", 10)))
+    p.add_argument("--memory_top_k_tensors", type=int, default=int(memory_cfg.get("profiler_top_k_tensors", 6)))
+    p.add_argument("--auto_chunk_on_oom", type=_parse_bool, default=bool(memory_cfg.get("auto_chunk_on_oom", True)))
+    p.add_argument("--min_chunk_size", type=int, default=int(memory_cfg.get("min_chunk_size", 4)))
+    p.add_argument("--featurizer_cpu_offload_on_oom", type=_parse_bool, default=bool(memory_cfg.get("featurizer_cpu_offload_on_oom", True)))
+    p.add_argument("--feature_fp16", type=_parse_bool, default=bool(memory_cfg.get("feature_fp16", False)))
+    p.add_argument("--enable_structure_checkpoint", type=_parse_bool, default=bool(memory_cfg.get("enable_structure_checkpoint", True)))
     return p
 
 
@@ -158,6 +175,11 @@ def main() -> None:
 
     args = _parse_args()
     pl.seed_everything(args.seed, workers=True)
+
+    if torch.cuda.is_available():
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(False)
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -218,6 +240,20 @@ def main() -> None:
                 "cdr_all": args.mix_cdr_all,
             },
         ),
+        mem_cfg=MemoryConfig(
+            max_total_len=args.max_total_len,
+            enable_activation_checkpoint=args.enable_activation_checkpoint,
+            skip_oom_batch=args.skip_oom_batch,
+            clear_cache_on_oom=args.clear_cache_on_oom,
+            profiler_enabled=args.memory_debug,
+            profiler_log_every_n_steps=args.memory_log_every_n_steps,
+            profiler_top_k_tensors=args.memory_top_k_tensors,
+            auto_chunk_on_oom=args.auto_chunk_on_oom,
+            min_chunk_size=args.min_chunk_size,
+            featurizer_cpu_offload_on_oom=args.featurizer_cpu_offload_on_oom,
+            feature_fp16=args.feature_fp16,
+            enable_structure_checkpoint=args.enable_structure_checkpoint,
+        ),
     )
 
     ckpt_dir = out / "checkpoints"
@@ -258,6 +294,7 @@ def main() -> None:
         log_every_n_steps=args.log_every_n_steps,
         accumulate_grad_batches=max(1, args.accumulate_grad_batches),
         num_sanity_val_steps=max(0, args.num_sanity_val_steps),
+        deterministic=False,
     )
 
     last_ckpt = ckpt_dir / "last.ckpt"
