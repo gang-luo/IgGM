@@ -28,20 +28,6 @@ from .losses import IgGMLossConfig, IgGMPaperLoss
 from .metrics import MetricConfig, StructureMetrics
 
 
-def mem(tag):
-    a = torch.cuda.memory_allocated() / 1024**3
-    r = torch.cuda.memory_reserved() / 1024**3
-    p = torch.cuda.max_memory_allocated() / 1024**3
-    print(f"[{tag}] alloc={a:.2f} GB reserved={r:.2f} GB peak={p:.2f} GB")
-
-#  maxlen filter
-def _should_skip_batch(prot_data_curr: Dict[str, Any]) -> bool:
-    asym_id = prot_data_curr.get("asym_id")
-    if asym_id is None:
-        return False
-    seq_len = int(asym_id.shape[-1])
-    return seq_len > int(600)
-
 @dataclass
 class OptimizerConfig:
     name: str = "adamw"
@@ -61,7 +47,6 @@ class StageTrainingConfig:
 
     def __post_init__(self):
         if self.stage2_mix_weights is None:
-            # default ratio: CDR-H3 : CDR-H1 : CDR-H2 : all-CDR = 4:2:2:2
             self.stage2_mix_weights = {
                 "cdr_h3": 4,
                 "cdr_h1": 2,
@@ -70,13 +55,26 @@ class StageTrainingConfig:
             }
 
 
+@dataclass
+class MemoryConfig:
+    max_total_len: int = 0
+    enable_activation_checkpoint: bool = True
+    skip_oom_batch: bool = True
+    clear_cache_on_oom: bool = True
+    profiler_enabled: bool = False
+    profiler_log_every_n_steps: int = 10
+    profiler_top_k_tensors: int = 6
+    auto_chunk_on_oom: bool = True
+    min_chunk_size: int = 4
+
+
 class ModelEMA:
     """Minimal EMA for optional shadow parameter tracking."""
 
     def __init__(self, model: nn.Module, decay: float = 0.999) -> None:
         self.decay = decay
         self.shadow = {
-            k: v.detach().clone()
+            k: v.detach().clone().cpu()
             for k, v in model.state_dict().items()
             if torch.is_floating_point(v)
         }
@@ -85,7 +83,8 @@ class ModelEMA:
     def update(self, model: nn.Module) -> None:
         msd = model.state_dict()
         for k, v in self.shadow.items():
-            v.mul_(self.decay).add_(msd[k], alpha=1.0 - self.decay)
+            curr = msd[k].detach().to(v.device)
+            v.mul_(self.decay).add_(curr, alpha=1.0 - self.decay)
 
 
 class IgGMLightningModule(pl.LightningModule):
@@ -106,6 +105,7 @@ class IgGMLightningModule(pl.LightningModule):
         loss_cfg: Optional[IgGMLossConfig] = None,
         metric_cfg: Optional[MetricConfig] = None,
         stage_cfg: Optional[StageTrainingConfig] = None,
+        mem_cfg: Optional[MemoryConfig] = None,
     ) -> None:
         super().__init__()
         if not isinstance(model, nn.Module):
@@ -122,10 +122,45 @@ class IgGMLightningModule(pl.LightningModule):
         self.enable_amp = use_amp
         self.debug_shapes = debug_shapes
         self._shape_printed = False
+        self.mem_cfg = mem_cfg or MemoryConfig()
         self.ema = ModelEMA(self.model, ema_decay) if ema_decay is not None else None
         self.loss_fn = IgGMPaperLoss(loss_cfg)
         self.metric_fn = StructureMetrics(metric_cfg)
         self.stage_cfg = stage_cfg or StageTrainingConfig()
+        self._mem_events: List[tuple[str, float]] = []
+
+        evoformer = getattr(getattr(self.model, "net", None), "get", lambda _k: None)("evoformer") if hasattr(self.model, "net") else None
+        if evoformer is not None and hasattr(evoformer, "enable_activation_checkpoint"):
+            evoformer.enable_activation_checkpoint(bool(self.mem_cfg.enable_activation_checkpoint))
+
+    def _log_mem(self, tag: str) -> None:
+        if self.device.type != "cuda" or not self.mem_cfg.profiler_enabled:
+            return
+        alloc = float(torch.cuda.memory_allocated(self.device) / 1024**3)
+        self._mem_events.append((tag, alloc))
+
+    def _flush_mem_report(self, stage: str, batch_idx: int, inputs: Optional[Dict[str, Any]] = None) -> None:
+        if self.device.type != "cuda" or not self.mem_cfg.profiler_enabled:
+            self._mem_events.clear()
+            return
+        if (batch_idx % max(1, int(self.mem_cfg.profiler_log_every_n_steps))) != 0:
+            self._mem_events.clear()
+            return
+
+        peak = float(torch.cuda.max_memory_allocated(self.device) / 1024**3)
+        event_text = ", ".join(f"{name}={val:.2f}GB" for name, val in self._mem_events)
+        extra = ""
+        if inputs is not None:
+            tensors = []
+            for key, val in inputs.items():
+                if torch.is_tensor(val):
+                    tensors.append((key, tuple(val.shape), val.numel() * val.element_size() / 1024**2))
+            tensors.sort(key=lambda x: x[2], reverse=True)
+            top = tensors[: max(1, int(self.mem_cfg.profiler_top_k_tensors))]
+            extra = " | top=" + "; ".join(f"{k}:{s}:{mb:.1f}MB" for k, s, mb in top)
+
+        print(f"[mem][{stage}][step={self.global_step}] peak={peak:.2f}GB | {event_text}{extra}")
+        self._mem_events.clear()
 
     def _assert_and_log_shapes(self, inputs: Dict[str, Any], outputs: Dict[str, Any]) -> None:
         cord_p = inputs["cord-p"]
@@ -165,12 +200,20 @@ class IgGMLightningModule(pl.LightningModule):
     def _is_stage2(self) -> bool:
         return self.current_epoch >= int(self.stage_cfg.stage1_epochs)
 
+    def _is_over_len(self, prot_data_curr: Dict[str, Any]) -> bool:
+        max_total_len = int(self.mem_cfg.max_total_len)
+        if max_total_len <= 0:
+            return False
+        asym_id = prot_data_curr.get("asym_id")
+        if asym_id is None:
+            return False
+        return int(asym_id.shape[-1]) > max_total_len
+
     @staticmethod
     def _cdr_mask_from_payload(payload: Dict[str, Any], mode: str) -> Optional[List[int]]:
         cdr = payload.get("cdr_sequences") or {}
         seq_lens = payload.get("sequence_lengths") or {}
         h_len = int(seq_lens.get("H", 0))
-        l_len = int(seq_lens.get("L", 0))
 
         def _offset_indices(keys: List[str], offset: int) -> List[int]:
             out: List[int] = []
@@ -246,41 +289,87 @@ class IgGMLightningModule(pl.LightningModule):
     def _decode_pred_seq(logits_1d: torch.Tensor) -> str:
         if logits_1d.ndim != 2:
             raise ValueError(f"Unexpected sequence logit rank: {tuple(logits_1d.shape)}")
-        # Support both [L, C] and [C, L] layouts from different model checkpoints.
         if logits_1d.shape[0] == len(RESD_NAMES_1C) and logits_1d.shape[1] != len(RESD_NAMES_1C):
             logits_1d = logits_1d.transpose(0, 1)
         token_ids = logits_1d.argmax(dim=-1).detach().cpu().tolist()
         return ''.join(RESD_NAMES_1C[i] for i in token_ids)
 
-    def _shared_step(self, batch: Dict[str, Any], stage: str) -> torch.Tensor:
+
+    def _iter_chunk_sizes(self, chunk_size: Optional[int]) -> List[Optional[int]]:
+        if chunk_size is None or chunk_size <= 0 or not self.mem_cfg.auto_chunk_on_oom:
+            return [chunk_size]
+        out: List[Optional[int]] = []
+        cur = int(chunk_size)
+        min_chunk = max(1, int(self.mem_cfg.min_chunk_size))
+        while cur >= min_chunk:
+            out.append(cur)
+            if cur == min_chunk:
+                break
+            cur = max(min_chunk, cur // 2)
+        if out[-1] != min_chunk:
+            out.append(min_chunk)
+        return out
+
+    def _shared_step(self, batch: Dict[str, Any], stage: str) -> Optional[torch.Tensor]:
         idx_step = int(batch["idx_step"])
         payload = batch.get("payload")
         if payload is None:
             raise RuntimeError("Dataset must provide resolved `payload` for lazy loading.")
+
+        if self.device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(self.device)
+
+        self._log_mem("batch_load")
         prot_data_curr = self._move_to_device(payload["prot_data_curr"])
-        if _should_skip_batch(prot_data_curr):
+
+        if self._is_over_len(prot_data_curr):
             seq_len = int(prot_data_curr["asym_id"].shape[-1])
-            self.log(
-                f"{stage}/skip_long_batch",
-                torch.tensor(1.0, device=self.device),
-                prog_bar=False,
-                on_step=(stage == "train"),
-                on_epoch=True,
-                batch_size=1,
-            )
-            print( f"[IgGMLightningModule] skip {stage} batch:{idx_step},seqlen={seq_len} ")
+            self.log(f"{stage}/skip_long_batch", torch.tensor(1.0, device=self.device), on_epoch=True, batch_size=1)
+            print(f"[IgGMLightningModule] skip {stage} batch:{idx_step}, seqlen={seq_len} > max_total_len={self.mem_cfg.max_total_len}")
             return None
-    
+
         self._apply_stage_mask(prot_data_curr, payload)
-
         inputs_addi = batch.get("inputs_addi")
-        inputs = self._build_inputs_cm(prot_data_curr, idx_step)
 
-        amp_ctx = torch.autocast(device_type=self.device.type, enabled=self.enable_amp) if self.device.type in ("cuda", "cpu") else nullcontext()
-        with amp_ctx:
-            outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
-            self._assert_and_log_shapes(inputs, outputs)
-            loss_dict = self._compute_loss(inputs, outputs)
+        inputs = self._build_inputs_cm(prot_data_curr, idx_step)
+        self._log_mem("diffuser_forward")
+        self._log_mem("featurization")
+
+        chunk_candidates = self._iter_chunk_sizes(batch.get("chunk_size"))
+        loss_dict = None
+        last_oom = None
+        for chunk_size in chunk_candidates:
+            try:
+                amp_ctx = torch.autocast(device_type=self.device.type, enabled=self.enable_amp) if self.device.type in ("cuda", "cpu") else nullcontext()
+                with amp_ctx:
+                    outputs = self.model(
+                        inputs,
+                        inputs_addi=inputs_addi,
+                        chunk_size=chunk_size,
+                    )
+                    self._log_mem("model_forward")
+                    self._assert_and_log_shapes(inputs, outputs)
+                    loss_dict = self._compute_loss(inputs, outputs)
+                    self._log_mem("loss")
+                if chunk_size != batch.get("chunk_size"):
+                    print(f"[IgGMLightningModule] recovered batch with smaller chunk_size={chunk_size}")
+                break
+            except RuntimeError as exc:
+                if "out of memory" not in str(exc).lower():
+                    raise
+                last_oom = exc
+                if self.device.type == "cuda" and self.mem_cfg.clear_cache_on_oom:
+                    torch.cuda.empty_cache()
+                continue
+
+        if loss_dict is None:
+            if self.mem_cfg.skip_oom_batch:
+                self.log(f"{stage}/skip_oom_batch", torch.tensor(1.0, device=self.device), on_epoch=True, batch_size=1)
+                print(f"[IgGMLightningModule] skip {stage} batch due to OOM at diffusion-step={idx_step}")
+                return None
+            if last_oom is not None:
+                raise last_oom
+            raise RuntimeError("Model forward failed without producing loss.")
 
         self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=(stage == "train"), on_epoch=True)
         self.log(f"{stage}/loss_geo", loss_dict["loss_geo"], prog_bar=False, on_step=False, on_epoch=True)
@@ -301,20 +390,20 @@ class IgGMLightningModule(pl.LightningModule):
             for k, v in metric_dict.items():
                 self.log(f"{stage}/{k}", v, prog_bar=(k == "tm_score"), on_step=False, on_epoch=True)
 
+        self._flush_mem_report(stage=stage, batch_idx=self.global_step, inputs=inputs)
         return loss_dict["loss"]
 
-    def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
+    def training_step(self, batch: Dict[str, Any], batch_idx: int) -> Optional[torch.Tensor]:
         return self._shared_step(batch, stage="train")
 
-    def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
+    def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> Optional[torch.Tensor]:
         return self._shared_step(batch, stage="val")
 
-    def test_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
+    def test_step(self, batch: Dict[str, Any], batch_idx: int) -> Optional[torch.Tensor]:
         return self._shared_step(batch, stage="test")
 
     def train(self, mode: bool = True):
         super().train(mode)
-        # Keep PLM featurizer frozen in eval mode while DesignModel trains.
         self.plm_featurizer.eval()
         return self
 
