@@ -35,9 +35,6 @@ class StructureModule(nn.Module):
         self.pred_oxyg = pred_oxyg
         self.pred_schn = pred_schn
 
-        # add 
-        self.activation_checkpoint = False
-
         # additional configurations
         self.atom_mapper = AtomMapper()
         self.prot_struct = ProtStruct()
@@ -72,8 +69,6 @@ class StructureModule(nn.Module):
     def forward(
             self, aa_seqs, sfea_tns, pfea_tns, encd_tns,
             n_lyrs=-1, cord_tns_init=None, cmsk_tns_init=None, rmsk_vec_motf=None,
-            chunk_size=None,
-
     ):  # pylint: disable=too-many-arguments,too-many-locals,too-many-statements
         """Perform the forward pass.
 
@@ -135,22 +130,12 @@ class StructureModule(nn.Module):
 
         # perform multiple forward passes
         quat_tns = quat_tns_init.detach().clone()
-
         trsl_tns = trsl_tns_init.detach().clone()
         cord_list, param_list, plddt_list, fram_tns_sc = [], [], [], None
         for idx_lyr in range(n_lyrs):
             # perform a single forward pass
             quat_tns = quat_tns.detach()  # no gradient propagation
-            if self.activation_checkpoint:
-                sfea_tns = self.activation_checkpoint_fn(
-                    self.net['ipa'],sfea_tns,pfea_tns,quat_tns,trsl_tns,chunk_size,
-                )
-            else:
-                sfea_tns = self.net['ipa'](
-                    sfea_tns,pfea_tns,quat_tns,trsl_tns,chunk_size,
-                )
-            
-
+            sfea_tns = self.net['ipa'](sfea_tns, pfea_tns, quat_tns, trsl_tns) # origin define
             quat_tns, trsl_tns, angl_tns, quat_tns_upd = \
                 self.net['fa'](aa_seqs, sfea_tns, sfea_tns_init, encd_tns, quat_tns, trsl_tns)
             plddt_dict = self.net['plddt'](sfea_tns.detach())

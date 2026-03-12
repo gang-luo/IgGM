@@ -1,8 +1,8 @@
 {
-  "dataset_name": "sabdab_debug20",
+  "dataset_name": "sabdab_debug",
   "mode": "real",
   "sample_count": 20,
-  "samples_dir": "data/sabdab_zip/processed/sabdab_debug20/samples",
+  "samples_dir": "data/sabdab_zip/processed/sabdab_debug/samples",
   "fasta_dir": "data/sabdab_zip/processed/fasta",
   "seed": 0,
   "limit": 20,

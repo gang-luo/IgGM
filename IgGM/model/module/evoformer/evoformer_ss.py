@@ -169,7 +169,8 @@ class EvoformerStackSS(nn.Module):
         if activation_checkpoint_fn is None:
             self.activation_checkpoint_fn = torch.utils.checkpoint.checkpoint
 
-        self.activation_checkpoint = False
+        self.activation_checkpoint = False # default using grad checkpoint to unsave activation ckpt to gpus
+        # self.activation_checkpoint = True # using basemodel to open all grad checkpoint
         self.blocks = nn.ModuleList([
             EvoformerBlockSS(self.c_s, self.c_z)
             for _ in range(self.num_layers)

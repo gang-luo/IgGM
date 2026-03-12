@@ -262,6 +262,7 @@ def main() -> None:
 
     last_ckpt = ckpt_dir / "last.ckpt"
     ckpt_path = str(last_ckpt) if args.resume and last_ckpt.exists() else None
+
     trainer.fit(lit_model, datamodule=dm, ckpt_path=ckpt_path)
 
     if args.run_test:

@@ -599,7 +599,8 @@ def _greedy_cluster(ids: List[str], seqs: Dict[str, str], identity: float) -> Li
 
 def _cluster_with_cdhit(ids: List[str], seqs: Dict[str, str], split_dir: Path, identity: float) -> List[List[str]]:
     # cdhit = shutil.which("cd-hit")
-    cdhit = shutil.which("/root/private_data/luog/codex/cd-hit-v4.8.1-2019-0228/cd-hit")
+    # cdhit = shutil.which("/root/private_data/luog/codex/cd-hit-v4.8.1-2019-0228/cd-hit")
+    cdhit = "/root/private_data/luog/codex/cd-hit-v4.8.1-2019-0228/cd-hit"
     if cdhit is None:
         return _greedy_cluster(ids, seqs, identity)
 
@@ -809,9 +810,17 @@ if __name__ == "__main__":
 #   --dataset_name sabdab_debug \
 #   --raw_root ./data/origin_file \
 #   --out_root ./data/sabdab_zip/processed \
-#   --limit 500 \
+#   --limit 20 \
 #   --build_splits \
 #   --split_out_dir ./data/sabdab_zip/processed/sabdab_debug/split \
 #   --cluster_identity 0.95
 
 # 代表性测试结果，7mi3文件
+
+# python data/prepare_data_fromzip.py \
+#   --dataset_name sabdab \
+#   --raw_root ./data/origin_file \
+#   --out_root ./data/sabdab/processed \
+#   --build_splits \
+#   --split_out_dir ./data/sabdab/processed/sabdab_file/split \
+#   --cluster_identity 0.95

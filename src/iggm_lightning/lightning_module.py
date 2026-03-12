@@ -40,7 +40,7 @@ def _should_skip_batch(prot_data_curr: Dict[str, Any]) -> bool:
     if asym_id is None:
         return False
     seq_len = int(asym_id.shape[-1])
-    return seq_len > int(600)
+    return seq_len > int(1600)
 
 @dataclass
 class OptimizerConfig:
@@ -258,8 +258,10 @@ class IgGMLightningModule(pl.LightningModule):
         if payload is None:
             raise RuntimeError("Dataset must provide resolved `payload` for lazy loading.")
         prot_data_curr = self._move_to_device(payload["prot_data_curr"])
+
+
+        seq_len = int(prot_data_curr["asym_id"].shape[-1])
         if _should_skip_batch(prot_data_curr):
-            seq_len = int(prot_data_curr["asym_id"].shape[-1])
             self.log(
                 f"{stage}/skip_long_batch",
                 torch.tensor(1.0, device=self.device),
@@ -270,6 +272,8 @@ class IgGMLightningModule(pl.LightningModule):
             )
             print( f"[IgGMLightningModule] skip {stage} batch:{idx_step},seqlen={seq_len} ")
             return None
+        else:
+            print(f"[IgGMLightningModule] process {stage} batch:{idx_step},seqlen={seq_len} ")
     
         self._apply_stage_mask(prot_data_curr, payload)
 
