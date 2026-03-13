@@ -35,8 +35,9 @@ class StructureModule(nn.Module):
         self.pred_oxyg = pred_oxyg
         self.pred_schn = pred_schn
 
-        # add 
+        # using grad checkpoint to save GPU memory
         self.activation_checkpoint = False
+        self.activation_checkpoint_fn = torch.utils.checkpoint.checkpoint
 
         # additional configurations
         self.atom_mapper = AtomMapper()
@@ -65,9 +66,6 @@ class StructureModule(nn.Module):
 
         # PLddtNet - predict lDDT-CA scores
         self.net['plddt'] = PLDDTHead(c_s=self.n_dims_sfea)
-
-        # using grad checkpoint to save GPU memory
-        self.activation_checkpoint_fn = torch.utils.checkpoint.checkpoint
 
     def forward(
             self, aa_seqs, sfea_tns, pfea_tns, encd_tns,
