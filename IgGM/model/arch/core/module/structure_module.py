@@ -147,8 +147,6 @@ class StructureModule(nn.Module):
                 sfea_tns = self.net['ipa'](
                     sfea_tns,pfea_tns,quat_tns,trsl_tns,chunk_size,
                 )
-            
-
             quat_tns, trsl_tns, angl_tns, quat_tns_upd = \
                 self.net['fa'](aa_seqs, sfea_tns, sfea_tns_init, encd_tns, quat_tns, trsl_tns)
             plddt_dict = self.net['plddt'](sfea_tns.detach())

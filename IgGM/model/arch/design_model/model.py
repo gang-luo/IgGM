@@ -208,8 +208,6 @@ class DesignModel(BaseModel):
         
         if inputs_addi is None:  # no additional inputs
             self.net['evoformer'].requires_grad_(self.training)
-
-            # using grad checkpoint in training, but not in inference
             outputs = self.__forward_impl(inputs, chunk_size=chunk_size)
         else:
             # build self-conditioning inputs
@@ -219,11 +217,6 @@ class DesignModel(BaseModel):
                 with torch.no_grad():
 
                     self.net['evoformer'].requires_grad_(False)  # no gradient computation
-                    
-                    # using grad checkpoint in training, but not in inference
-                    self.net['evoformer'].activation_checkpoint = self.training 
-                    self.net['af2_smod'].activation_checkpoint = self.training
-
                     outputs = self.__forward_impl(inputs_addi)
                 inputs_sc = {
                     'sfea': outputs['sfea'].detach(),

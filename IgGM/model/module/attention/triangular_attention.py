@@ -56,7 +56,7 @@ class TriangleAttention(nn.Module):
             mha_inputs,
             chunk_size=chunk_size,
             no_batch_dims=len(x.shape[:-2]),
-            # low_mem = True # luog added
+            low_mem = True # luog added
         )
 
     def forward(self,

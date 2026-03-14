@@ -1,17 +1,17 @@
 
 data:
-  metadata: data/sabdab_zip_test/processed/sabdab_debug/metadata_test.json
-  pdb_dir: data/sabdab_zip_test/processed/pdb
-  samples_dir: data/sabdab_zip_test/processed/sabdab_debug/samples
-  train_ids: data/sabdab_zip_test/processed/sabdab_debug/split/train_prot_ids.txt
-  val_ids: data/sabdab_zip_test/processed/sabdab_debug/split/val_prot_ids.txt
-  test_ids: data/sabdab_zip_test/processed/sabdab_debug/split/test_prot_ids.txt
-  train_clusters: data/sabdab_zip_test/processed/sabdab_debug/split/train_prot_cluster.txt
+  metadata: data/sabdab_zip/processed/sabdab_debug/metadata.json
+  pdb_dir: data/sabdab_zip/processed/pdb
+  samples_dir: data/sabdab_zip/processed/sabdab_debug/samples
+  train_ids: data/sabdab_zip/processed/sabdab_debug/split/train_prot_ids.txt
+  val_ids: data/sabdab_zip/processed/sabdab_debug/split/val_prot_ids.txt
+  test_ids: data/sabdab_zip/processed/sabdab_debug/split/test_prot_ids.txt
+  train_clusters: data/sabdab_zip/processed/sabdab_debug/split/train_prot_cluster.txt
   batch_size: 1
-  num_workers: 4
+  num_workers: 8
   n_steps: 200
-  forward_chunk_size: 256
-  max_antigen_len: 1000
+  forward_chunk_size: 64
+  max_antigen_len: 256  # 384
 
 
 model:
@@ -38,13 +38,13 @@ trainer:
   max_epochs: 10
   precision: bf16-mixed # 16-mixed
   accelerator: gpu
-  devices: [0]
+  devices: [0,1]
   log_every_n_steps: 5
-  accumulate_grad_batches: 1
+  accumulate_grad_batches: 2
   num_sanity_val_steps: 1
 
 wandb:
-  disabled: true
+  disabled: false # true or false
   project: IgGM
   run_name: iggm-stage_time
   entity: "mllm-csu"
@@ -58,7 +58,7 @@ runtime:
   run_test: true
 
 stage_training:
-  stage1_epochs: 1
+  stage1_epochs: 4
   stage2_enable_seq_recovery: true
   mix_cdr_h3: 4
   mix_cdr_h1: 2

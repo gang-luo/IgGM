@@ -406,12 +406,6 @@ class ProcessedSabdabDataModule(pl.LightningDataModule):
         if self._train_sampler is not None:
             return DataLoader(self.train_ds, batch_size=1, shuffle=False, sampler=self._train_sampler, num_workers=self.num_workers, collate_fn=_batch_one)
         return DataLoader(self.train_ds, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, collate_fn=_batch_one)
-
-    # def val_dataloader(self):
-    #     return DataLoader(self.val_ds, batch_size=1, shuffle=False, num_workers=self.num_workers, collate_fn=_batch_one)
-
-    # def test_dataloader(self):
-    #     return DataLoader(self.test_ds, batch_size=1, shuffle=False, num_workers=self.num_workers, collate_fn=_batch_one)
     
     def val_dataloader(self):
         return DataLoader(self.val_ds, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, collate_fn=_batch_one)
