@@ -100,6 +100,7 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--samples_dir", default=data.get("samples_dir", ""))
     p.add_argument("--n_steps", type=int, default=int(data.get("n_steps", 200)))
     p.add_argument("--forward_chunk_size", type=int, default=int(data.get("forward_chunk_size", 64)))
+    p.add_argument("--max_antigen_len", type=int, default=int(data.get("max_antigen_len", 0)))
 
     p.add_argument("--ppi_ckpt", default=model.get("ppi_ckpt", ""))
     p.add_argument("--design_ckpt", default=model.get("design_ckpt", ""))
@@ -175,6 +176,7 @@ def main() -> None:
         n_steps=args.n_steps,
         lazy_cache_size=args.lazy_cache_size,
         forward_chunk_size=(args.forward_chunk_size if args.forward_chunk_size > 0 else None),
+        max_antigen_len=(args.max_antigen_len if args.max_antigen_len > 0 else None),
     )
     dm.setup()
 

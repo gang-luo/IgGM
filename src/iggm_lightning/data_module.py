@@ -18,6 +18,8 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 
 from IgGM.data.convert_to_example_format import convert_entry_to_sample
 from IgGM.data.sabdab import load_sabdab_metadata
+from IgGM.protein import crop_sequence_with_epitope
+from IgGM.protein.data_transform.processing_multimer import get_asym_ids
 
 
 @dataclass
@@ -31,12 +33,72 @@ class SplitConfig:
 class _ProteinSampleDataset(Dataset):
     """Lazy dataset that resolves a sample payload only when indexed."""
 
-    def __init__(self, items: List[Dict[str, object]], n_steps: int = 200, cache_size: int = 128, chunk_size: Optional[int] = None):
+    def __init__(
+        self,
+        items: List[Dict[str, object]],
+        n_steps: int = 200,
+        cache_size: int = 128,
+        chunk_size: Optional[int] = None,
+        max_antigen_len: Optional[int] = None,
+    ):
         self.items = items
         self.n_steps = n_steps
         self._cache_size = max(1, int(cache_size))
         self._sample_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()        
         self._chunk_size = None if chunk_size is None else max(1, int(chunk_size))
+        self._max_antigen_len = None if max_antigen_len is None else max(1, int(max_antigen_len))
+
+    def _apply_antigen_crop(self, converted: Dict[str, Any]) -> Dict[str, Any]:
+        if self._max_antigen_len is None:
+            return converted
+
+        chains = converted.get("chains", [])
+        if not chains:
+            return converted
+        antigen = chains[-1]
+        ag_seq = antigen.get("sequence") or antigen.get("seq")
+        if not ag_seq or len(ag_seq) <= self._max_antigen_len:
+            return converted
+
+        epitope = antigen.get("epitope")
+        if epitope is None:
+            epitope = torch.zeros(len(ag_seq), dtype=torch.int8)
+        if not torch.is_tensor(epitope):
+            epitope = torch.as_tensor(epitope)
+
+        seq_new, cord_new, cmsk_new, epitope_new, _ = crop_sequence_with_epitope(
+            ag_seq,
+            antigen["cord"],
+            antigen["cmsk"],
+            epitope,
+            max_len=self._max_antigen_len,
+        )
+
+        antigen["seq"] = seq_new
+        antigen["sequence"] = seq_new
+        antigen["cord"] = cord_new
+        antigen["cmsk"] = cmsk_new
+        antigen["epitope"] = epitope_new.to(torch.int8)
+
+        sequences = [x["sequence"] for x in chains]
+        concatenated_seq = "".join(sequences)
+        concatenated_cord = torch.cat([x["cord"] for x in chains], dim=0)
+        concatenated_cmsk = torch.cat([x["cmsk"] for x in chains], dim=0)
+        asym_id = len(chains) - get_asym_ids(sequences)
+        mask_ab = torch.zeros(len(concatenated_seq), dtype=torch.int8)
+        mask_ab[:-len(antigen["sequence"])] = 1
+
+        complex_data = converted["complex"]
+        complex_data["seq"] = concatenated_seq
+        complex_data["cord"] = concatenated_cord
+        complex_data["cmsk"] = concatenated_cmsk
+        complex_data["asym_id"] = asym_id.unsqueeze(0)
+        complex_data["mask_ab"] = mask_ab
+        complex_data["mask_design"] = torch.zeros(len(concatenated_seq), dtype=torch.int8)
+        complex_data["a-cord"] = antigen["cord"]
+        complex_data["a-cmsk"] = antigen["cmsk"]
+        complex_data["epitope"] = antigen["epitope"]
+        return converted
 
     def __len__(self):
         return len(self.items)
@@ -88,6 +150,7 @@ class _ProteinSampleDataset(Dataset):
         converted = convert_entry_to_sample(entry, str(processed_pdb_path))
         if converted is None:
             raise RuntimeError(f"Failed to convert processed PDB sample: {processed_pdb_path}")
+        converted = self._apply_antigen_crop(converted)
 
         complex_data = converted["complex"]
         payload = {
@@ -189,6 +252,7 @@ class ProcessedSabdabDataModule(pl.LightningDataModule):
         n_steps: int = 200,
         lazy_cache_size: int = 128,
         forward_chunk_size: Optional[int] = None,
+        max_antigen_len: Optional[int] = None,
     ):
         super().__init__()
         self.metadata_path = Path(metadata_path)
@@ -204,6 +268,7 @@ class ProcessedSabdabDataModule(pl.LightningDataModule):
         self.n_steps = n_steps
         self.lazy_cache_size = lazy_cache_size
         self.forward_chunk_size = None if forward_chunk_size is None else max(1, int(forward_chunk_size))
+        self.max_antigen_len = None if max_antigen_len is None else max(1, int(max_antigen_len))
         self.train_ds: Optional[Dataset] = None
         self.val_ds: Optional[Dataset] = None
         self.test_ds: Optional[Dataset] = None
@@ -331,9 +396,9 @@ class ProcessedSabdabDataModule(pl.LightningDataModule):
             val_items = items[n_train:n_train + n_val]
             test_items = items[n_train + n_val:] if (n_train + n_val) < n else items[-1:]
 
-        self.train_ds = _ProteinSampleDataset(train_items, n_steps=self.n_steps, cache_size=self.lazy_cache_size, chunk_size=self.forward_chunk_size)
-        self.val_ds = _ProteinSampleDataset(val_items if val_items else train_items[:1], n_steps=self.n_steps, cache_size=self.lazy_cache_size, chunk_size=self.forward_chunk_size)
-        self.test_ds = _ProteinSampleDataset(test_items if test_items else train_items[:1], n_steps=self.n_steps, cache_size=self.lazy_cache_size, chunk_size=self.forward_chunk_size)
+        self.train_ds = _ProteinSampleDataset(train_items, n_steps=self.n_steps, cache_size=self.lazy_cache_size, chunk_size=self.forward_chunk_size, max_antigen_len=self.max_antigen_len)
+        self.val_ds = _ProteinSampleDataset(val_items if val_items else train_items[:1], n_steps=self.n_steps, cache_size=self.lazy_cache_size, chunk_size=self.forward_chunk_size, max_antigen_len=self.max_antigen_len)
+        self.test_ds = _ProteinSampleDataset(test_items if test_items else train_items[:1], n_steps=self.n_steps, cache_size=self.lazy_cache_size, chunk_size=self.forward_chunk_size, max_antigen_len=self.max_antigen_len)
 
         self._train_sampler = self._build_sampler_from_cluster_file(train_items)
 
