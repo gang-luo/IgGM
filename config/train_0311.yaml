@@ -11,6 +11,7 @@ data:
   num_workers: 16
   n_steps: 200
   forward_chunk_size: 32
+  max_antigen_len: 1000
 
 
 model:
