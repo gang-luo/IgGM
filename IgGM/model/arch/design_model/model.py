@@ -14,7 +14,6 @@ from ..base_model import BaseModel
 from ..core.module import PairPredictor, StructureModule
 from ...build import MODEL_REGISTRY
 
-
 @MODEL_REGISTRY.register()
 class DesignModel(BaseModel):
     """The antibody design model
@@ -203,13 +202,14 @@ class DesignModel(BaseModel):
           > logt: residue type classification logits of size N x C x L (for $\hat{x}_{0}$)
           > cord: per-atom 3D coordinates of size N x L x M x 3 (for $\hat{x}_{0}$)
         """
-
+        
+        self.net['evoformer'].activation_checkpoint = self.training
+        self.net['af2_smod'].activation_checkpoint = self.training
+        
         if inputs_addi is None:  # no additional inputs
             self.net['evoformer'].requires_grad_(self.training)
 
             # using grad checkpoint in training, but not in inference
-            self.net['evoformer'].activation_checkpoint = self.training
-            self.net['af2_smod'].activation_checkpoint = self.training
             outputs = self.__forward_impl(inputs, chunk_size=chunk_size)
         else:
             # build self-conditioning inputs

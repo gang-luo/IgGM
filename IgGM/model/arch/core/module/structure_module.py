@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Tencent Inc. All rights reserved.
+# Copyright (c) 2024, gang luo
 import torch
 from torch import nn
 
@@ -7,7 +7,7 @@ from IgGM.protein import ProtStruct, ProtConverter, AtomMapper
 from IgGM.protein.prot_constants import N_ATOMS_PER_RESD, N_ANGLS_PER_RESD
 from IgGM.protein.utils import init_qta_params
 from .head import PLDDTHead, FrameAngleHead
-from .invariant_point_attention import InvariantPointAttention
+from .invariant_point_attention_chunk import InvariantPointAttention
 
 
 class StructureModule(nn.Module):
