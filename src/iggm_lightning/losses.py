@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -19,6 +19,13 @@ class IgGMLossConfig:
     loss_viol_weight: float = 0.02
     eps: float = 1e-8
     enable_seq_recovery: bool = True
+    frame_w_trans: float = 1.0
+    frame_w_rot: float = 1.0
+    frame_d_clamp: float = 100.0
+    geo_dist_min: float = 2.0
+    geo_dist_max: float = 20.0
+    geo_dist_bins: int = 36
+    geo_angle_bins: int = 24
 
 
 class IgGMPaperLoss:
@@ -87,7 +94,6 @@ class IgGMPaperLoss:
         if isinstance(seq_o, str):
             seq_batch = [seq_o]
         elif isinstance(seq_o, (list, tuple)) and seq_o and all(isinstance(x, str) and len(x) == 1 for x in seq_o):
-            # Common edge case in this repo: a single sequence represented as list[char].
             seq_batch = ["".join(seq_o)]
         elif isinstance(seq_o, (list, tuple)):
             seq_batch = list(seq_o)
@@ -112,6 +118,140 @@ class IgGMPaperLoss:
             valid[i, :n] = True
         return tgt, valid
 
+    @staticmethod
+    def _safe_get(outputs: Dict[str, torch.Tensor], path: Tuple[str, ...]) -> Optional[torch.Tensor]:
+        curr = outputs
+        for key in path:
+            if not isinstance(curr, dict) or key not in curr:
+                return None
+            curr = curr[key]
+        if torch.is_tensor(curr):
+            return curr
+        return None
+
+    def _extract_geo_logits(self, outputs: Dict[str, torch.Tensor]) -> Optional[Dict[str, torch.Tensor]]:
+        out = {}
+
+        def _first_tensor(paths):
+            for p in paths:
+                t = self._safe_get(outputs, p)
+                if t is not None:
+                    return t
+            return None
+
+        out["dist"] = _first_tensor([("geo", "dist"), ("2d", "dist"), ("3d", "dist_logits")])
+        out["omega"] = _first_tensor([("geo", "omega"), ("2d", "omega"), ("3d", "omega_logits")])
+        out["theta"] = _first_tensor([("geo", "theta"), ("2d", "theta"), ("3d", "theta_logits")])
+        out["phi"] = _first_tensor([("geo", "phi"), ("2d", "phi"), ("3d", "phi_logits")])
+
+        if all(v is not None for v in out.values()):
+            return out
+        return None
+
+    @staticmethod
+    def _dihedral(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
+        b0 = a - b
+        b1 = c - b
+        b2 = d - c
+
+        b1_norm = F.normalize(b1, dim=-1)
+        v = b0 - (b0 * b1_norm).sum(dim=-1, keepdim=True) * b1_norm
+        w = b2 - (b2 * b1_norm).sum(dim=-1, keepdim=True) * b1_norm
+        x = (v * w).sum(dim=-1)
+        y = (torch.cross(b1_norm, v, dim=-1) * w).sum(dim=-1)
+        return torch.atan2(y, x)
+
+    @staticmethod
+    def _planar_angle(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+        v1 = F.normalize(a - b, dim=-1)
+        v2 = F.normalize(c - b, dim=-1)
+        cosine = (v1 * v2).sum(dim=-1).clamp(-1.0, 1.0)
+        return torch.acos(cosine)
+
+    @staticmethod
+    def _pseudo_cb(n: torch.Tensor, ca: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+        b = ca - n
+        d = c - ca
+        a = torch.cross(b, d, dim=-1)
+        return ca + (-0.58273431 * a + 0.56802827 * b - 0.54067466 * d)
+
+    def _build_geo_targets(self, cord: torch.Tensor, cmsk: torch.Tensor) -> Dict[str, torch.Tensor]:
+        n = cord[:, :, 0]
+        ca = cord[:, :, 1]
+        c = cord[:, :, 2]
+        cb = self._pseudo_cb(n, ca, c)
+
+        cb_i = cb[:, :, None, :]
+        cb_j = cb[:, None, :, :]
+        ca_i = ca[:, :, None, :]
+        ca_j = ca[:, None, :, :]
+        n_i = n[:, :, None, :]
+
+        dist = torch.norm(cb_i - cb_j, dim=-1)
+        omega = self._dihedral(ca_i, cb_i, cb_j, ca_j)
+        theta = self._dihedral(n_i, ca_i, cb_i, cb_j)
+        phi = self._planar_angle(ca_i, cb_i, cb_j)
+
+        ca_mask = cmsk[:, :, 1].to(torch.bool)
+        n_mask = cmsk[:, :, 0].to(torch.bool)
+        c_mask = cmsk[:, :, 2].to(torch.bool)
+        cb_mask = ca_mask & n_mask & c_mask
+
+        pair_mask = cb_mask[:, :, None] & cb_mask[:, None, :]
+        eye = torch.eye(pair_mask.shape[-1], device=pair_mask.device, dtype=torch.bool).unsqueeze(0)
+        pair_mask = pair_mask & (~eye)
+
+        dist_bins = self._bin_distance(dist)
+        omega_bins = self._bin_angle(omega, full_circle=True)
+        theta_bins = self._bin_angle(theta, full_circle=True)
+        phi_bins = self._bin_angle(phi, full_circle=False)
+
+        ignore = torch.full_like(dist_bins, -1)
+        dist_bins = torch.where(pair_mask, dist_bins, ignore)
+        omega_bins = torch.where(pair_mask, omega_bins, ignore)
+        theta_bins = torch.where(pair_mask, theta_bins, ignore)
+        phi_bins = torch.where(pair_mask, phi_bins, ignore)
+
+        return {
+            "dist": dist_bins,
+            "omega": omega_bins,
+            "theta": theta_bins,
+            "phi": phi_bins,
+            "pair_mask": pair_mask,
+        }
+
+    def _bin_distance(self, dist: torch.Tensor) -> torch.Tensor:
+        edges = torch.linspace(
+            self.cfg.geo_dist_min,
+            self.cfg.geo_dist_max,
+            self.cfg.geo_dist_bins - 1,
+            device=dist.device,
+            dtype=dist.dtype,
+        )
+        return torch.bucketize(dist, edges).to(torch.long)
+
+    def _bin_angle(self, angle: torch.Tensor, full_circle: bool) -> torch.Tensor:
+        if full_circle:
+            wrapped = ((angle + torch.pi) % (2 * torch.pi)) - torch.pi
+            edges = torch.linspace(-torch.pi, torch.pi, self.cfg.geo_angle_bins - 1, device=angle.device, dtype=angle.dtype)
+        else:
+            wrapped = angle.clamp(0.0, torch.pi)
+            edges = torch.linspace(0.0, torch.pi, self.cfg.geo_angle_bins - 1, device=angle.device, dtype=angle.dtype)
+        return torch.bucketize(wrapped, edges).to(torch.long)
+
+    @staticmethod
+    def _pair_ce(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if logits.ndim != 4:
+            raise ValueError(f"Expected pair logits [B,L,L,C], got {tuple(logits.shape)}")
+        loss = F.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]),
+            target.reshape(-1),
+            ignore_index=-1,
+            reduction="none",
+        )
+        valid = (target.reshape(-1) >= 0).to(loss.dtype)
+        return (loss * valid).sum() / valid.sum().clamp_min(1.0)
+
     def _loss_srcv(self, inputs, outputs):
         logits = self._normalize_logits_1d(outputs["1d"])  # [B, L, C]
         batch_size, seq_len, _ = logits.shape
@@ -126,17 +266,26 @@ class IgGMPaperLoss:
         return F.cross_entropy(flat_logits, flat_tgt)
 
     def _loss_geo(self, inputs, outputs):
-        pred = outputs["3d"]["cord"][-1]
+        geo_logits = self._extract_geo_logits(outputs)
         tgt = inputs["cord-o"].unsqueeze(0) if inputs["cord-o"].ndim == 3 else inputs["cord-o"]
-        cmsk = inputs["cmsk-p"].to(pred.dtype)
+        cmsk = inputs["cmsk-o"].unsqueeze(0) if inputs["cmsk-o"].ndim == 2 else inputs["cmsk-o"]
 
-        pred_ca = pred[:, :, 1]
-        tgt_ca = tgt[:, :, 1]
-        pair_mask = (cmsk[:, :, 1].unsqueeze(2) * cmsk[:, :, 1].unsqueeze(1)).to(pred.dtype)
+        if geo_logits is None:
+            pred = outputs["3d"]["cord"][-1]
+            pred_ca = pred[:, :, 1]
+            tgt_ca = tgt[:, :, 1]
+            pair_mask = (cmsk[:, :, 1].unsqueeze(2) * cmsk[:, :, 1].unsqueeze(1)).to(pred.dtype)
+            pred_d = torch.cdist(pred_ca, pred_ca)
+            tgt_d = torch.cdist(tgt_ca, tgt_ca)
+            return (((pred_d - tgt_d) ** 2) * pair_mask).sum() / pair_mask.sum().clamp_min(1.0)
 
-        pred_d = torch.cdist(pred_ca, pred_ca)
-        tgt_d = torch.cdist(tgt_ca, tgt_ca)
-        return (((pred_d - tgt_d) ** 2) * pair_mask).sum() / pair_mask.sum().clamp_min(1.0)
+        targets = self._build_geo_targets(tgt, cmsk)
+        return (
+            self._pair_ce(geo_logits["dist"], targets["dist"])
+            + self._pair_ce(geo_logits["omega"], targets["omega"])
+            + self._pair_ce(geo_logits["theta"], targets["theta"])
+            + self._pair_ce(geo_logits["phi"], targets["phi"])
+        )
 
     def _loss_frame(self, inputs, outputs, interface_only: bool):
         seqs = inputs["seq-p"]
@@ -153,10 +302,18 @@ class IgGMPaperLoss:
             valid = (pred_m * tgt_m).to(pred_t.dtype)
             if interface_only:
                 valid = valid * iface_mask
+
             trans = ((pred_t - tgt_t) ** 2).sum(dim=-1)
-            rot = ((pred_r - tgt_r) ** 2).sum(dim=(-1, -2))
-            curr = ((trans + rot) * valid).sum() / valid.sum().clamp_min(1.0)
-            w = curr.new_tensor(self.cfg.gamma ** (n_layers - idx))
+            trans = torch.minimum(trans, trans.new_tensor(self.cfg.frame_d_clamp))
+
+            eye = torch.eye(3, device=pred_t.device, dtype=pred_t.dtype).view(1, 1, 3, 3)
+            rot_delta = eye - torch.matmul(pred_r.transpose(-1, -2), tgt_r)
+            rot = (rot_delta ** 2).sum(dim=(-1, -2))
+
+            curr = (
+                (self.cfg.frame_w_trans * trans + self.cfg.frame_w_rot * rot) * valid
+            ).sum() / valid.sum().clamp_min(1.0)
+            w = curr.new_tensor(self.cfg.gamma ** (idx - 1))
             weights.append(w)
             losses.append(curr * w)
 
@@ -165,9 +322,21 @@ class IgGMPaperLoss:
 
     def _interface_mask(self, inputs):
         asym = inputs["asym-id"]
-        if asym.ndim == 2:
-            asym = asym[0]
-        return (asym > 0).view(1, -1)
+        if asym.ndim == 1:
+            asym = asym.unsqueeze(0)
+
+        if "ic_feat" in inputs:
+            ic_feat = inputs["ic_feat"]
+            if ic_feat.ndim == 4:
+                ic_feat = ic_feat[..., 0]
+            if ic_feat.ndim == 3 and ic_feat.shape[-1] == asym.shape[-1]:
+                cross_chain = (asym.unsqueeze(1) != asym.unsqueeze(2))
+                contact = (ic_feat > 0) & cross_chain
+                iface = contact.any(dim=-1)
+                if iface.any():
+                    return iface
+
+        return (asym > 0).to(torch.bool)
 
     def _loss_viol(self, inputs, outputs):
         pred = outputs["3d"]["cord"][-1]
@@ -178,21 +347,46 @@ class IgGMPaperLoss:
         pred_ca = pred[:, :, 1]
         pred_c = pred[:, :, 2]
 
-        n_to_c = (pred_n[:, 1:] - pred_c[:, :-1]).norm(dim=-1)
-        ca_to_c = (pred_ca - pred_c).norm(dim=-1)
-        n_to_ca = (pred_n - pred_ca).norm(dim=-1)
-
+        n_to_c = torch.norm(pred_n[:, 1:] - pred_c[:, :-1], dim=-1)
         valid_link = cmsk[:, 1:, 0] * cmsk[:, :-1, 2]
-        skip = ((asym[:-1] == 2) & (asym[1:] == 1)).view(1, -1)
-        valid_link = valid_link * (~skip).to(valid_link.dtype)
+        chain_link = (asym[1:] == asym[:-1]).view(1, -1).to(valid_link.dtype)
+        valid_link = valid_link * chain_link
 
         loss_len = (((n_to_c - 1.33) ** 2) * valid_link).sum() / valid_link.sum().clamp_min(1.0)
-        loss_ang = (((ca_to_c[:, :-1] - n_to_ca[:, 1:]) ** 2) * valid_link).sum() / valid_link.sum().clamp_min(1.0)
 
-        ca = pred_ca
-        dmat = torch.cdist(ca, ca)
-        pair_mask = cmsk[:, :, 1].unsqueeze(2) * cmsk[:, :, 1].unsqueeze(1)
-        eye = torch.eye(dmat.shape[-1], device=dmat.device, dtype=dmat.dtype).unsqueeze(0)
-        clash = F.relu(2.0 - dmat) * pair_mask * (1.0 - eye)
-        loss_clash = clash.sum() / (pair_mask.sum() - eye.sum()).clamp_min(1.0)
+        ca_prev = pred_ca[:, :-1]
+        c_prev = pred_c[:, :-1]
+        n_next = pred_n[:, 1:]
+        ca_next = pred_ca[:, 1:]
+
+        angle_cacn = self._planar_angle(ca_prev, c_prev, n_next)
+        angle_cnca = self._planar_angle(c_prev, n_next, ca_next)
+        targ_cacn = angle_cacn.new_tensor(2.03)
+        targ_cnca = angle_cnca.new_tensor(2.12)
+        loss_ang = (
+            (((angle_cacn - targ_cacn) ** 2) + ((angle_cnca - targ_cnca) ** 2)) * valid_link
+        ).sum() / valid_link.sum().clamp_min(1.0)
+
+        all_atoms = pred
+        atom_mask = cmsk.to(torch.bool)
+        bsz, n_res, n_atom, _ = all_atoms.shape
+        flat = all_atoms.reshape(bsz, n_res * n_atom, 3)
+        flat_mask = atom_mask.reshape(bsz, n_res * n_atom)
+
+        dmat = torch.cdist(flat, flat)
+        valid_pair = flat_mask.unsqueeze(2) & flat_mask.unsqueeze(1)
+
+        atom_res_idx = torch.arange(n_res, device=pred.device).repeat_interleave(n_atom)
+        same_or_neighbor = (atom_res_idx.unsqueeze(0) - atom_res_idx.unsqueeze(1)).abs() <= 1
+        same_or_neighbor = same_or_neighbor.unsqueeze(0)
+
+        eye = torch.eye(n_res * n_atom, device=pred.device, dtype=torch.bool).unsqueeze(0)
+        pair_mask = valid_pair & (~eye) & (~same_or_neighbor)
+
+        lower_bound = dmat.new_tensor(1.5)
+        clash_mag = F.relu(lower_bound - dmat)
+        clash_active = (clash_mag > 0) & pair_mask
+        clash_pairs = clash_active.to(clash_mag.dtype).sum().clamp_min(1.0)
+        loss_clash = (clash_mag * pair_mask.to(clash_mag.dtype)).sum() / clash_pairs
+
         return loss_len + loss_ang + loss_clash

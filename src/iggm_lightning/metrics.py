@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import torch
 
@@ -73,19 +73,62 @@ class StructureMetrics:
         return torch.stack(vals).mean()
 
     @staticmethod
-    def _fnat(pred_ca: torch.Tensor, tgt_ca: torch.Tensor, cutoff: float = 8.0) -> torch.Tensor:
-        pred_ca = pred_ca.float()
-        tgt_ca = tgt_ca.float()
-        pd = torch.cdist(pred_ca, pred_ca) <= cutoff
-        td = torch.cdist(tgt_ca, tgt_ca) <= cutoff
-        td_num = td.float().sum().clamp_min(1.0)
-        return (pd & td).float().sum() / td_num
+    def _interface_contact_map(ca: torch.Tensor, asym_id: torch.Tensor, cutoff: float = 8.0) -> torch.Tensor:
+        d = torch.cdist(ca, ca)
+        cross = asym_id.unsqueeze(0) != asym_id.unsqueeze(1)
+        return (d <= cutoff) & cross
 
-    def _dockq(self, lrms: torch.Tensor, irms: torch.Tensor, fnat: torch.Tensor) -> torch.Tensor:
-        d1, d2 = 8.5, 1.5
-        s_lrms = 1.0 / (1.0 + (lrms / d1) ** 2)
-        s_irms = 1.0 / (1.0 + (irms / d2) ** 2)
-        return (fnat + s_lrms + s_irms) / 3.0
+    @staticmethod
+    def _dockq_scaled_rms(rms: torch.Tensor, d: float) -> torch.Tensor:
+        return 1.0 / (1.0 + (rms / float(d)) ** 2)
+
+    def _dockq_terms(
+        self,
+        pred_ca: torch.Tensor,
+        tgt_ca: torch.Tensor,
+        asym_id: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        native_contact = self._interface_contact_map(tgt_ca, asym_id)
+        pred_contact = self._interface_contact_map(pred_ca, asym_id)
+
+        native_num = native_contact.float().sum().clamp_min(1.0)
+        fnat = (native_contact & pred_contact).float().sum() / native_num
+
+        iface_idx = native_contact.any(dim=0)
+        if iface_idx.any():
+            i_idx = torch.where(iface_idx)[0]
+            irms = self._rmsd(pred_ca[i_idx], tgt_ca[i_idx])
+        else:
+            irms = self._rmsd(pred_ca, tgt_ca)
+
+        chain_ids = torch.unique(asym_id)
+        if chain_ids.numel() >= 2:
+            receptor = asym_id == chain_ids[0]
+            ligand = asym_id != chain_ids[0]
+            if receptor.any() and ligand.any():
+                pred_rec_aln, tgt_rec = self._kabsch_align(pred_ca[receptor], tgt_ca[receptor])
+                pred_center = pred_ca[receptor].mean(dim=0, keepdim=True)
+                tgt_center = tgt_ca[receptor].mean(dim=0, keepdim=True)
+                pred_lig = pred_ca[ligand] - pred_center
+                rec_pred = pred_ca[receptor] - pred_center
+                rec_tgt = tgt_ca[receptor] - tgt_center
+                h = rec_pred.transpose(0, 1) @ rec_tgt
+                u, _, vh = torch.linalg.svd(h.float(), full_matrices=False)
+                v = vh.transpose(-2, -1)
+                rot = v @ u.transpose(0, 1)
+                if torch.det(rot) < 0:
+                    v = v.clone()
+                    v[:, -1] *= -1
+                    rot = v @ u.transpose(0, 1)
+                pred_lig_aln = pred_lig @ rot + tgt_center
+                lrms = self._rmsd(pred_lig_aln, tgt_ca[ligand])
+            else:
+                lrms = self._rmsd(pred_ca, tgt_ca)
+        else:
+            lrms = self._rmsd(pred_ca, tgt_ca)
+
+        dockq = (fnat + self._dockq_scaled_rms(lrms, 8.5) + self._dockq_scaled_rms(irms, 1.5)) / 3.0
+        return dockq, fnat, lrms, irms
 
     @staticmethod
     def _aar(pred_seq: str, true_seq: str) -> float:
@@ -103,6 +146,7 @@ class StructureMetrics:
         pred_seq: str,
         true_seq: str,
         cdr_h3_idx: List[int] | None = None,
+        asym_id: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         pred_cord = self._to_metric_float(pred_cord)
         tgt_cord = self._to_metric_float(tgt_cord)
@@ -114,17 +158,23 @@ class StructureMetrics:
         tm_score = self._tm_score(pred_aligned, tgt_aligned)
         gdt_ts = self._gdt_ts(pred_aligned, tgt_aligned)
 
-        h3_idx = [i - 1 for i in (cdr_h3_idx or []) if 0 < i <= pred_ca.shape[0]]
+        h3_idx = [i - 1 for i in (cdr_h3_idx or []) if 0 < i <= pred_cord.shape[0]]
         if h3_idx:
-            idx = torch.tensor(h3_idx, device=pred_ca.device, dtype=torch.long)
-            rmsd_h3 = self._rmsd(pred_aligned[idx], tgt_aligned[idx])
+            idx = torch.tensor(h3_idx, device=pred_cord.device, dtype=torch.long)
+            pred_h3 = pred_cord[idx, :3].reshape(-1, 3)
+            tgt_h3 = tgt_cord[idx, :3].reshape(-1, 3)
+            pred_h3_aln, tgt_h3_aln = self._kabsch_align(pred_h3, tgt_h3)
+            rmsd_h3 = self._rmsd(pred_h3_aln, tgt_h3_aln)
         else:
             rmsd_h3 = self._rmsd(pred_aligned, tgt_aligned)
 
-        lrms = self._rmsd(pred_aligned, tgt_aligned)
-        irms = rmsd_h3
-        fnat = self._fnat(pred_aligned, tgt_aligned)
-        dockq = self._dockq(lrms, irms, fnat)
+        if asym_id is None:
+            asym_id = torch.zeros(pred_ca.shape[0], device=pred_ca.device, dtype=torch.long)
+        if asym_id.ndim == 2:
+            asym_id = asym_id[0]
+        asym_id = asym_id.to(device=pred_ca.device)
+
+        dockq, fnat, lrms, irms = self._dockq_terms(pred_aligned, tgt_aligned, asym_id)
         sr = (dockq > self.cfg.dockq_threshold).float()
         aar = torch.tensor(self._aar(pred_seq, true_seq), dtype=torch.float32, device=tm_score.device)
 
@@ -135,4 +185,7 @@ class StructureMetrics:
             "gdt_ts": gdt_ts,
             "dockq": dockq,
             "sr": sr,
+            "fnat": fnat,
+            "lrms": lrms,
+            "irms": irms,
         }

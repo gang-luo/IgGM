@@ -172,13 +172,33 @@ class _ProteinSampleDataset(Dataset):
                 "a-cord": complex_data["a-cord"],
                 "a-cmsk": complex_data["a-cmsk"],
                 "epitope": complex_data["epitope"],
-                "contact": None,
+                "contact": self._build_contact_map(complex_data),
             },
             "cdr_sequences": (record.get("cdr_sequences") or {}),
             "sequence_lengths": (record.get("sequence_lengths") or {}),
         }
         self._cache_put(cache_key, payload)
         return payload
+
+    @staticmethod
+    def _build_contact_map(complex_data: Dict[str, Any], cutoff: float = 8.0) -> Optional[torch.Tensor]:
+        """Build residue-level interface contact map from C-alpha distances."""
+        cord = complex_data.get("cord")
+        cmsk = complex_data.get("cmsk")
+        asym_id = complex_data.get("asym_id")
+        if cord is None or cmsk is None or asym_id is None:
+            return None
+
+        if asym_id.ndim == 2:
+            asym_id = asym_id[0]
+
+        ca = cord[:, 1]
+        ca_mask = cmsk[:, 1].to(ca.dtype)
+        pair_dist = torch.cdist(ca, ca)
+        chain_cross = (asym_id.unsqueeze(0) != asym_id.unsqueeze(1))
+        valid = (ca_mask.unsqueeze(0) * ca_mask.unsqueeze(1)).bool()
+        contact = (pair_dist <= float(cutoff)) & chain_cross & valid
+        return contact.to(torch.float32)
 
     # def __getitem__(self, index):
     #     item = self.items[index]

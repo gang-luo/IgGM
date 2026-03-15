@@ -308,8 +308,8 @@ class IgGMLightningModule(pl.LightningModule):
 
         # 异常处理
         global_fail = self._ddp_any_true(local_fail)
-        loss_flag = loss_dict["loss"]
-        local_nonfinite = not torch.isfinite(loss_flag.detach()).item()
+        loss_flag = loss_dict["loss"] if loss_dict is not None else None
+        local_nonfinite = bool(loss_flag is not None and (not torch.isfinite(loss_flag.detach()).item()))
         global_nonfinite = self._ddp_any_true(local_nonfinite)
         if global_nonfinite or global_fail:
             self.log(f"{stage}/skip_failed_batch or skip_nonfinite_loss", torch.tensor(1.0, device=self.device), prog_bar=False, on_step=(stage == "train"), on_epoch=True, batch_size=1)
@@ -330,7 +330,7 @@ class IgGMLightningModule(pl.LightningModule):
             pred_seq = self._decode_pred_seq(outputs["1d"][0])
             true_seq = payload.get("seq_true", inputs["seq-o"][0])
             cdr_h3 = (payload.get("cdr_sequences") or {}).get("cdr_H3", [])
-            metric_dict = self.metric_fn(pred_cord, tgt_cord, pred_seq, true_seq, cdr_h3)
+            metric_dict = self.metric_fn(pred_cord, tgt_cord, pred_seq, true_seq, cdr_h3, asym_id=inputs.get("asym-id"))
             for k, v in metric_dict.items():
                 self.log(f"{stage}/{k}", v, prog_bar=(k == "tm_score"), on_step=False, on_epoch=True)
 
@@ -416,6 +416,7 @@ class IgGMLightningModule(pl.LightningModule):
         skip_step = self._ddp_any_true(self._skip_optimizer_step_due_to_oom)
         self._skip_optimizer_step_due_to_oom = False
         if skip_step:
+            optimizer_closure()
             optimizer.zero_grad(set_to_none=True)
             self.log("train/skip_optim_step_oom", torch.tensor(1.0, device=self.device), prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
             return
