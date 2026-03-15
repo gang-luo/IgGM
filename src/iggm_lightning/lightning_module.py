@@ -34,13 +34,13 @@ def mem(tag):
     p = torch.cuda.max_memory_allocated() / 1024**3
     print(f"[{tag}] alloc={a:.2f} GB reserved={r:.2f} GB peak={p:.2f} GB")
 
-#  maxlen filter
-def _should_skip_batch(prot_data_curr: Dict[str, Any]) -> bool:
-    asym_id = prot_data_curr.get("asym_id")
-    if asym_id is None:
-        return False
-    seq_len = int(asym_id.shape[-1])
-    return seq_len > int(1600)
+# #  maxlen filter
+# def _should_skip_batch(prot_data_curr: Dict[str, Any]) -> bool:
+#     asym_id = prot_data_curr.get("asym_id")
+#     if asym_id is None:
+#         return False
+#     seq_len = int(asym_id.shape[-1])
+#     return seq_len > int(1600)
 
 @dataclass
 class OptimizerConfig:
@@ -259,32 +259,35 @@ class IgGMLightningModule(pl.LightningModule):
             raise RuntimeError("Dataset must provide resolved `payload` for lazy loading.")
         prot_data_curr = self._move_to_device(payload["prot_data_curr"])
 
-
-        seq_len = int(prot_data_curr["asym_id"].shape[-1])
-        if _should_skip_batch(prot_data_curr):
-            self.log(
-                f"{stage}/skip_long_batch",
-                torch.tensor(1.0, device=self.device),
-                prog_bar=False,
-                on_step=(stage == "train"),
-                on_epoch=True,
-                batch_size=1,
-            )
-            print( f"[IgGMLightningModule] skip {stage} batch:{idx_step},seqlen={seq_len} ")
-            return None
-        else:
-            print(f"[IgGMLightningModule] process {stage} batch:{idx_step},seqlen={seq_len} ")
+        # seq_len = int(prot_data_curr["asym_id"].shape[-1])
+        # if _should_skip_batch(prot_data_curr):
+        #     self.log(
+        #         f"{stage}/skip_long_batch",
+        #         torch.tensor(1.0, device=self.device),
+        #         prog_bar=False,
+        #         on_step=(stage == "train"),
+        #         on_epoch=True,
+        #         batch_size=1,
+        #     )
+        #     print( f"[IgGMLightningModule] skip {stage} batch:{idx_step},seqlen={seq_len} ")
+        #     return None
+        # else:
+        #     print(f"[IgGMLightningModule] process {stage} batch:{idx_step},seqlen={seq_len} ")
     
         self._apply_stage_mask(prot_data_curr, payload)
 
         inputs_addi = batch.get("inputs_addi")
         inputs = self._build_inputs_cm(prot_data_curr, idx_step)
 
-        amp_ctx = torch.autocast(device_type=self.device.type, enabled=self.enable_amp) if self.device.type in ("cuda", "cpu") else nullcontext()
-        with amp_ctx:
-            outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
-            self._assert_and_log_shapes(inputs, outputs)
-            loss_dict = self._compute_loss(inputs, outputs)
+        # amp_ctx = torch.autocast(device_type=self.device.type, enabled=self.enable_amp) if self.device.type in ("cuda", "cpu") else nullcontext()
+        # with amp_ctx:
+        #     outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
+        #     self._assert_and_log_shapes(inputs, outputs)
+        #     loss_dict = self._compute_loss(inputs, outputs)
+
+        outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
+        self._assert_and_log_shapes(inputs, outputs)
+        loss_dict = self._compute_loss(inputs, outputs)
 
         self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=(stage == "train"), on_epoch=True)
         self.log(f"{stage}/loss_geo", loss_dict["loss_geo"], prog_bar=False, on_step=False, on_epoch=True)

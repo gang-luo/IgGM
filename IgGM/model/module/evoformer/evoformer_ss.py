@@ -193,6 +193,6 @@ class EvoformerStackSS(nn.Module):
             if not (self.training and self.activation_checkpoint):
                 s, z = block(s, z, chunk_size)
             else:
-                s, z = self.activation_checkpoint_fn(block, s, z, chunk_size)
+                s, z = self.activation_checkpoint_fn(block, s, z, chunk_size,use_reentrant=False)
 
         return s, z

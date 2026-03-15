@@ -28,10 +28,12 @@ try:
     import lightning.pytorch as pl
     from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
     from lightning.pytorch.loggers import CSVLogger, WandbLogger
+    from lightning.pytorch.strategies import DDPStrategy
 except ImportError:  # pragma: no cover
     import pytorch_lightning as pl
     from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
     from pytorch_lightning.loggers import CSVLogger, WandbLogger
+    from pytorch_lightning.strategies import DDPStrategy
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -65,6 +67,19 @@ def _parse_bool(value: Any) -> bool:
     if text in {"0", "false", "no", "n", "off"}:
         return False
     raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
+
+
+def _resolve_trainer_strategy(args: argparse.Namespace):
+    strategy_name = str(args.strategy).strip().lower()
+    if strategy_name in {"", "auto"}:
+        return "auto"
+    if strategy_name == "ddp":
+        return DDPStrategy(
+            find_unused_parameters=bool(args.ddp_find_unused_parameters),
+            static_graph=bool(args.ddp_static_graph),
+            gradient_as_bucket_view=True,
+        )
+    return args.strategy
 
 
 def _load_yaml_config(path: str | Path) -> Dict[str, Any]:
@@ -121,7 +136,10 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--log_every_n_steps", type=int, default=int(trainer.get("log_every_n_steps", 1)))
     p.add_argument("--accumulate_grad_batches", type=int, default=int(trainer.get("accumulate_grad_batches", 1)))
     p.add_argument("--num_sanity_val_steps", type=int, default=int(trainer.get("num_sanity_val_steps", 0)))
-
+    p.add_argument("--strategy", default=trainer.get("strategy", "auto"))
+    p.add_argument("--ddp_static_graph", type=_parse_bool, default=bool(trainer.get("ddp_static_graph", False)))
+    p.add_argument("--ddp_find_unused_parameters", type=_parse_bool, default=bool(trainer.get("ddp_find_unused_parameters", True)))
+    
     p.add_argument("--project", default=wandb.get("project", "iggm-lightning"))
     p.add_argument("--run_name", default=wandb.get("run_name", "iggm-train"))
     p.add_argument("--entity", default=wandb.get("entity", ""))
@@ -255,6 +273,7 @@ def main() -> None:
         precision=args.precision,
         accelerator=args.accelerator,
         devices=args.devices,
+        strategy=_resolve_trainer_strategy(args),
         logger=logger,
         callbacks=callbacks,
         log_every_n_steps=args.log_every_n_steps,

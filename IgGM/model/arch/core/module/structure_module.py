@@ -141,7 +141,7 @@ class StructureModule(nn.Module):
             quat_tns = quat_tns.detach()  # no gradient propagation
             if self.activation_checkpoint:
                 sfea_tns = self.activation_checkpoint_fn(
-                    self.net['ipa'],sfea_tns,pfea_tns,quat_tns,trsl_tns,chunk_size,
+                    self.net['ipa'],sfea_tns,pfea_tns,quat_tns,trsl_tns,chunk_size,use_reentrant=False,
                 )
             else:
                 sfea_tns = self.net['ipa'](

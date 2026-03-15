@@ -1,4 +1,5 @@
-python src/train_iggm_lightning.py --config config/train_0306.yaml
+python src/train_iggm_lightning.py --config config/train_0314.yaml
+# python src/train_iggm_lightning.py --config config/train_0306.yaml
 
 
 # conda env update -f envirs.yaml
