@@ -10,7 +10,7 @@ data:
   batch_size: 1
   num_workers: 24
   n_steps: 200
-  forward_chunk_size: 64
+  forward_chunk_size: 128
   max_antigen_len: 256  # 384
 
 

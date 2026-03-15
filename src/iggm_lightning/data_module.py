@@ -47,6 +47,13 @@ class _ProteinSampleDataset(Dataset):
         self._sample_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()        
         self._chunk_size = None if chunk_size is None else max(1, int(chunk_size))
         self._max_antigen_len = None if max_antigen_len is None else max(1, int(max_antigen_len))
+        self._warn_count = 0
+
+
+    def _warn_once(self, msg: str) -> None:
+        if self._warn_count < 8:
+            print(f"[DataModule][warn] {msg}")
+            self._warn_count += 1
 
     def _apply_antigen_crop(self, converted: Dict[str, Any]) -> Dict[str, Any]:
         if self._max_antigen_len is None:
@@ -121,7 +128,7 @@ class _ProteinSampleDataset(Dataset):
         processed_pdb_path = item.get("processed_pdb_path")
         prot_id = str(item.get("prot_id", ""))
         cache_key = str(sample_path or processed_pdb_path or prot_id)
-        if cache_key in self._sample_cache:
+        if cache_key in self._sample_cache: 
             self._sample_cache.move_to_end(cache_key)
             return self._sample_cache[cache_key]
 
@@ -173,17 +180,42 @@ class _ProteinSampleDataset(Dataset):
         self._cache_put(cache_key, payload)
         return payload
 
+    # def __getitem__(self, index):
+    #     item = self.items[index]
+    #     step = random.randint(1, self.n_steps)
+    #     payload = self._resolve_sample_payload(item)
+    #     return {
+    #         "idx_step": step,
+    #         "prot_id": item["prot_id"],
+    #         "payload": payload,
+    #         "inputs_addi": None,
+    #         "chunk_size": self._chunk_size,
+    #     }
+    
     def __getitem__(self, index):
-        item = self.items[index]
-        step = random.randint(1, self.n_steps)
-        payload = self._resolve_sample_payload(item)
-        return {
-            "idx_step": step,
-            "prot_id": item["prot_id"],
-            "payload": payload,
-            "inputs_addi": None,
-            "chunk_size": self._chunk_size,
-        }
+        
+        n_items = len(self.items)
+        for _ in range(10): # 重复尝试返回结果
+            item = self.items[index % n_items]
+            step = random.randint(1, self.n_steps)
+            try:
+                payload = self._resolve_sample_payload(item)
+                return {
+                    "idx_step": step,
+                    "prot_id": item["prot_id"],
+                    "payload": payload,
+                    "inputs_addi": None,
+                    "chunk_size": self._chunk_size,
+                }
+            except Exception as exc:
+                self._warn_once(f"skip invalid sample prot_id={item.get('prot_id')} reason={exc}")
+                index = random.randint(0, n_items - 1)
+
+        item = self.items[index % n_items]
+        raise RuntimeError(
+            f"Failed to resolve sample after {10} retries; "
+            f"last prot_id={item.get('prot_id')}"
+        )
 
 
 class ClusterEpochSampler(Sampler[int]):
