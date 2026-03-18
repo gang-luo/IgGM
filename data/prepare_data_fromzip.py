@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset_name", type=str, required=True, help="Output dataset folder name")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of samples")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for sampling")
-    parser.add_argument("--num_workers", type=int, default=4, help="Worker threads for sample conversion")
+    parser.add_argument("--num_workers", type=int, default=8, help="Worker threads for sample conversion")
     parser.add_argument(
         "--download",
         action="store_true",
@@ -321,6 +321,14 @@ def parse_final_antigen_chain(value: Optional[str]) -> Optional[str]:
 
     return chain
 
+def is_supported_antigen_type(row: Dict[str, str]) -> bool:
+    """Only keep samples with protein/peptide antigens."""
+    antigen_type = choose_first(row, ["antigen_type", "antigen type", "antigenType"])
+    if not antigen_type:
+        return False
+    val = str(antigen_type).strip().lower()
+    return val in {"protein", "peptide"}
+
 def parse_chain_from_sample_id(sample_id: str) -> Dict[str, Optional[str]]:
     parts = sample_id.split("_")
     chain_ids = {"H": None, "L": None, "A": None}
@@ -457,6 +465,8 @@ def prepare_real_entries(raw_root: Path) -> List[Dict[str, object]]:
 
     entries: List[Dict[str, object]] = []
     for row in rows:
+        if not is_supported_antigen_type(row):
+            continue
         antigen_raw = choose_first(row, ["antigen_chain", "antigen", "chain_a", "antigen_chain_id"])
         final_antigen = parse_final_antigen_chain(antigen_raw)
         if final_antigen is None:
@@ -519,6 +529,10 @@ def prepare_mock_entries() -> List[Dict[str, object]]:
 
 def finalize_sample(entry: Dict[str, object], fasta_dir: Path) -> Dict[str, object]:
     sequences, cdr_pdb, cdr_sequences = extract_sequences_and_cdr(entry)
+    if any("X" in str(seq) for seq in sequences.values()):
+        # if exsit the ‘UNK’
+        return None
+    
     seq_lens = {name: len(seq) for name, seq in sequences.items()}
     file_stem = build_sample_stem(entry)
     fasta_path = write_processed_fasta(fasta_dir, file_stem, sequences)
@@ -747,11 +761,6 @@ def main() -> None:
     pdb_dir.mkdir(parents=True, exist_ok=True)
 
     workers = max(1, int(args.num_workers))
-    # with ThreadPoolExecutor(max_workers=workers) as pool:
-    #     samples = list(pool.map(lambda item: finalize_sample(item, fasta_dir), entries))
-
-    # for idx, sample in enumerate(samples):
-
     with ThreadPoolExecutor(max_workers=workers) as pool:
         samples = list(
             tqdm(
@@ -760,14 +769,13 @@ def main() -> None:
                 desc="Processing samples",
             )
         )
+    
+    samples = [s for s in samples if s is not None]
     for sample in tqdm(samples, total=len(samples), desc="Saving samples"):
 
         sample_path = samples_dir / f"{sample['file_stem']}.pt"
         processed_pdb_path = write_processed_pdb(sample, pdb_dir)
         sample["processed_pdb_path"] = str(processed_pdb_path)
-
-        # print("sample_path", sample_path)
-        # print("processed_pdb_path", processed_pdb_path)
 
         if torch is not None:
             torch.save(sample, sample_path)
@@ -807,12 +815,12 @@ if __name__ == "__main__":
     main()
 
 # python data/prepare_data_fromzip.py \
-#   --dataset_name sabdab_debug \
+#   --dataset_name sabdab \
 #   --raw_root ./data/origin_file \
-#   --out_root ./data/sabdab_zip/processed \
+#   --out_root ./data/sabdab/processed \
 #   --limit 20 \
 #   --build_splits \
-#   --split_out_dir ./data/sabdab_zip/processed/sabdab_debug/split \
+#   --split_out_dir ./data/sabdab/processed/sabdab_file/split \
 #   --cluster_identity 0.95
 
 # 代表性测试结果，7mi3文件
@@ -820,7 +828,8 @@ if __name__ == "__main__":
 # python data/prepare_data_fromzip.py \
 #   --dataset_name sabdab \
 #   --raw_root ./data/origin_file \
-#   --out_root ./data/sabdab/processed \
+#   --out_root ./data/sabdab \
 #   --build_splits \
-#   --split_out_dir ./data/sabdab/processed/sabdab_file/split \
-#   --cluster_identity 0.95
+#   --split_out_dir ./data/sabdab/sabdab_file/split \
+#   --cluster_identity 0.95 
+

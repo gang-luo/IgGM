@@ -8,3 +8,5 @@ zz_trash
 outputs/
 data/sabdab_zip
 data/sabdab
+*.pdb
+*.fasta

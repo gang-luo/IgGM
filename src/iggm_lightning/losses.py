@@ -36,11 +36,15 @@ class IgGMPaperLoss:
         self._aa_to_idx = {aa: i for i, aa in enumerate("ACDEFGHIKLMNPQRSTVWY")}
 
     def __call__(self, inputs: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        geo = self._loss_geo(inputs, outputs)
         frame = self._loss_frame(inputs, outputs, interface_only=False)
-        iframe = self._loss_frame(inputs, outputs, interface_only=True)
-        viol = self._loss_viol(inputs, outputs)
-        srcv = self._loss_srcv(inputs, outputs) if self.cfg.enable_seq_recovery else geo.new_zeros(())
+        # geo = self._loss_geo(inputs, outputs)
+        # iframe = self._loss_frame(inputs, outputs, interface_only=True)
+        # viol = self._loss_viol(inputs, outputs)
+        # srcv = self._loss_srcv(inputs, outputs) if self.cfg.enable_seq_recovery else geo.new_zeros(())
+        geo = 0.0
+        iframe = 0.0
+        viol = 0.0
+        srcv = 0.0
 
         total = geo + frame + iframe + self.cfg.loss_viol_weight * viol + srcv
         return {

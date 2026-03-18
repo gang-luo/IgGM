@@ -286,8 +286,8 @@ class IgGMLightningModule(pl.LightningModule):
 
         self._apply_stage_mask(prot_data_curr, payload)
         inputs_addi = batch.get("inputs_addi")
-        inputs = self._build_inputs_cm(prot_data_curr, idx_step)
-
+        
+        # inputs = self._build_inputs_cm(prot_data_curr, idx_step)
         # amp_ctx = torch.autocast(device_type=self.device.type, enabled=self.enable_amp) if self.device.type in ("cuda", "cpu") else nullcontext()
         # with amp_ctx:
         #     outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))

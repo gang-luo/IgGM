@@ -106,20 +106,19 @@ class StructureMetrics:
             receptor = asym_id == chain_ids[0]
             ligand = asym_id != chain_ids[0]
             if receptor.any() and ligand.any():
-                pred_rec_aln, tgt_rec = self._kabsch_align(pred_ca[receptor], tgt_ca[receptor])
-                pred_center = pred_ca[receptor].mean(dim=0, keepdim=True)
-                tgt_center = tgt_ca[receptor].mean(dim=0, keepdim=True)
-                pred_lig = pred_ca[ligand] - pred_center
-                rec_pred = pred_ca[receptor] - pred_center
-                rec_tgt = tgt_ca[receptor] - tgt_center
-                h = rec_pred.transpose(0, 1) @ rec_tgt
-                u, _, vh = torch.linalg.svd(h.float(), full_matrices=False)
+                pred_center = pred_ca[receptor].float().mean(dim=0, keepdim=True)
+                tgt_center = tgt_ca[receptor].float().mean(dim=0, keepdim=True)
+                pred_lig = pred_ca[ligand].float() - pred_center
+                rec_pred = pred_ca[receptor].float() - pred_center
+                rec_tgt = tgt_ca[receptor].float() - tgt_center
+                h = (rec_pred.transpose(0, 1) @ rec_tgt).float()
+                u, _, vh = torch.linalg.svd(h, full_matrices=False)
                 v = vh.transpose(-2, -1)
-                rot = v @ u.transpose(0, 1)
-                if torch.det(rot) < 0:
-                    v = v.clone()
+                rot = (v @ u.transpose(0, 1)).float()
+                if torch.det(rot.float()) < 0:
+                    v = v.clone().float()
                     v[:, -1] *= -1
-                    rot = v @ u.transpose(0, 1)
+                    rot = (v @ u.transpose(0, 1)).float()
                 pred_lig_aln = pred_lig @ rot + tgt_center
                 lrms = self._rmsd(pred_lig_aln, tgt_ca[ligand])
             else:
