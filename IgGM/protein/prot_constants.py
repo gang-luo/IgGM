@@ -40,53 +40,53 @@ RESD_ORDER_WITH_X = {restype: i for i, restype in enumerate(RESD_WITH_X)}
 N_ATOMS_PER_RESD = 14  # TRP
 N_ANGLS_PER_RESD = 7  # TRP (omega, phi, psi, chi1, chi2, chi3, and chi4)
 
-# # atom names for each residue type (excluding hydrogen atoms)
-# # residue_atoms in openfold
-# ATOM_NAMES_PER_RESD = {
-#     'ALA': ['C', 'CA', 'CB', 'N', 'O'],
-#     'ARG': ['C', 'CA', 'CB', 'CG', 'CD', 'CZ', 'N', 'NE', 'O', 'NH1', 'NH2'],
-#     'ASP': ['C', 'CA', 'CB', 'CG', 'N', 'O', 'OD1', 'OD2'],
-#     'ASN': ['C', 'CA', 'CB', 'CG', 'N', 'ND2', 'O', 'OD1'],
-#     'CYS': ['C', 'CA', 'CB', 'N', 'O', 'SG'],
-#     'GLU': ['C', 'CA', 'CB', 'CG', 'CD', 'N', 'O', 'OE1', 'OE2'],
-#     'GLN': ['C', 'CA', 'CB', 'CG', 'CD', 'N', 'NE2', 'O', 'OE1'],
-#     'GLY': ['C', 'CA', 'N', 'O'],
-#     'HIS': ['C', 'CA', 'CB', 'CG', 'CD2', 'CE1', 'N', 'ND1', 'NE2', 'O'],
-#     'ILE': ['C', 'CA', 'CB', 'CG1', 'CG2', 'CD1', 'N', 'O'],
-#     'LEU': ['C', 'CA', 'CB', 'CG', 'CD1', 'CD2', 'N', 'O'],
-#     'LYS': ['C', 'CA', 'CB', 'CG', 'CD', 'CE', 'N', 'NZ', 'O'],
-#     'MET': ['C', 'CA', 'CB', 'CG', 'CE', 'N', 'O', 'SD'],
-#     'PHE': ['C', 'CA', 'CB', 'CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ', 'N', 'O'],
-#     'PRO': ['C', 'CA', 'CB', 'CG', 'CD', 'N', 'O'],
-#     'SER': ['C', 'CA', 'CB', 'N', 'O', 'OG'],
-#     'THR': ['C', 'CA', 'CB', 'CG2', 'N', 'O', 'OG1'],
-#     'TRP': ['C', 'CA', 'CB', 'CG', 'CD1', 'CD2', 'CE2', 'CE3', 'CZ2', 'CZ3', 'CH2', 'N', 'NE1', 'O'],
-#     'TYR': ['C', 'CA', 'CB', 'CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ', 'N', 'O', 'OH'],
-#     'VAL': ['C', 'CA', 'CB', 'CG1', 'CG2', 'N', 'O']
-# }
-# compact atom encoding with 14 columns
+# atom names for each residue type (excluding hydrogen atoms)
+# residue_atoms in openfold
 ATOM_NAMES_PER_RESD = {
-    'ALA': ['N', 'CA', 'C', 'O', 'CB'],
-    'ARG': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'NE', 'CZ', 'NH1', 'NH2'],
-    'ASN': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'OD1', 'ND2'],
-    'ASP': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'OD1', 'OD2'],
-    'CYS': ['N', 'CA', 'C', 'O', 'CB', 'SG'],
-    'GLN': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'OE1', 'NE2'],
-    'GLU': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'OE1', 'OE2'],
-    'GLY': ['N', 'CA', 'C', 'O'],
-    'HIS': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'ND1', 'CD2', 'CE1', 'NE2'],
-    'ILE': ['N', 'CA', 'C', 'O', 'CB', 'CG1', 'CG2', 'CD1'],
-    'LEU': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2'],
-    'LYS': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'CE', 'NZ'],
-    'MET': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'SD', 'CE'],
-    'PHE': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ'],
-    'PRO': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD'],
-    'SER': ['N', 'CA', 'C', 'O', 'CB', 'OG'],
-    'THR': ['N', 'CA', 'C', 'O', 'CB', 'OG1', 'CG2'],
-    'TRP': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2', 'NE1', 'CE2', 'CE3', 'CZ2', 'CZ3', 'CH2'],
-    'TYR': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ', 'OH'],
-    'VAL': ['N', 'CA', 'C', 'O', 'CB', 'CG1', 'CG2'],
+    'ALA': ['C', 'CA', 'CB', 'N', 'O'],
+    'ARG': ['C', 'CA', 'CB', 'CG', 'CD', 'CZ', 'N', 'NE', 'O', 'NH1', 'NH2'],
+    'ASP': ['C', 'CA', 'CB', 'CG', 'N', 'O', 'OD1', 'OD2'],
+    'ASN': ['C', 'CA', 'CB', 'CG', 'N', 'ND2', 'O', 'OD1'],
+    'CYS': ['C', 'CA', 'CB', 'N', 'O', 'SG'],
+    'GLU': ['C', 'CA', 'CB', 'CG', 'CD', 'N', 'O', 'OE1', 'OE2'],
+    'GLN': ['C', 'CA', 'CB', 'CG', 'CD', 'N', 'NE2', 'O', 'OE1'],
+    'GLY': ['C', 'CA', 'N', 'O'],
+    'HIS': ['C', 'CA', 'CB', 'CG', 'CD2', 'CE1', 'N', 'ND1', 'NE2', 'O'],
+    'ILE': ['C', 'CA', 'CB', 'CG1', 'CG2', 'CD1', 'N', 'O'],
+    'LEU': ['C', 'CA', 'CB', 'CG', 'CD1', 'CD2', 'N', 'O'],
+    'LYS': ['C', 'CA', 'CB', 'CG', 'CD', 'CE', 'N', 'NZ', 'O'],
+    'MET': ['C', 'CA', 'CB', 'CG', 'CE', 'N', 'O', 'SD'],
+    'PHE': ['C', 'CA', 'CB', 'CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ', 'N', 'O'],
+    'PRO': ['C', 'CA', 'CB', 'CG', 'CD', 'N', 'O'],
+    'SER': ['C', 'CA', 'CB', 'N', 'O', 'OG'],
+    'THR': ['C', 'CA', 'CB', 'CG2', 'N', 'O', 'OG1'],
+    'TRP': ['C', 'CA', 'CB', 'CG', 'CD1', 'CD2', 'CE2', 'CE3', 'CZ2', 'CZ3', 'CH2', 'N', 'NE1', 'O'],
+    'TYR': ['C', 'CA', 'CB', 'CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ', 'N', 'O', 'OH'],
+    'VAL': ['C', 'CA', 'CB', 'CG1', 'CG2', 'N', 'O']
 }
+# # compact atom encoding with 14 columns
+# ATOM_NAMES_PER_RESD = {
+#     'ALA': ['N', 'CA', 'C', 'O', 'CB'],
+#     'ARG': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'NE', 'CZ', 'NH1', 'NH2'],
+#     'ASN': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'OD1', 'ND2'],
+#     'ASP': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'OD1', 'OD2'],
+#     'CYS': ['N', 'CA', 'C', 'O', 'CB', 'SG'],
+#     'GLN': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'OE1', 'NE2'],
+#     'GLU': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'OE1', 'OE2'],
+#     'GLY': ['N', 'CA', 'C', 'O'],
+#     'HIS': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'ND1', 'CD2', 'CE1', 'NE2'],
+#     'ILE': ['N', 'CA', 'C', 'O', 'CB', 'CG1', 'CG2', 'CD1'],
+#     'LEU': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2'],
+#     'LYS': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'CE', 'NZ'],
+#     'MET': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'SD', 'CE'],
+#     'PHE': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ'],
+#     'PRO': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD'],
+#     'SER': ['N', 'CA', 'C', 'O', 'CB', 'OG'],
+#     'THR': ['N', 'CA', 'C', 'O', 'CB', 'OG1', 'CG2'],
+#     'TRP': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2', 'NE1', 'CE2', 'CE3', 'CZ2', 'CZ3', 'CH2'],
+#     'TYR': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ', 'OH'],
+#     'VAL': ['N', 'CA', 'C', 'O', 'CB', 'CG1', 'CG2'],
+# }
 
 # compact atom encoding with 14 columns
 restype_name_to_atom14_names = {
