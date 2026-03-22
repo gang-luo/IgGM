@@ -1,0 +1,33 @@
+{
+  "dataset_name": "sabdab_debug",
+  "mode": "real",
+  "sample_count": 20,
+  "samples_dir": "data/sabdab_zip/processed/sabdab_debug/samples",
+  "fasta_dir": "data/sabdab_zip/processed/fasta",
+  "seed": 0,
+  "limit": 20,
+  "num_workers": 4,
+  "download": false,
+  "sample_ids": [
+    "7x3e",
+    "8gho",
+    "8tb0",
+    "7joo",
+    "6gg0",
+    "7mzh",
+    "7lrt",
+    "8pmz",
+    "9bew",
+    "8dgu",
+    "7m3i",
+    "6c08",
+    "9jnn",
+    "6w0e",
+    "9cq4",
+    "6mnq",
+    "5yy5",
+    "6mph",
+    "1kip",
+    "7srr"
+  ]
+}
