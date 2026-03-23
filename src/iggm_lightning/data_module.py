@@ -22,7 +22,6 @@ from IgGM.protein.antibody_regions import (
     build_antibody_region_metadata,
     full_to_loop_local_index,
     loop_local_to_full_index,
-    validate_antibody_region_metadata,
 )
 from IgGM.protein import crop_sequence_with_epitope
 from IgGM.protein.data_transform.processing_multimer import get_asym_ids
@@ -260,17 +259,10 @@ class _ProteinSampleDataset(Dataset):
                 atom_mask=complex_data["cmsk"],
             )
 
-        validation = validate_antibody_region_metadata(region_metadata)
-        if not validation.ok:
-            self._warn_once(
-                "invalid antibody region metadata for "
-                f"{record.get('sample_id', 'unknown')}: {'; '.join(validation.errors)}"
-            )
-
         # lightweight index conversion helpers for downstream loop-local code paths
         region_metadata["full_to_loop_local_index"] = full_to_loop_local_index
         region_metadata["loop_local_to_full_index"] = loop_local_to_full_index
-        region_metadata["validation_errors"] = list(validation.errors)
+        
         return region_metadata
 
     @staticmethod
@@ -292,18 +284,6 @@ class _ProteinSampleDataset(Dataset):
         valid = (ca_mask.unsqueeze(0) * ca_mask.unsqueeze(1)).bool()
         contact = (pair_dist <= float(cutoff)) & chain_cross & valid
         return contact.to(torch.float32)
-
-    # def __getitem__(self, index):
-    #     item = self.items[index]
-    #     step = random.randint(1, self.n_steps)
-    #     payload = self._resolve_sample_payload(item)
-    #     return {
-    #         "idx_step": step,
-    #         "prot_id": item["prot_id"],
-    #         "payload": payload,
-    #         "inputs_addi": None,
-    #         "chunk_size": self._chunk_size,
-    #     }
     
     def __getitem__(self, index):
         
