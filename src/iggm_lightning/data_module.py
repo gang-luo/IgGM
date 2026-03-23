@@ -18,6 +18,12 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 
 from IgGM.data.convert_to_example_format import convert_entry_to_sample
 from IgGM.data.sabdab import load_sabdab_metadata
+from IgGM.protein.antibody_regions import (
+    build_antibody_region_metadata,
+    full_to_loop_local_index,
+    loop_local_to_full_index,
+    validate_antibody_region_metadata,
+)
 from IgGM.protein import crop_sequence_with_epitope
 from IgGM.protein.data_transform.processing_multimer import get_asym_ids
 
@@ -147,6 +153,9 @@ class _ProteinSampleDataset(Dataset):
             parts = prot_id.split("_")
             if len(parts) >= 3 and parts[2].upper() != "NA":
                 light_chain_id = "L"
+        seq_lengths = dict(record.get("sequence_lengths") or {})
+        if not seq_lengths and isinstance(seqs, dict):
+            seq_lengths = {k: len(v) for k, v in seqs.items() if isinstance(v, str)}
 
         entry = {
             "pdb_id": str(record.get("sample_id") or item.get("pdb_id") or prot_id.split("_")[0]).lower(),
@@ -158,6 +167,7 @@ class _ProteinSampleDataset(Dataset):
         if converted is None:
             raise RuntimeError(f"Failed to convert processed PDB sample: {processed_pdb_path}")
         converted = self._apply_antigen_crop(converted)
+        region_metadata = self._build_region_metadata(record, converted)
 
         complex_data = converted["complex"]
         payload = {
@@ -173,12 +183,95 @@ class _ProteinSampleDataset(Dataset):
                 "a-cmsk": complex_data["a-cmsk"],
                 "epitope": complex_data["epitope"],
                 "contact": self._build_contact_map(complex_data),
+                **self._region_metadata_for_model(region_metadata),
             },
             "cdr_sequences": (record.get("cdr_sequences") or {}),
-            "sequence_lengths": (record.get("sequence_lengths") or {}),
+            "sequence_lengths": seq_lengths,
+            "antibody_region": region_metadata,
         }
         self._cache_put(cache_key, payload)
         return payload
+
+    @staticmethod
+    def _region_metadata_for_model(region_metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Flatten region metadata into model input keys without breaking old callers."""
+
+        return {
+            "antibody_mask": region_metadata["antibody_mask"],
+            "antigen_mask": region_metadata["antigen_mask"],
+            "cdr_mask": region_metadata["cdr_mask"],
+            "fr_mask": region_metadata["fr_mask"],
+            "loop_masks": region_metadata["loop_masks"],
+            "loop_type_ids": region_metadata["loop_type_ids"],
+            "loop_names": list(region_metadata["loop_names"]),
+            "loop_left_anchor_idx": region_metadata["loop_left_anchor_idx"],
+            "loop_right_anchor_idx": region_metadata["loop_right_anchor_idx"],
+            "loop_true_len": region_metadata["loop_true_len"],
+            "loop_lmax": region_metadata["loop_lmax"],
+            "loop_occ_target": region_metadata["loop_occ_target"],
+            "loop_valid_res_mask": region_metadata["loop_valid_res_mask"],
+            "loop_atom_valid_mask": region_metadata["loop_atom_valid_mask"],
+            "loop_global_res_indices": region_metadata["loop_global_res_indices"],
+        }
+
+    @staticmethod
+    def _to_tensor_dict(meta: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert saved region metadata containers back to tensors."""
+
+        out: Dict[str, Any] = {}
+        for key, value in meta.items():
+            if torch.is_tensor(value):
+                out[key] = value.clone()
+            elif isinstance(value, list) and value and all(isinstance(x, str) for x in value):
+                out[key] = list(value)
+            elif isinstance(value, dict):
+                out[key] = dict(value)
+            elif isinstance(value, list):
+                out[key] = torch.as_tensor(value)
+            else:
+                out[key] = value
+        return out
+
+    def _build_region_metadata(self, record: Dict[str, Any], converted: Dict[str, Any]) -> Dict[str, Any]:
+        """Build or refresh antibody region metadata for one converted sample."""
+
+        complex_data = converted["complex"]
+        seq_lengths = dict(record.get("sequence_lengths") or {})
+        if not seq_lengths:
+            seqs = record.get("sequences") or {}
+            seq_lengths = {k: len(v) for k, v in seqs.items() if isinstance(v, str)}
+        saved = record.get("antibody_region")
+        if isinstance(saved, dict) and saved:
+            region_metadata = self._to_tensor_dict(saved)
+            atom_mask = complex_data["cmsk"]
+            region_metadata = build_antibody_region_metadata(
+                sequence_lengths=seq_lengths,
+                cdr_sequences=(record.get("cdr_sequences") or {}),
+                atom_mask=atom_mask,
+                lmax_overrides={
+                    str(name): int(lmax)
+                    for name, lmax in zip(region_metadata.get("loop_names", []), region_metadata.get("loop_lmax", []))
+                } if region_metadata.get("loop_names") is not None and region_metadata.get("loop_lmax") is not None else None,
+            )
+        else:
+            region_metadata = build_antibody_region_metadata(
+                sequence_lengths=seq_lengths,
+                cdr_sequences=(record.get("cdr_sequences") or {}),
+                atom_mask=complex_data["cmsk"],
+            )
+
+        validation = validate_antibody_region_metadata(region_metadata)
+        if not validation.ok:
+            self._warn_once(
+                "invalid antibody region metadata for "
+                f"{record.get('sample_id', 'unknown')}: {'; '.join(validation.errors)}"
+            )
+
+        # lightweight index conversion helpers for downstream loop-local code paths
+        region_metadata["full_to_loop_local_index"] = full_to_loop_local_index
+        region_metadata["loop_local_to_full_index"] = loop_local_to_full_index
+        region_metadata["validation_errors"] = list(validation.errors)
+        return region_metadata
 
     @staticmethod
     def _build_contact_map(complex_data: Dict[str, Any], cutoff: float = 8.0) -> Optional[torch.Tensor]:

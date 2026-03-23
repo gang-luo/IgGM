@@ -5,7 +5,18 @@ from .tensor import cdist, clone, to_device, to_tensor
 from .registry import Registry
 from .file import jload, jdump, get_tmp_dpath, download_file
 from .env import seed_all_rng, setup_logger, setup
-from .diff_util import ss2ptr, ptr2ss, so3_scale, intp_prob_mat_dsct, intp_trsl_mat, intp_rota_tns, IsotropicGaussianSO3, IGSO3Buffer, rota2quat, replace_with_mask, calc_trsl_vec
+from .diff_util import ss2ptr, ptr2ss, prob2seq, so3_scale, intp_prob_mat_dsct, intp_trsl_mat, intp_rota_tns, IsotropicGaussianSO3, IGSO3Buffer, rota2quat, replace_with_mask, calc_trsl_vec
+from .fr_cdr_diffusion_utils import (
+    apply_rigid_transform_to_masked_coords,
+    build_anchor_frame_from_full_coords,
+    check_loop_roundtrip,
+    extract_clean_fr_reference,
+    extract_per_loop_clean_local_coords,
+    global_to_local_coords,
+    local_to_global_coords,
+    merge_noisy_fr_and_loops,
+    rebuild_loops_from_local_coords,
+)
 
 # Relax the input pdb file
 def Rosetta_relax(pdb_file):

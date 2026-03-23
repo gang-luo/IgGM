@@ -23,6 +23,17 @@ try:
 except ImportError:  # pragma: no cover - optional dependency in lightweight envs
     torch = None
 
+if torch is not None:
+    from IgGM.protein.antibody_regions import (
+        build_antibody_region_metadata,
+        metadata_to_serializable,
+        validate_antibody_region_metadata,
+    )
+else:  # pragma: no cover - metadata tensors require torch
+    build_antibody_region_metadata = None
+    metadata_to_serializable = None
+    validate_antibody_region_metadata = None
+
 AA3_TO_1 = {
     "ALA": "A",
     "ARG": "R",
@@ -536,6 +547,17 @@ def finalize_sample(entry: Dict[str, object], fasta_dir: Path) -> Dict[str, obje
     seq_lens = {name: len(seq) for name, seq in sequences.items()}
     file_stem = build_sample_stem(entry)
     fasta_path = write_processed_fasta(fasta_dir, file_stem, sequences)
+    if build_antibody_region_metadata is not None:
+        region_metadata = build_antibody_region_metadata(
+            sequence_lengths=seq_lens,
+            cdr_sequences=cdr_sequences,
+        )
+        validation = validate_antibody_region_metadata(region_metadata)
+        serialized_region = metadata_to_serializable(region_metadata)
+        validation_errors = list(validation.errors)
+    else:
+        serialized_region = {}
+        validation_errors = []
 
     sample = {
         "sample_id": entry["sample_id"],
@@ -550,6 +572,8 @@ def finalize_sample(entry: Dict[str, object], fasta_dir: Path) -> Dict[str, obje
         "sequence_lengths": seq_lens,
         "cdr_pdb": cdr_pdb,
         "cdr_sequences": cdr_sequences,
+        "antibody_region": serialized_region,
+        "antibody_region_validation_errors": validation_errors,
         "length_tensor": (
             torch.tensor(list(seq_lens.values()), dtype=torch.int32)
             if torch is not None
@@ -832,4 +856,3 @@ if __name__ == "__main__":
 #   --build_splits \
 #   --split_out_dir ./data/sabdab/sabdab_file/split \
 #   --cluster_identity 0.95 
-

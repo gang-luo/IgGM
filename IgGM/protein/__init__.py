@@ -4,6 +4,16 @@ import torch
 from .data_transform import calc_ppi_sites
 from .parser import PdbParser, parse_a3m, parse_fasta, export_fasta
 from .atom_mapper import AtomMapper
+from .antibody_regions import (
+    build_antibody_region_metadata,
+    build_loop_index_lookups,
+    find_first_valid_local_index,
+    find_last_valid_local_index,
+    full_to_loop_local_index,
+    loop_local_to_full_index,
+    validate_anchor_consistency,
+    validate_antibody_region_metadata,
+)
 from .prot_struct import ProtStruct
 from .prot_converter import ProtConverter
 from .pdb_fixer import PdbFixer

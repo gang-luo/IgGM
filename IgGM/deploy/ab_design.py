@@ -32,7 +32,14 @@ class AbDesigner(BaseDesigner):
         self.config = config
         self.igso3_buffer = IGSO3Buffer()
         self.igso3_buffer.load(buffer_path)
-        self.diffuser = Diffuser(igso3_buffer=self.igso3_buffer)
+        self.diffuser = Diffuser(
+            igso3_buffer=self.igso3_buffer,
+            diffusion_mode=getattr(config, "diffusion_mode", "legacy"),
+            fr_noise_scale_trsl=getattr(config, "fr_noise_scale_trsl", 1.0),
+            fr_noise_scale_rota=getattr(config, "fr_noise_scale_rota", 1.0),
+            cdr_local_noise_scale=getattr(config, "cdr_local_noise_scale", 1.0),
+            occupancy_mode=getattr(config, "occupancy_mode", "joint_predict"),
+        )
         self.buffer_path = buffer_path
         logging.info('restoring the pre-trained IgGM design model ... done')
         self.idxs_step = self._get_idxs_step()
