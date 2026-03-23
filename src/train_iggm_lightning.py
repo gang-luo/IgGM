@@ -100,6 +100,7 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     wandb = defaults.get("wandb", {})
     runtime = defaults.get("runtime", {})
     stage_training = defaults.get("stage_training", {})
+    diffusion = defaults.get("diffusion", {})
 
     p = argparse.ArgumentParser(description="Train IgGM with PyTorch Lightning")
     p.add_argument("--config", default=defaults.get("config_path", "config/train_lightning.yaml"))
@@ -127,6 +128,12 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
 
     p.add_argument("--gamma", type=float, default=float(loss_cfg.get("gamma", 0.8)))
     p.add_argument("--loss_viol_weight", type=float, default=float(loss_cfg.get("loss_viol_weight", 0.02)))
+    p.add_argument("--loss_mode", default=loss_cfg.get("loss_mode", "legacy"))
+    p.add_argument("--fr_weight", type=float, default=float(loss_cfg.get("fr_weight", 1.0)))
+    p.add_argument("--cdr_local_weight", type=float, default=float(loss_cfg.get("cdr_local_weight", 1.0)))
+    p.add_argument("--occupancy_weight", type=float, default=float(loss_cfg.get("occupancy_weight", 0.5)))
+    p.add_argument("--seam_weight", type=float, default=float(loss_cfg.get("seam_weight", 0.5)))
+    p.add_argument("--clash_weight", type=float, default=float(loss_cfg.get("clash_weight", 0.1)))
     p.add_argument("--dockq_threshold", type=float, default=float(metric_cfg.get("dockq_threshold", 0.23)))
 
     p.add_argument("--max_epochs", type=int, default=int(trainer.get("max_epochs", 1)))
@@ -158,6 +165,11 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--mix_cdr_h2", type=int, default=int(stage_training.get("mix_cdr_h2", 2)))
     p.add_argument("--mix_cdr_all", type=int, default=int(stage_training.get("mix_cdr_all", 2)))
     p.add_argument("--lazy_cache_size", type=int, default=int(stage_training.get("lazy_cache_size", 128)))
+    p.add_argument("--diffusion_mode", default=diffusion.get("diffusion_mode", "legacy"))
+    p.add_argument("--fr_noise_scale_trsl", type=float, default=float(diffusion.get("fr_noise_scale_trsl", 1.0)))
+    p.add_argument("--fr_noise_scale_rota", type=float, default=float(diffusion.get("fr_noise_scale_rota", 1.0)))
+    p.add_argument("--cdr_local_noise_scale", type=float, default=float(diffusion.get("cdr_local_noise_scale", 1.0)))
+    p.add_argument("--occupancy_mode", default=diffusion.get("occupancy_mode", "joint_predict"))
     return p
 
 
@@ -218,7 +230,14 @@ def main() -> None:
     if args.igso3_buffer:
         igso3 = IGSO3Buffer()
         igso3.load(args.igso3_buffer)
-    diffuser = Diffuser(igso3_buffer=igso3)
+    diffuser = Diffuser(
+        igso3_buffer=igso3,
+        diffusion_mode=args.diffusion_mode,
+        fr_noise_scale_trsl=args.fr_noise_scale_trsl,
+        fr_noise_scale_rota=args.fr_noise_scale_rota,
+        cdr_local_noise_scale=args.cdr_local_noise_scale,
+        occupancy_mode=args.occupancy_mode,
+    )
 
     lit_model = IgGMLightningModule(
         model=design_model,
@@ -226,7 +245,16 @@ def main() -> None:
         diffuser=diffuser,
         optimizer_cfg=OptimizerConfig(lr=args.lr, weight_decay=args.weight_decay),
         grad_clip_val=args.grad_clip,
-        loss_cfg=IgGMLossConfig(gamma=args.gamma, loss_viol_weight=args.loss_viol_weight),
+        loss_cfg=IgGMLossConfig(
+            gamma=args.gamma,
+            loss_viol_weight=args.loss_viol_weight,
+            loss_mode=args.loss_mode,
+            fr_weight=args.fr_weight,
+            cdr_local_weight=args.cdr_local_weight,
+            occupancy_weight=args.occupancy_weight,
+            seam_weight=args.seam_weight,
+            clash_weight=args.clash_weight,
+        ),
         metric_cfg=MetricConfig(dockq_threshold=args.dockq_threshold),
         stage_cfg=StageTrainingConfig(
             stage1_epochs=args.stage1_epochs,

@@ -321,6 +321,16 @@ class IgGMLightningModule(pl.LightningModule):
         self.log(f"{stage}/loss_iframe", loss_dict["loss_iframe"], prog_bar=False, on_step=True, on_epoch=True)
         self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=False, on_step=True, on_epoch=True)
         self.log(f"{stage}/loss_srcv", loss_dict["loss_srcv"], prog_bar=False, on_step=True, on_epoch=True)
+        if 'loss_fr' in loss_dict:
+            self.log(f"{stage}/loss_fr", loss_dict['loss_fr'], prog_bar=False, on_step=True, on_epoch=True)
+        if 'loss_cdr_local' in loss_dict:
+            self.log(f"{stage}/loss_cdr_local", loss_dict['loss_cdr_local'], prog_bar=False, on_step=True, on_epoch=True)
+        if 'loss_occupancy' in loss_dict:
+            self.log(f"{stage}/loss_occupancy", loss_dict['loss_occupancy'], prog_bar=False, on_step=True, on_epoch=True)
+        if 'loss_seam' in loss_dict:
+            self.log(f"{stage}/loss_seam", loss_dict['loss_seam'], prog_bar=False, on_step=True, on_epoch=True)
+        if 'loss_clash' in loss_dict:
+            self.log(f"{stage}/loss_clash", loss_dict['loss_clash'], prog_bar=False, on_step=True, on_epoch=True)
 
         if stage in {"val", "test"}:
             pred_cord = outputs["3d"]["cord"][-1][0]
