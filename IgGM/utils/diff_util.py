@@ -147,6 +147,26 @@ def ptr2ss(prob_tns, trsl_tns, rota_tns, fmsk_mat, stoc_seq=False):
     return aa_seqs, cord_tns, cmsk_tns
 
 
+def prob2seq(prob_tns, stoc_seq=False):
+    """Convert residue-type probabilities into amino-acid sequences.
+
+    Args:
+    * prob_tns: probabilistic distributions of size N x L x C
+    * stoc_seq: whether to sample stochastically instead of argmax decoding
+
+    Returns:
+    * aa_seqs: list of amino-acid sequences, each of length L
+    """
+
+    if stoc_seq:
+        distr = Categorical(probs=prob_tns)
+        ridx_mat = distr.sample()
+    else:
+        ridx_mat = torch.argmax(prob_tns, dim=2)
+    ridx_mat_np = ridx_mat.detach().cpu().numpy()
+    return [''.join(RESD_NAMES_1C[x] for x in ridx_mat_np[idx]) for idx in range(ridx_mat.shape[0])]
+
+
 def calc_intp_coeffs(alpha_bar_prev, alpha_bar_curr, has_noise):
     """Calculate interpolation coefficients.
 
