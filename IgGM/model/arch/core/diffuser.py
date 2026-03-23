@@ -14,7 +14,19 @@ from torch import nn
 
 from IgGM.protein import AtomMapper
 from IgGM.protein.prot_constants import RESD_NAMES_1C
-from IgGM.utils import ss2ptr, so3_scale, ptr2ss, IsotropicGaussianSO3
+from IgGM.utils import (
+    IsotropicGaussianSO3,
+    apply_rigid_transform_to_masked_coords,
+    check_loop_roundtrip,
+    extract_clean_fr_reference,
+    extract_per_loop_clean_local_coords,
+    merge_noisy_fr_and_loops,
+    prob2seq,
+    ptr2ss,
+    rebuild_loops_from_local_coords,
+    so3_scale,
+    ss2ptr,
+)
 
 
 class Diffuser:
@@ -26,6 +38,11 @@ class Diffuser:
             pert_seq=True,  # whether to perturb amino-acid sequences
             cord_scale=4.0,  # coordinate scaling factor (in Angstrom)
             igso3_buffer=None,  # buffered rotational matrices sampled from IGSO(3) distributions
+            diffusion_mode="legacy",  # legacy | fr_cdr_sync
+            fr_noise_scale_trsl=1.0,
+            fr_noise_scale_rota=1.0,
+            cdr_local_noise_scale=1.0,
+            occupancy_mode="joint_predict",
     ):
         """Constructor function."""
 
@@ -34,6 +51,11 @@ class Diffuser:
         self.pert_seq = pert_seq
         self.cord_scale = cord_scale
         self.igso3_buffer = igso3_buffer
+        self.diffusion_mode = diffusion_mode
+        self.fr_noise_scale_trsl = float(fr_noise_scale_trsl)
+        self.fr_noise_scale_rota = float(fr_noise_scale_rota)
+        self.cdr_local_noise_scale = float(cdr_local_noise_scale)
+        self.occupancy_mode = occupancy_mode
 
         # additional configurations
         self.rota_buf_size = 1024  # number of rotation matrices buffered for each IGSO(3) distr.
@@ -72,6 +94,12 @@ class Diffuser:
         * For training w/ self-conditioning inputs, it is required that the time-step ranges from 2
             to T, instead of the default range (from 1 to T).
         """
+
+        if self.diffusion_mode == "fr_cdr_sync" and self._has_fr_cdr_sync_metadata(prot_data_orig):
+            prot_data_pert = self._run_fr_cdr_sync(prot_data_orig, idxs_step)
+            if return_time_steps:
+                return prot_data_pert, idxs_step
+            return prot_data_pert
 
         # initialization
         n_resds = len(prot_data_orig['seq'])
@@ -137,6 +165,184 @@ class Diffuser:
 
         if return_time_steps:
             return prot_data_pert, idxs_step
+        return prot_data_pert
+
+    @staticmethod
+    def _has_fr_cdr_sync_metadata(prot_data_orig):
+        required = (
+            "fr_mask",
+            "cdr_mask",
+            "loop_masks",
+            "loop_left_anchor_idx",
+            "loop_right_anchor_idx",
+            "loop_true_len",
+            "loop_lmax",
+            "loop_occ_target",
+            "loop_valid_res_mask",
+            "loop_atom_valid_mask",
+            "loop_global_res_indices",
+        )
+        return all(key in prot_data_orig and prot_data_orig[key] is not None for key in required)
+
+    def _sample_probabilities(self, aa_seq_orig, pmsk_vec, idxs_step, device):
+        """Sample noisy residue-type distributions; shared by legacy and fr_cdr_sync modes."""
+
+        trmat_ac = self.trmat_list_ac[idxs_step].to(device)
+        prob_tns_orig = nn.functional.one_hot(
+            torch.tensor([self.resd_names.index(x) for x in aa_seq_orig], dtype=torch.long, device=device),
+            num_classes=self.n_tokns,
+        ).to(torch.float32).unsqueeze(0)
+        prob_tns_pert = torch.matmul(prob_tns_orig, trmat_ac)
+        prob_tns_pert = nn.functional.normalize(prob_tns_pert, p=1.0, dim=2)
+        prob_tns_pert = torch.where(
+            pmsk_vec.view(-1, prob_tns_orig.shape[1], 1).to(torch.bool),
+            prob_tns_pert,
+            prob_tns_orig,
+        )
+        aa_seqs_pert = prob2seq(prob_tns_pert, stoc_seq=True)
+        return prob_tns_orig, prob_tns_pert, aa_seqs_pert
+
+    def _sample_fr_rigid_transform(self, idxs_step, device, dtype):
+        """Sample one rigid transform for the full FR block at timestep t."""
+
+        alpha_bar_trsl = self.trsl_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
+        alpha_bar_rota = self.rota_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
+        fr_translation = (
+            self.fr_noise_scale_trsl
+            * self.cord_scale
+            * torch.sqrt(1.0 - alpha_bar_trsl)
+            * torch.randn(3, device=device, dtype=dtype)
+        )
+        rota_buf = self.rota_buf_list_fwd[idxs_step].to(device=device, dtype=dtype)
+        fr_noise = rota_buf[random.randrange(self.rota_buf_size)].unsqueeze(0)
+        fr_rotation = so3_scale(fr_noise, torch.sqrt(1.0 - alpha_bar_rota) * self.fr_noise_scale_rota)[0]
+        return fr_rotation, fr_translation
+
+    def _run_fr_cdr_sync(self, prot_data_orig, idxs_step):
+        """Build a synchronized noisy state with FR rigid motion + CDR local diffusion."""
+
+        device = prot_data_orig["cord"].device
+        dtype = prot_data_orig["cord"].dtype
+
+        aa_seq_orig = prot_data_orig["seq"]
+        cord_tns_orig = prot_data_orig["cord"]
+        cmsk_mat_orig = prot_data_orig["cmsk"]
+        pmsk_vec = prot_data_orig["mask_design"]
+
+        fr_mask = prot_data_orig["fr_mask"].to(device=device, dtype=torch.bool)
+        cdr_mask = prot_data_orig["cdr_mask"].to(device=device, dtype=torch.bool)
+        loop_masks = prot_data_orig["loop_masks"].to(device=device, dtype=torch.bool)
+        loop_type_ids = prot_data_orig["loop_type_ids"].to(device=device)
+        loop_left_anchor_idx = prot_data_orig["loop_left_anchor_idx"].to(device=device)
+        loop_right_anchor_idx = prot_data_orig["loop_right_anchor_idx"].to(device=device)
+        loop_true_len = prot_data_orig["loop_true_len"].to(device=device)
+        loop_lmax = prot_data_orig["loop_lmax"].to(device=device)
+        loop_occ_target = prot_data_orig["loop_occ_target"].to(device=device, dtype=torch.bool)
+        loop_valid_res_mask = prot_data_orig["loop_valid_res_mask"].to(device=device, dtype=torch.bool)
+        loop_atom_valid_mask = prot_data_orig["loop_atom_valid_mask"].to(device=device, dtype=torch.bool)
+        loop_global_res_indices = prot_data_orig["loop_global_res_indices"].to(device=device)
+
+        _, prob_tns_pert, aa_seqs_pert = self._sample_probabilities(aa_seq_orig, pmsk_vec, idxs_step, device)
+
+        clean_fr_reference = extract_clean_fr_reference(cord_tns_orig, fr_mask, atom_mask=cmsk_mat_orig)
+        clean_loop_local_coords, clean_anchor_rots, clean_anchor_trans = extract_per_loop_clean_local_coords(
+            cord_tns_orig,
+            loop_global_res_indices,
+            loop_true_len,
+            loop_left_anchor_idx,
+            loop_right_anchor_idx,
+            loop_atom_valid_mask,
+        )
+        roundtrip = check_loop_roundtrip(
+            cord_tns_orig,
+            loop_global_res_indices,
+            loop_true_len,
+            loop_left_anchor_idx,
+            loop_right_anchor_idx,
+            loop_atom_valid_mask,
+        )
+
+        fr_rotation, fr_translation = self._sample_fr_rigid_transform(idxs_step, device, dtype)
+        noisy_fr_coords = apply_rigid_transform_to_masked_coords(
+            cord_tns_orig,
+            fr_mask,
+            fr_rotation,
+            fr_translation,
+            atom_mask=cmsk_mat_orig,
+        )
+
+        alpha_bar_local = self.trsl_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
+        local_noise_scale = (
+            self.cdr_local_noise_scale
+            * self.cord_scale
+            * torch.sqrt(torch.tensor(1.0, device=device, dtype=dtype) - alpha_bar_local)
+        )
+        local_noise = local_noise_scale * torch.randn_like(clean_loop_local_coords)
+        noisy_loop_local_coords = clean_loop_local_coords + local_noise * loop_atom_valid_mask.unsqueeze(-1).to(dtype)
+        noisy_loop_local_coords = noisy_loop_local_coords * loop_atom_valid_mask.unsqueeze(-1).to(dtype)
+
+        noisy_loop_global_coords, noisy_anchor_rots, noisy_anchor_trans = rebuild_loops_from_local_coords(
+            noisy_loop_local_coords,
+            noisy_fr_coords,
+            loop_global_res_indices,
+            loop_true_len,
+            loop_left_anchor_idx,
+            loop_right_anchor_idx,
+            loop_atom_valid_mask,
+        )
+        cord_tns_noisy = merge_noisy_fr_and_loops(
+            cord_tns_orig,
+            noisy_fr_coords,
+            noisy_loop_global_coords,
+            loop_global_res_indices,
+            loop_true_len,
+            fr_mask,
+            loop_atom_valid_mask,
+        )
+        cmsk_tns_pert = cmsk_mat_orig.unsqueeze(0)
+
+        prot_data_pert = {
+            "step": [idxs_step],
+            "seq-o": aa_seq_orig,
+            "cord-o": cord_tns_orig,
+            "cmsk-o": cmsk_mat_orig,
+            "pmsk": pmsk_vec,
+            "pmsk-ligand": prot_data_orig["mask_ab"],
+            "seq-p": aa_seqs_pert,
+            "cord-p": cord_tns_noisy.unsqueeze(0),
+            "cmsk-p": cmsk_tns_pert,
+            "asym-id": prot_data_orig["asym_id"].detach().clone(),
+            "a-cord": prot_data_orig["a-cord"].detach().clone(),
+            "a-cmsk": prot_data_orig["a-cmsk"].detach().clone(),
+            "fr_mask": fr_mask.detach().clone(),
+            "cdr_mask": cdr_mask.detach().clone(),
+            "loop_masks": loop_masks.detach().clone(),
+            "loop_type_ids": loop_type_ids.detach().clone(),
+            "loop_names": list(prot_data_orig.get("loop_names", [])),
+            "loop_left_anchor_idx": loop_left_anchor_idx.detach().clone(),
+            "loop_right_anchor_idx": loop_right_anchor_idx.detach().clone(),
+            "loop_true_len": loop_true_len.detach().clone(),
+            "loop_lmax": loop_lmax.detach().clone(),
+            "loop_occ_target": loop_occ_target.detach().clone(),
+            "loop_valid_res_mask": loop_valid_res_mask.detach().clone(),
+            "loop_atom_valid_mask": loop_atom_valid_mask.detach().clone(),
+            "loop_global_res_indices": loop_global_res_indices.detach().clone(),
+            "clean_fr_reference": clean_fr_reference.detach().clone(),
+            "clean_loop_local_coords": clean_loop_local_coords.detach().clone(),
+            "noisy_loop_local_coords": noisy_loop_local_coords.detach().clone(),
+            "anchor_frame_meta": {
+                "clean_rot": clean_anchor_rots.detach().clone(),
+                "clean_trans": clean_anchor_trans.detach().clone(),
+                "noisy_rot": noisy_anchor_rots.detach().clone(),
+                "noisy_trans": noisy_anchor_trans.detach().clone(),
+                "fr_rotation": fr_rotation.detach().clone(),
+                "fr_translation": fr_translation.detach().clone(),
+                "loop_roundtrip_max_err": roundtrip["max_abs_error"].detach().clone(),
+                "loop_roundtrip_ok": roundtrip["roundtrip_ok"],
+            },
+            "diffusion_mode": self.diffusion_mode,
+            "occupancy_mode": self.occupancy_mode,
+        }
         return prot_data_pert
 
     def __build_trmat_list(self):

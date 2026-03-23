@@ -100,6 +100,7 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     wandb = defaults.get("wandb", {})
     runtime = defaults.get("runtime", {})
     stage_training = defaults.get("stage_training", {})
+    diffusion = defaults.get("diffusion", {})
 
     p = argparse.ArgumentParser(description="Train IgGM with PyTorch Lightning")
     p.add_argument("--config", default=defaults.get("config_path", "config/train_lightning.yaml"))
@@ -158,6 +159,11 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--mix_cdr_h2", type=int, default=int(stage_training.get("mix_cdr_h2", 2)))
     p.add_argument("--mix_cdr_all", type=int, default=int(stage_training.get("mix_cdr_all", 2)))
     p.add_argument("--lazy_cache_size", type=int, default=int(stage_training.get("lazy_cache_size", 128)))
+    p.add_argument("--diffusion_mode", default=diffusion.get("diffusion_mode", "legacy"))
+    p.add_argument("--fr_noise_scale_trsl", type=float, default=float(diffusion.get("fr_noise_scale_trsl", 1.0)))
+    p.add_argument("--fr_noise_scale_rota", type=float, default=float(diffusion.get("fr_noise_scale_rota", 1.0)))
+    p.add_argument("--cdr_local_noise_scale", type=float, default=float(diffusion.get("cdr_local_noise_scale", 1.0)))
+    p.add_argument("--occupancy_mode", default=diffusion.get("occupancy_mode", "joint_predict"))
     return p
 
 
@@ -218,7 +224,14 @@ def main() -> None:
     if args.igso3_buffer:
         igso3 = IGSO3Buffer()
         igso3.load(args.igso3_buffer)
-    diffuser = Diffuser(igso3_buffer=igso3)
+    diffuser = Diffuser(
+        igso3_buffer=igso3,
+        diffusion_mode=args.diffusion_mode,
+        fr_noise_scale_trsl=args.fr_noise_scale_trsl,
+        fr_noise_scale_rota=args.fr_noise_scale_rota,
+        cdr_local_noise_scale=args.cdr_local_noise_scale,
+        occupancy_mode=args.occupancy_mode,
+    )
 
     lit_model = IgGMLightningModule(
         model=design_model,
