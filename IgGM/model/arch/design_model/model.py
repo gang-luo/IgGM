@@ -319,7 +319,7 @@ class DesignModel(BaseModel):
             rmsk_vec_motf=rmsk_vec_motf,
             chunk_size=chunk_size,
             region_metadata=region_metadata,
-            structure_mode=inputs.get('diffusion_mode', self.structure_mode),
+            structure_mode=inputs.get('structure_mode', inputs.get('diffusion_mode', self.structure_mode)),
         )
 
         # predict denoised amino-acid sequences
@@ -340,7 +340,7 @@ class DesignModel(BaseModel):
             'pfea': pfea_tns,
             '1d': logt_tns_aa,
             '2d': {'cb': logt_tns_cb, 'om': logt_tns_om, 'th': logt_tns_th, 'ph': logt_tns_ph},
-            '3d': {'cord': cord_list, 'param': param_list, 'plddt': plddt_list, 'fr_cdr': fr_cdr_outputs, 'structure_mode': inputs.get('diffusion_mode', self.structure_mode)},
+            '3d': {'cord': cord_list, 'param': param_list, 'plddt': plddt_list, 'fr_cdr': fr_cdr_outputs, 'structure_mode': inputs.get('structure_mode', inputs.get('diffusion_mode', self.structure_mode))},
         }
         return outputs
 

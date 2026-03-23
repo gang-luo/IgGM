@@ -26,7 +26,7 @@ class IgGMLossConfig:
     geo_dist_max: float = 20.0
     geo_dist_bins: int = 36
     geo_angle_bins: int = 24
-    loss_mode: str = "legacy"  # legacy | fr_cdr_boltz | fr_cdr_iggm
+    loss_mode: str = "legacy"  # legacy | fr_cdr_boltz | fr_cdr_iggm | boltz_style | iggm_style
     fr_weight: float = 1.0
     cdr_local_weight: float = 1.0
     occupancy_weight: float = 0.5
@@ -44,8 +44,8 @@ class IgGMPaperLoss:
     def __call__(self, inputs: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         if self.cfg.loss_mode == 'legacy':
             return self._legacy_loss(inputs, outputs)
-        if self.cfg.loss_mode in {'fr_cdr_boltz', 'fr_cdr_iggm'}:
-            style = 'boltz' if self.cfg.loss_mode.endswith('boltz') else 'iggm'
+        if self.cfg.loss_mode in {'fr_cdr_boltz', 'fr_cdr_iggm', 'boltz_style', 'iggm_style'}:
+            style = 'boltz' if self.cfg.loss_mode in {'fr_cdr_boltz', 'boltz_style'} else 'iggm'
             return self._fr_cdr_loss(inputs, outputs, style=style)
         raise ValueError(f'Unsupported loss_mode: {self.cfg.loss_mode}')
 

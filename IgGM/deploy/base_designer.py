@@ -202,14 +202,17 @@ class BaseDesigner(BaseModel):
         start = 0
         sequences = []
         ids = []
+        export_mask = outputs.get('loop_export_mask')
 
         for chn_id in complex_ids:
-            aa_seq = inputs[chn_id]['base']['seq']
-            if 'X' in aa_seq:  # for sequence recovery
-                aa_seq = outputs['seq'][start:start + len(aa_seq)]
+            aa_seq_in = inputs[chn_id]['base']['seq']
+            aa_seq = outputs['seq'][start:start + len(aa_seq_in)] if 'seq' in outputs else aa_seq_in
+            if export_mask is not None:
+                mask_slice = export_mask[start:start + len(aa_seq_in)]
+                aa_seq = ''.join([aa for aa, keep in zip(aa_seq, mask_slice.tolist()) if keep])
             sequences.append(aa_seq)
             ids.append(chn_id)
-            start += len(aa_seq)
+            start += len(aa_seq_in)
 
         export_fasta(sequences, ids=ids, output=filename)
 
@@ -224,15 +227,23 @@ class BaseDesigner(BaseModel):
         prot_data = OrderedDict()
         start = 0
         pdb_fixer = PdbFixer()
+        export_mask = outputs.get('loop_export_mask')
         for chn_id in ligand_id.split(":"):
             prot_data_chain = OrderedDict()
-            aa_seq = inputs[chn_id]['base']['seq']
-            aa_seq = outputs['seq'][start:start + len(aa_seq)]
+            aa_seq_in = inputs[chn_id]['base']['seq']
+            aa_seq = outputs['seq'][start:start + len(aa_seq_in)]
+            cord = outputs['cord'][start:start + len(aa_seq_in)]
+            cmsk = outputs['cmsk'][start:start + len(aa_seq_in)]
+            if export_mask is not None:
+                mask_slice = export_mask[start:start + len(aa_seq_in)].to(torch.bool)
+                aa_seq = ''.join([aa for aa, keep in zip(aa_seq, mask_slice.tolist()) if keep])
+                cord = cord[mask_slice]
+                cmsk = cmsk[mask_slice]
             pred_info += f'REMARK 250 Predicted Sequence for chain {chn_id}: {aa_seq}\n'
             prot_data_chain[chn_id] = {
                 'seq': aa_seq,
-                'cord': outputs['cord'][start:start + len(aa_seq)],
-                'cmsk': outputs['cmsk'][start:start + len(aa_seq)],
+                'cord': cord,
+                'cmsk': cmsk,
             }
             if relax:
                 chain_save_path = f'{tmp_path}/{chn_id}.pdb'
@@ -248,10 +259,10 @@ class BaseDesigner(BaseModel):
             else:
                 prot_data[chn_id] = {
                         'seq': aa_seq,
-                        'cord': outputs['cord'][start:start + len(aa_seq)],
-                        'cmsk': outputs['cmsk'][start:start + len(aa_seq)],
+                        'cord': cord,
+                        'cmsk': cmsk,
                     }
-            start += len(aa_seq)
+            start += len(aa_seq_in)
 
         for chn_id in receptor_id.split(":"):
             aa_seq = inputs[chn_id]['base']['seq']

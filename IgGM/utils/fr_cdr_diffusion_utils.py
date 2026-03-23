@@ -144,7 +144,12 @@ def extract_per_loop_clean_local_coords(
     frame_rots = torch.zeros((n_loops, 3, 3), dtype=full_coords.dtype, device=full_coords.device)
     frame_trans = torch.zeros((n_loops, 3), dtype=full_coords.dtype, device=full_coords.device)
 
+    eye = torch.eye(3, dtype=full_coords.dtype, device=full_coords.device)
     for idx in range(n_loops):
+        true_len = int(loop_true_len[idx].item())
+        if true_len <= 0 or int(loop_left_anchor_idx[idx].item()) < 0 or int(loop_right_anchor_idx[idx].item()) < 0:
+            frame_rots[idx] = eye
+            continue
         rot, trans = build_anchor_frame_from_full_coords(
             full_coords,
             int(loop_left_anchor_idx[idx].item()),
@@ -152,9 +157,6 @@ def extract_per_loop_clean_local_coords(
         )
         frame_rots[idx] = rot
         frame_trans[idx] = trans
-        true_len = int(loop_true_len[idx].item())
-        if true_len <= 0:
-            continue
         global_idx = loop_global_res_indices[idx, :true_len].to(torch.long)
         coords = full_coords[global_idx]
         local[idx, :true_len] = global_to_local_coords(coords, rot, trans)
@@ -186,7 +188,12 @@ def rebuild_loops_from_local_coords(
     frame_rots = torch.zeros((n_loops, 3, 3), dtype=coords_local.dtype, device=coords_local.device)
     frame_trans = torch.zeros((n_loops, 3), dtype=coords_local.dtype, device=coords_local.device)
 
+    eye = torch.eye(3, dtype=coords_local.dtype, device=coords_local.device)
     for idx in range(n_loops):
+        true_len = int(loop_true_len[idx].item())
+        if true_len <= 0 or int(loop_left_anchor_idx[idx].item()) < 0 or int(loop_right_anchor_idx[idx].item()) < 0:
+            frame_rots[idx] = eye
+            continue
         rot, trans = build_anchor_frame_from_full_coords(
             noisy_fr_coords,
             int(loop_left_anchor_idx[idx].item()),
@@ -194,9 +201,6 @@ def rebuild_loops_from_local_coords(
         )
         frame_rots[idx] = rot
         frame_trans[idx] = trans
-        true_len = int(loop_true_len[idx].item())
-        if true_len <= 0:
-            continue
         global_coords[idx, :true_len] = local_to_global_coords(coords_local[idx, :true_len], rot, trans)
         global_coords[idx, :true_len] *= loop_atom_valid_mask[idx, :true_len].unsqueeze(-1).to(global_coords.dtype)
 

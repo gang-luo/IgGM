@@ -78,6 +78,33 @@ def parse_args():
         help='max size of antigen chain, default is 2000',
     )
     parser.add_argument(
+        '--diffusion_mode',
+        type=str,
+        default='legacy',
+        choices=['legacy', 'fr_cdr_sync'],
+        help='diffuser mode for iterative design',
+    )
+    parser.add_argument(
+        '--structure_mode',
+        type=str,
+        default='legacy',
+        choices=['legacy', 'fr_cdr_sync'],
+        help='structure prediction / update mode',
+    )
+    parser.add_argument(
+        '--loss_mode',
+        type=str,
+        default='legacy',
+        choices=['legacy', 'boltz_style', 'iggm_style'],
+        help='training-style label kept in config for restore / bookkeeping',
+    )
+    parser.add_argument('--fr_noise_scale_trsl', type=float, default=1.0, help='FR rigid translation noise scale')
+    parser.add_argument('--fr_noise_scale_rota', type=float, default=1.0, help='FR rigid rotation noise scale')
+    parser.add_argument('--cdr_local_noise_scale', type=float, default=1.0, help='CDR local noise scale')
+    parser.add_argument('--occupancy_prediction_mode', type=str, default='joint_predict', help='occupancy decoding mode')
+    parser.add_argument('--occupancy_threshold', type=float, default=0.5, help='occupancy prefix threshold')
+
+    parser.add_argument(
         '--run_task', '-rt',
         type=str,
         default='design',
