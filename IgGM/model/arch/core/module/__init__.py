@@ -3,3 +3,6 @@
 from .invariant_point_attention import InvariantPointAttention
 from .pair_predictor import PairPredictor
 from .structure_module import StructureModule
+
+from .fr_rigid_head import FRRigidHead
+from .cdr_loop_head import CDRLoopHead

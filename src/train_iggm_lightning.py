@@ -128,6 +128,12 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
 
     p.add_argument("--gamma", type=float, default=float(loss_cfg.get("gamma", 0.8)))
     p.add_argument("--loss_viol_weight", type=float, default=float(loss_cfg.get("loss_viol_weight", 0.02)))
+    p.add_argument("--loss_mode", default=loss_cfg.get("loss_mode", "legacy"))
+    p.add_argument("--fr_weight", type=float, default=float(loss_cfg.get("fr_weight", 1.0)))
+    p.add_argument("--cdr_local_weight", type=float, default=float(loss_cfg.get("cdr_local_weight", 1.0)))
+    p.add_argument("--occupancy_weight", type=float, default=float(loss_cfg.get("occupancy_weight", 0.5)))
+    p.add_argument("--seam_weight", type=float, default=float(loss_cfg.get("seam_weight", 0.5)))
+    p.add_argument("--clash_weight", type=float, default=float(loss_cfg.get("clash_weight", 0.1)))
     p.add_argument("--dockq_threshold", type=float, default=float(metric_cfg.get("dockq_threshold", 0.23)))
 
     p.add_argument("--max_epochs", type=int, default=int(trainer.get("max_epochs", 1)))
@@ -239,7 +245,16 @@ def main() -> None:
         diffuser=diffuser,
         optimizer_cfg=OptimizerConfig(lr=args.lr, weight_decay=args.weight_decay),
         grad_clip_val=args.grad_clip,
-        loss_cfg=IgGMLossConfig(gamma=args.gamma, loss_viol_weight=args.loss_viol_weight),
+        loss_cfg=IgGMLossConfig(
+            gamma=args.gamma,
+            loss_viol_weight=args.loss_viol_weight,
+            loss_mode=args.loss_mode,
+            fr_weight=args.fr_weight,
+            cdr_local_weight=args.cdr_local_weight,
+            occupancy_weight=args.occupancy_weight,
+            seam_weight=args.seam_weight,
+            clash_weight=args.clash_weight,
+        ),
         metric_cfg=MetricConfig(dockq_threshold=args.dockq_threshold),
         stage_cfg=StageTrainingConfig(
             stage1_epochs=args.stage1_epochs,
