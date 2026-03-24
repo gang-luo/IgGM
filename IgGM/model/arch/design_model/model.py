@@ -34,6 +34,7 @@ class DesignModel(BaseModel):
             pred_oxyg=True,  # whether to predict backbone oxygen atoms' 3D coordinates
             use_icf=True,  # whether to use inter-chain interface feature as extra input
             feat_type='mix-4',  # inter-chain interface feature
+            structure_mode='legacy',
 
     ):    
         """Constructor function."""
@@ -50,7 +51,7 @@ class DesignModel(BaseModel):
         self.n_lyrs_2d = n_lyrs_2d
         self.n_lyrs_3d = n_lyrs_3d
         self.pred_oxyg = pred_oxyg
-
+        self.structure_mode = structure_mode
 
         # additional configurations
         self.n_bins = 18
@@ -81,7 +82,11 @@ class DesignModel(BaseModel):
         """Restore a pre-trained model."""
         state = torch.load(path, map_location='cpu')
         logging.info(config)
-        model = cls(n_dims_sfea_init=config.c_s, n_dims_pfea_init=config.c_p)
+        model = cls(
+            n_dims_sfea_init=config.c_s,
+            n_dims_pfea_init=config.c_p,
+            structure_mode=getattr(config, 'structure_mode', 'legacy'),
+        )
         model.load_state_dict(state, strict=False)
         logging.info('restore the pre-trained IgGM-Ag model %s', path)
         return model
@@ -251,6 +256,7 @@ class DesignModel(BaseModel):
         penc_tns = self.net['linear-ts'](penc_tns_ts) + self.net['linear-sq'](penc_tns_sq)
         sfea_tns_init = torch.cat([inputs['sfea-i'], penc_tns], dim=2)
         sfea_tns = self.net['linear-si'](sfea_tns_init)
+        sfea_tns = sfea_tns + self.__calc_region_emb(inputs, sfea_tns)
         pfea_tns = self.net['linear-pi'](inputs['pfea-i'])
         pfea_tns += pfea_tns_rp + pfea_tns_st  # cooperate additional encodings
 
@@ -305,12 +311,15 @@ class DesignModel(BaseModel):
         sfea_tns, pfea_tns = self.net['evoformer'](sfea_tns, pfea_tns, chunk_size=chunk_size)
 
         # AF2SMod
-        sfea_tns_st, cord_list, param_list, plddt_list, _ = self.net['af2_smod'](
+        region_metadata = self.__extract_region_metadata(inputs)
+        sfea_tns_st, cord_list, param_list, plddt_list, _, fr_cdr_outputs = self.net['af2_smod'](
             inputs['seq-p'], sfea_tns, pfea_tns, penc_tns,
             cord_tns_init=inputs['cord-p'],
             cmsk_tns_init=inputs['cmsk-p'],
             rmsk_vec_motf=rmsk_vec_motf,
             chunk_size=chunk_size,
+            region_metadata=region_metadata,
+            structure_mode=inputs.get('structure_mode', inputs.get('diffusion_mode', self.structure_mode)),
         )
 
         # predict denoised amino-acid sequences
@@ -331,7 +340,7 @@ class DesignModel(BaseModel):
             'pfea': pfea_tns,
             '1d': logt_tns_aa,
             '2d': {'cb': logt_tns_cb, 'om': logt_tns_om, 'th': logt_tns_th, 'ph': logt_tns_ph},
-            '3d': {'cord': cord_list, 'param': param_list, 'plddt': plddt_list},
+            '3d': {'cord': cord_list, 'param': param_list, 'plddt': plddt_list, 'fr_cdr': fr_cdr_outputs, 'structure_mode': inputs.get('structure_mode', inputs.get('diffusion_mode', self.structure_mode))},
         }
         return outputs
 
@@ -346,6 +355,7 @@ class DesignModel(BaseModel):
         net['linear-sq'] = nn.Linear(self.n_dims_penc, self.n_dims_penc)
         net['linear-si'] = nn.Linear(self.n_dims_sfea_init + self.n_dims_penc, self.n_dims_sfea)
         net['linear-pi'] = nn.Linear(self.n_dims_pfea_init, self.n_dims_pfea)
+        net['region_embed'] = nn.Embedding(4, self.n_dims_sfea)
 
         net['struct_encoder'] = StructEncoder(self.n_dims_pfea)
 
@@ -364,6 +374,7 @@ class DesignModel(BaseModel):
             n_dims_encd=self.n_dims_penc,
             pred_oxyg=self.pred_oxyg,
             pred_schn=False,
+            structure_mode=self.structure_mode,
         )
 
         # residue type predictor
@@ -390,6 +401,37 @@ class DesignModel(BaseModel):
 
 
         return net
+
+
+    def __extract_region_metadata(self, inputs):
+        keys = [
+            'fr_mask', 'cdr_mask', 'loop_masks', 'loop_type_ids', 'loop_names',
+            'loop_left_anchor_idx', 'loop_right_anchor_idx', 'loop_true_len', 'loop_lmax',
+            'loop_occ_target', 'loop_valid_res_mask', 'loop_atom_valid_mask',
+            'loop_global_res_indices', 'clean_fr_reference', 'clean_loop_local_coords',
+            'noisy_loop_local_coords', 'anchor_frame_meta',
+        ]
+        return {k: inputs[k] for k in keys if k in inputs}
+
+    def __calc_region_emb(self, inputs, ref_tns):
+        device = ref_tns.device
+        if 'fr_mask' not in inputs or 'cdr_mask' not in inputs or 'asym-id' not in inputs:
+            return torch.zeros_like(ref_tns)
+        asym_id = inputs['asym-id']
+        if asym_id.ndim == 1:
+            asym_id = asym_id.unsqueeze(0)
+        region_ids = torch.zeros_like(asym_id, dtype=torch.long, device=device)
+        fr_mask = inputs['fr_mask'].to(device=device, dtype=torch.bool)
+        cdr_mask = inputs['cdr_mask'].to(device=device, dtype=torch.bool)
+        if fr_mask.ndim == 1:
+            fr_mask = fr_mask.unsqueeze(0).expand(asym_id.shape[0], -1)
+        if cdr_mask.ndim == 1:
+            cdr_mask = cdr_mask.unsqueeze(0).expand(asym_id.shape[0], -1)
+        antibody = asym_id > 0
+        region_ids = torch.where(antibody, torch.ones_like(region_ids), region_ids)
+        region_ids = torch.where(fr_mask, torch.full_like(region_ids, 2), region_ids)
+        region_ids = torch.where(cdr_mask, torch.full_like(region_ids, 3), region_ids)
+        return self.net['region_embed'](region_ids)
 
     def __calc_penc_tns_ts(self, inputs):
         """Calculate sinusoidal positional encodings for time-steps."""
