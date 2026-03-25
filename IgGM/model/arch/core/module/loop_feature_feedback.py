@@ -26,8 +26,14 @@ class LoopFeatureFeedback(nn.Module):
         bsz, _, _, _, _ = pred_loop_global.shape
         delta = torch.zeros_like(sfea_tns)
         signal = self.encoder(pred_loop_global.reshape(bsz, pred_loop_global.shape[1], pred_loop_global.shape[2], -1))
-        signal = signal * loop_valid_res_mask.unsqueeze(-1).to(signal.dtype)
+        valid = loop_valid_res_mask.to(torch.bool)
+        signal = signal * valid.unsqueeze(-1).to(signal.dtype)
         for b in range(bsz):
-            idx = loop_global_res_indices[b].clamp_min(0)
-            delta[b].scatter_add_(0, idx.reshape(-1, 1).expand(-1, signal.shape[-1]), signal[b].reshape(-1, signal.shape[-1]))
+            idx_flat = loop_global_res_indices[b].reshape(-1)
+            sig_flat = signal[b].reshape(-1, signal.shape[-1])
+            valid_flat = valid[b].reshape(-1) & (idx_flat >= 0)
+            if valid_flat.any():
+                idx_use = idx_flat[valid_flat].to(torch.long)
+                sig_use = sig_flat[valid_flat].to(dtype=delta.dtype)
+                delta[b].scatter_add_(0, idx_use.unsqueeze(-1).expand(-1, sig_use.shape[-1]), sig_use)
         return sfea_tns + delta

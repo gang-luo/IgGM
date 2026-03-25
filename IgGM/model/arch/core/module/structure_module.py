@@ -97,9 +97,9 @@ class StructureModule(nn.Module):
 
     @staticmethod
     def _expand_batch_mask(mask, n_smpls):
-        if mask.ndim == 1:
-            return mask.unsqueeze(0).expand(n_smpls, -1)
-        return mask
+        if mask.shape[0] == n_smpls:
+            return mask
+        return mask.unsqueeze(0).expand(n_smpls, *mask.shape)
 
     @staticmethod
     def _gather_loop_sfea(sfea_tns, loop_global_res_indices, loop_valid_res_mask):
@@ -118,7 +118,8 @@ class StructureModule(nn.Module):
         n_frams = n_smpls * n_resds
         flat = {k: v.view(n_frams, *v.shape[2:]) for k, v in param_dict.items()}
         self.prot_struct.init_from_param(aa_seq_flat, flat, self.prot_converter, atom_set=atom_set)
-        return self.prot_struct.cord_tns.view(n_smpls, n_resds, N_ATOMS_PER_RESD, 3)
+        coords = self.prot_struct.cord_tns.view(n_smpls, n_resds, N_ATOMS_PER_RESD, 3)
+        return coords.to(dtype=param_dict['quat'].dtype)
 
     def _build_layer_alpha_bars(self, step_tensor, layer_idx, n_lyrs):
         curr = (1.0 - (step_tensor.float() / 2048.0)).clamp(0.05, 0.999)
@@ -228,7 +229,10 @@ class StructureModule(nn.Module):
             loop_atom_valid_mask = self._expand_batch_mask(region_metadata['loop_atom_valid_mask'].to(device=device, dtype=torch.bool), n_smpls)
             loop_left_anchor_idx = self._expand_batch_mask(region_metadata['loop_left_anchor_idx'].to(device=device), n_smpls)
             loop_right_anchor_idx = self._expand_batch_mask(region_metadata['loop_right_anchor_idx'].to(device=device), n_smpls)
-            steps = torch.tensor(region_metadata.get('step', [0] * n_smpls), device=device, dtype=torch.long)
+            step_meta = region_metadata.get('step', [0] * n_smpls)
+            steps = torch.as_tensor(step_meta, device=device, dtype=torch.long).view(-1)
+            if steps.shape[0] == 1 and n_smpls > 1:
+                steps = steps.expand(n_smpls)
             local_pos = torch.arange(loop_global_res_indices.shape[-1], device=device, dtype=torch.long)
 
             loop_xt_local = region_metadata['noisy_loop_local_coords'].to(device=device, dtype=dtype)
@@ -258,7 +262,8 @@ class StructureModule(nn.Module):
                 fr_coords = fr_base_coords.clone()
                 for b in range(n_smpls):
                     if fr_mask[b].any():
-                        fr_coords[b, fr_mask[b]] = self._apply_rigid(fr_base_coords[b, fr_mask[b]], fr_pred['rota'][b], fr_pred['trsl'][b])
+                        moved = self._apply_rigid(fr_base_coords[b, fr_mask[b]], fr_pred['rota'][b], fr_pred['trsl'][b])
+                        fr_coords[b, fr_mask[b]] = moved.to(dtype=fr_coords.dtype)
 
                 loop_frame_rota, loop_frame_trsl = self.loop_frame_builder(
                     fr_coords,
