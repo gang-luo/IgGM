@@ -409,7 +409,7 @@ class DesignModel(BaseModel):
             'loop_left_anchor_idx', 'loop_right_anchor_idx', 'loop_true_len', 'loop_lmax',
             'loop_occ_target', 'loop_valid_res_mask', 'loop_atom_valid_mask',
             'loop_global_res_indices', 'clean_fr_reference', 'clean_loop_local_coords',
-            'noisy_loop_local_coords', 'anchor_frame_meta',
+            'noisy_loop_local_coords', 'anchor_frame_meta', 'step',
         ]
         return {k: inputs[k] for k in keys if k in inputs}
 
