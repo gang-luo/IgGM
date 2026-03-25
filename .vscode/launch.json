@@ -12,7 +12,7 @@
             "console": "integratedTerminal",
             "python": "python",
             "args": [
-                "--config", "config/train_0306.yaml"
+                "--config", "config/test_debug.yaml"
             ]
         },{
             "name": "inference",

@@ -1,12 +1,12 @@
 
 data:
-  metadata: data/sabdab/processed/sabdab_debug/metadata.json
-  pdb_dir: data/sabdab/processed/pdb
-  samples_dir: data/sabdab/processed/sabdab_debug/samples
-  train_ids: data/sabdab/processed/sabdab_debug/split/train_prot_ids.txt
-  val_ids: data/sabdab/processed/sabdab_debug/split/val_prot_ids.txt
-  test_ids: data/sabdab/processed/sabdab_debug/split/test_prot_ids.txt
-  train_clusters: data/sabdab/processed/sabdab_debug/split/train_prot_cluster.txt
+  metadata: data/sabdab_2603/processed/sabdab_2603/metadata.json
+  pdb_dir: data/sabdab_2603/processed/pdb
+  samples_dir: data/sabdab_2603/processed/sabdab_2603/samples
+  train_ids: data/sabdab_2603/processed/split/train_prot_ids.txt
+  val_ids: data/sabdab_2603/processed/split/val_prot_ids.txt
+  test_ids: data/sabdab_2603/processed/split/test_prot_ids.txt
+  train_clusters: data/sabdab_2603/processed/split/train_prot_cluster.txt
   batch_size: 1
   num_workers: 16
   n_steps: 200
@@ -40,7 +40,7 @@ trainer:
   accelerator: gpu
   devices: [0]
   log_every_n_steps: 5
-  accumulate_grad_batches: 4
+  accumulate_grad_batches: 2
   num_sanity_val_steps: 1
   strategy: ddp
   ddp_static_graph: false
@@ -68,3 +68,9 @@ stage_training:
   mix_cdr_h2: 2
   mix_cdr_all: 2
   lazy_cache_size: 128
+  diffusion_mode: fr_cdr_sync
+  fr_noise_scale_trsl: 1.0
+  fr_noise_scale_rota: 1.0
+  cdr_local_noise_scale: 1.0
+  occupancy_mode: joint_predict
+  

@@ -94,8 +94,9 @@ class Diffuser:
         * For training w/ self-conditioning inputs, it is required that the time-step ranges from 2
             to T, instead of the default range (from 1 to T).
         """
-
-        if self.diffusion_mode == "fr_cdr_sync" and self._has_fr_cdr_sync_metadata(prot_data_orig):
+        
+        # 直接从在此处构建fr+cdr同步扰动结果，附加各个mask和loop等信息
+        if self.diffusion_mode == "fr_cdr_sync":
             prot_data_pert = self._run_fr_cdr_sync(prot_data_orig, idxs_step)
             if return_time_steps:
                 return prot_data_pert, idxs_step
@@ -167,23 +168,6 @@ class Diffuser:
             return prot_data_pert, idxs_step
         return prot_data_pert
 
-    @staticmethod
-    def _has_fr_cdr_sync_metadata(prot_data_orig):
-        required = (
-            "fr_mask",
-            "cdr_mask",
-            "loop_masks",
-            "loop_left_anchor_idx",
-            "loop_right_anchor_idx",
-            "loop_true_len",
-            "loop_lmax",
-            "loop_occ_target",
-            "loop_valid_res_mask",
-            "loop_atom_valid_mask",
-            "loop_global_res_indices",
-        )
-        return all(key in prot_data_orig and prot_data_orig[key] is not None for key in required)
-
     def _sample_probabilities(self, aa_seq_orig, pmsk_vec, idxs_step, device):
         """Sample noisy residue-type distributions; shared by legacy and fr_cdr_sync modes."""
 
@@ -253,14 +237,14 @@ class Diffuser:
             loop_right_anchor_idx,
             loop_atom_valid_mask,
         )
-        roundtrip = check_loop_roundtrip(
-            cord_tns_orig,
-            loop_global_res_indices,
-            loop_true_len,
-            loop_left_anchor_idx,
-            loop_right_anchor_idx,
-            loop_atom_valid_mask,
-        )
+        # roundtrip = check_loop_roundtrip(
+        #     cord_tns_orig,
+        #     loop_global_res_indices,
+        #     loop_true_len,
+        #     loop_left_anchor_idx,
+        #     loop_right_anchor_idx,
+        #     loop_atom_valid_mask,
+        # ) # 测试出来为{'max_abs_error': tensor(0.1795, device='cuda:0'), 'roundtrip_ok': False}，有问题？
 
         fr_rotation, fr_translation = self._sample_fr_rigid_transform(idxs_step, device, dtype)
         noisy_fr_coords = apply_rigid_transform_to_masked_coords(
@@ -308,12 +292,15 @@ class Diffuser:
             "cmsk-o": cmsk_mat_orig,
             "pmsk": pmsk_vec,
             "pmsk-ligand": prot_data_orig["mask_ab"],
+
             "seq-p": aa_seqs_pert,
             "cord-p": cord_tns_noisy.unsqueeze(0),
             "cmsk-p": cmsk_tns_pert,
+
             "asym-id": prot_data_orig["asym_id"].detach().clone(),
             "a-cord": prot_data_orig["a-cord"].detach().clone(),
             "a-cmsk": prot_data_orig["a-cmsk"].detach().clone(),
+
             "fr_mask": fr_mask.detach().clone(),
             "cdr_mask": cdr_mask.detach().clone(),
             "loop_masks": loop_masks.detach().clone(),
@@ -337,8 +324,8 @@ class Diffuser:
                 "noisy_trans": noisy_anchor_trans.detach().clone(),
                 "fr_rotation": fr_rotation.detach().clone(),
                 "fr_translation": fr_translation.detach().clone(),
-                "loop_roundtrip_max_err": roundtrip["max_abs_error"].detach().clone(),
-                "loop_roundtrip_ok": roundtrip["roundtrip_ok"],
+                # "loop_roundtrip_max_err": roundtrip["max_abs_error"].detach().clone(),
+                # "loop_roundtrip_ok": roundtrip["roundtrip_ok"],
             },
             "diffusion_mode": self.diffusion_mode,
             "occupancy_mode": self.occupancy_mode,

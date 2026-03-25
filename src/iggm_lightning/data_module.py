@@ -106,7 +106,7 @@ class _ProteinSampleDataset(Dataset):
         complex_data["cmsk"] = concatenated_cmsk
         complex_data["asym_id"] = asym_id.unsqueeze(0)
         complex_data["mask_ab"] = mask_ab
-        complex_data["mask_design"] = torch.zeros(len(concatenated_seq), dtype=torch.int8)
+        # complex_data["mask_design"] = torch.zeros(len(concatenated_seq), dtype=torch.int8)
         complex_data["a-cord"] = antigen["cord"]
         complex_data["a-cmsk"] = antigen["cmsk"]
         complex_data["epitope"] = antigen["epitope"]
@@ -169,13 +169,14 @@ class _ProteinSampleDataset(Dataset):
         region_metadata = self._build_region_metadata(record, converted)
 
         complex_data = converted["complex"]
+        mask_design = region_metadata["cdr_mask"].clone().to(torch.int8)
         payload = {
             "seq_true": complex_data["seq"],
             "prot_data_curr": {
                 "seq": complex_data["seq"],
                 "cord": complex_data["cord"],
                 "cmsk": complex_data["cmsk"],
-                "mask_design": complex_data["mask_design"],
+                "mask_design": mask_design,
                 "mask_ab": complex_data["mask_ab"],
                 "asym_id": complex_data["asym_id"],
                 "a-cord": complex_data["a-cord"],

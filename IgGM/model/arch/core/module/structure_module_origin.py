@@ -8,7 +8,6 @@ from torch import nn
 from IgGM.protein import ProtStruct, ProtConverter, AtomMapper
 from IgGM.protein.prot_constants import N_ATOMS_PER_RESD, N_ANGLS_PER_RESD
 from IgGM.protein.utils import init_qta_params
-from IgGM.utils import merge_noisy_fr_and_loops, rebuild_loops_from_local_coords
 from .head import PLDDTHead, FrameAngleHead
 from .invariant_point_attention_chunk import InvariantPointAttention
 from .fr_rigid_head import FRRigidHead
@@ -16,7 +15,7 @@ from .cdr_loop_head import CDRLoopHead
 
 
 class StructureModule(nn.Module):
-    """The AlphaFold2 structure module with FR/CDR synchronized updater."""
+    """The AlphaFold2 structure module."""
 
     def __init__(
             self,
@@ -76,12 +75,20 @@ class StructureModule(nn.Module):
         self.net['cdr_loop'] = CDRLoopHead(c_s=self.n_dims_sfea, max_positions=self.max_loop_positions)
 
     @staticmethod
+    def _masked_centroid(coords, mask):
+        mask = mask.to(dtype=coords.dtype)
+        denom = mask.sum().clamp_min(1.0)
+        return (coords * mask.unsqueeze(-1)).sum(dim=0) / denom
+
+    @staticmethod
     def _kabsch_transform(src_coords, tgt_coords, valid_mask):
         valid = valid_mask.to(torch.bool)
         if valid.sum() < 3:
             dtype = src_coords.dtype
             device = src_coords.device
-            return torch.eye(3, dtype=dtype, device=device), torch.zeros(3, dtype=dtype, device=device)
+            eye = torch.eye(3, dtype=dtype, device=device)
+            zero = torch.zeros(3, dtype=dtype, device=device)
+            return eye, zero
         src = src_coords[valid]
         tgt = tgt_coords[valid]
         src_cent = src.mean(dim=0)
@@ -101,55 +108,76 @@ class StructureModule(nn.Module):
     def _apply_rigid(coords, rot, trsl):
         return torch.matmul(coords, rot.transpose(-1, -2)) + trsl.view(1, 1, 3)
 
-    @staticmethod
-    def _expand_batch_mask(mask, n_smpls):
-        if mask.ndim == 1:
-            return mask.unsqueeze(0).expand(n_smpls, -1)
-        return mask
+    def _build_fr_cdr_outputs(self, sfea_tns, cord_tns_init, cmsk_tns_init, region_metadata):
+        required = (
+            'fr_mask', 'loop_type_ids', 'loop_global_res_indices',
+            'loop_valid_res_mask', 'loop_atom_valid_mask', 'clean_fr_reference',
+            'clean_loop_local_coords'
+        )
+        if region_metadata is None or any(k not in region_metadata for k in required):
+            return None
 
-    def _build_fr_cdr_outputs(
-            self,
-            fr_pred,
-            loop_pred,
-            curr_coords,
-            curr_cmsk,
-            fr_mask_batch,
-            region_metadata,
-    ):
+        fr_mask = region_metadata['fr_mask'].to(device=sfea_tns.device, dtype=torch.bool)
+        if fr_mask.ndim == 1:
+            fr_mask_batch = fr_mask.unsqueeze(0).expand(sfea_tns.shape[0], -1)
+        else:
+            fr_mask_batch = fr_mask.to(torch.bool)
+
+        fr_pred = self.net['fr_rigid'](sfea_tns, fr_mask_batch)
         clean_fr_ref = region_metadata['clean_fr_reference']
         if clean_fr_ref.ndim == 3:
-            clean_fr_ref = clean_fr_ref.unsqueeze(0).expand(curr_coords.shape[0], -1, -1, -1)
+            clean_fr_ref = clean_fr_ref.unsqueeze(0).expand(sfea_tns.shape[0], -1, -1, -1)
+        noisy_coords = cord_tns_init
+        atom_mask = cmsk_tns_init.to(torch.bool)
+        fr_valid = fr_mask_batch.unsqueeze(-1).expand_as(atom_mask) & atom_mask
 
-        fr_valid = fr_mask_batch.unsqueeze(-1).expand_as(curr_cmsk.to(torch.bool)) & curr_cmsk.to(torch.bool)
-        target_rota, target_trsl = [], []
-        for idx in range(curr_coords.shape[0]):
-            src = curr_coords[idx].reshape(-1, 3)
+        fr_target_rota = []
+        fr_target_trsl = []
+        fr_pred_coords = []
+        fr_target_coords = []
+        for idx in range(sfea_tns.shape[0]):
+            pred_coord = noisy_coords[idx].clone()
+            pred_coord[fr_mask_batch[idx]] = self._apply_rigid(
+                noisy_coords[idx, fr_mask_batch[idx]],
+                fr_pred['rota'][idx],
+                fr_pred['trsl'][idx],
+            )
+            fr_pred_coords.append(pred_coord)
+            fr_target_coords.append(clean_fr_ref[idx])
+            src = noisy_coords[idx].reshape(-1, 3)
             tgt = clean_fr_ref[idx].reshape(-1, 3)
             valid = fr_valid[idx].reshape(-1)
             rota_t, trsl_t = self._kabsch_transform(src, tgt, valid)
-            target_rota.append(rota_t)
-            target_trsl.append(trsl_t)
+            fr_target_rota.append(rota_t)
+            fr_target_trsl.append(trsl_t)
 
+        loop_pred = self.net['cdr_loop'](
+            sfea_tns,
+            region_metadata['loop_type_ids'].to(sfea_tns.device),
+            region_metadata['loop_global_res_indices'].to(sfea_tns.device),
+            region_metadata['loop_valid_res_mask'].to(sfea_tns.device, dtype=torch.bool),
+            region_metadata['loop_atom_valid_mask'].to(sfea_tns.device, dtype=torch.bool),
+        )
         return {
             'fr': {
                 'pred_quat': fr_pred['quat'],
                 'pred_trsl': fr_pred['trsl'],
                 'pred_rota': fr_pred['rota'],
-                'pred_coords': curr_coords,
-                'target_rota': torch.stack(target_rota, dim=0),
-                'target_trsl': torch.stack(target_trsl, dim=0),
-                'target_coords': clean_fr_ref,
+                'pred_coords': torch.stack(fr_pred_coords, dim=0),
+                'target_rota': torch.stack(fr_target_rota, dim=0),
+                'target_trsl': torch.stack(fr_target_trsl, dim=0),
+                'target_coords': torch.stack(fr_target_coords, dim=0),
                 'mask': fr_mask_batch,
             },
             'cdr': {
                 'pred_local_coords': loop_pred['local_coords'],
                 'pred_occupancy_logits': loop_pred['occupancy_logits'],
-                'target_local_coords': region_metadata['clean_loop_local_coords'].to(curr_coords.device).unsqueeze(0).expand(curr_coords.shape[0], -1, -1, -1, -1),
-                'target_occupancy': region_metadata['loop_occ_target'].to(curr_coords.device).unsqueeze(0).expand(curr_coords.shape[0], -1, -1),
-                'loop_valid_res_mask': region_metadata['loop_valid_res_mask'].to(curr_coords.device).unsqueeze(0).expand(curr_coords.shape[0], -1, -1),
-                'loop_atom_valid_mask': region_metadata['loop_atom_valid_mask'].to(curr_coords.device).unsqueeze(0).expand(curr_coords.shape[0], -1, -1, -1),
-                'loop_global_res_indices': region_metadata['loop_global_res_indices'].to(curr_coords.device).unsqueeze(0).expand(curr_coords.shape[0], -1, -1),
-                'loop_true_len': region_metadata['loop_true_len'].to(curr_coords.device).unsqueeze(0).expand(curr_coords.shape[0], -1),
+                'target_local_coords': region_metadata['clean_loop_local_coords'].to(sfea_tns.device).unsqueeze(0).expand(sfea_tns.shape[0], -1, -1, -1, -1),
+                'target_occupancy': region_metadata['loop_occ_target'].to(sfea_tns.device).unsqueeze(0).expand(sfea_tns.shape[0], -1, -1),
+                'loop_valid_res_mask': region_metadata['loop_valid_res_mask'].to(sfea_tns.device).unsqueeze(0).expand(sfea_tns.shape[0], -1, -1),
+                'loop_atom_valid_mask': region_metadata['loop_atom_valid_mask'].to(sfea_tns.device).unsqueeze(0).expand(sfea_tns.shape[0], -1, -1, -1),
+                'loop_global_res_indices': region_metadata['loop_global_res_indices'].to(sfea_tns.device).unsqueeze(0).expand(sfea_tns.shape[0], -1, -1),
+                'loop_true_len': region_metadata['loop_true_len'].to(sfea_tns.device).unsqueeze(0).expand(sfea_tns.shape[0], -1),
             },
         }
 
@@ -218,98 +246,7 @@ class StructureModule(nn.Module):
 
         quat_tns = quat_tns_init.detach().clone()
         trsl_tns = trsl_tns_init.detach().clone()
-        curr_coords = cord_tns_init.detach().clone() if cord_tns_init is not None else None
-        curr_cmsk = cmsk_tns_init.detach().clone() if cmsk_tns_init is not None else None
-
         cord_list, param_list, plddt_list, fram_tns_sc = [], [], [], None
-        fr_cdr_outputs = None
-
-        if mode == 'fr_cdr_sync':
-
-            fr_mask = self._expand_batch_mask(region_metadata['fr_mask'].to(device=device, dtype=torch.bool), n_smpls)
-            loop_type_ids = region_metadata['loop_type_ids'].to(device=device)
-            loop_global_res_indices = region_metadata['loop_global_res_indices'].to(device=device)
-            loop_valid_res_mask = region_metadata['loop_valid_res_mask'].to(device=device, dtype=torch.bool)
-            loop_atom_valid_mask = region_metadata['loop_atom_valid_mask'].to(device=device, dtype=torch.bool)
-            loop_left_anchor_idx = region_metadata['loop_left_anchor_idx'].to(device=device)
-            loop_right_anchor_idx = region_metadata['loop_right_anchor_idx'].to(device=device)
-            loop_true_len = region_metadata['loop_true_len'].to(device=device)
-
-            last_fr_pred = None
-            last_loop_pred = None
-
-            for _ in range(n_lyrs):
-                quat_tns = quat_tns.detach()
-                if self.activation_checkpoint:
-                    sfea_tns = self.activation_checkpoint_fn(
-                        self.net['ipa'], sfea_tns, pfea_tns, quat_tns, trsl_tns, chunk_size, use_reentrant=False,
-                    )
-                else:
-                    sfea_tns = self.net['ipa'](sfea_tns, pfea_tns, quat_tns, trsl_tns, chunk_size)
-
-                plddt_dict = self.net['plddt'](sfea_tns.detach())
-                fr_pred = self.net['fr_rigid'](sfea_tns, fr_mask)
-                loop_pred = self.net['cdr_loop'](
-                    sfea_tns,
-                    loop_type_ids,
-                    loop_global_res_indices,
-                    loop_valid_res_mask,
-                    loop_atom_valid_mask,
-                )
-
-                next_coords = curr_coords.clone()
-                for idx in range(n_smpls):
-                    fr_coords = curr_coords[idx].clone()
-                    if fr_mask[idx].any():
-                        fr_coords[fr_mask[idx]] = self._apply_rigid(
-                            curr_coords[idx, fr_mask[idx]],
-                            fr_pred['rota'][idx],
-                            fr_pred['trsl'][idx],
-                        )
-                    loop_global_coords, _, _ = rebuild_loops_from_local_coords(
-                        loop_pred['local_coords'][idx],
-                        fr_coords,
-                        loop_global_res_indices,
-                        loop_true_len,
-                        loop_left_anchor_idx,
-                        loop_right_anchor_idx,
-                        loop_atom_valid_mask,
-                    )
-                    merged = merge_noisy_fr_and_loops(
-                        curr_coords[idx],
-                        fr_coords,
-                        loop_global_coords,
-                        loop_global_res_indices,
-                        loop_true_len,
-                        fr_mask[idx],
-                        loop_atom_valid_mask,
-                    )
-                    next_coords[idx] = merged
-
-                curr_coords = next_coords
-                quat_tns, trsl_tns = self.__init_fram_from_cord(aa_seqs, curr_coords, curr_cmsk)
-                param_dict = {
-                    'quat': quat_tns,
-                    'trsl': trsl_tns,
-                }
-
-                cord_list.append(curr_coords.clone())
-                param_list.append(param_dict)
-                plddt_list.append(plddt_dict)
-                last_fr_pred = fr_pred
-                last_loop_pred = loop_pred
-
-            fr_cdr_outputs = self._build_fr_cdr_outputs(
-                fr_pred=last_fr_pred,
-                loop_pred=last_loop_pred,
-                curr_coords=curr_coords,
-                curr_cmsk=curr_cmsk,
-                fr_mask_batch=fr_mask,
-                region_metadata=region_metadata,
-            )
-
-            return sfea_tns, cord_list, param_list, plddt_list, fram_tns_sc, fr_cdr_outputs
-
         for idx_lyr in range(n_lyrs):
             # perform a single forward pass
 
@@ -320,7 +257,6 @@ class StructureModule(nn.Module):
                 )
             else:
                 sfea_tns = self.net['ipa'](sfea_tns, pfea_tns, quat_tns, trsl_tns, chunk_size)
-                
             quat_tns, trsl_tns, angl_tns, quat_tns_upd = self.net['fa'](
                 aa_seqs, sfea_tns, sfea_tns_init, encd_tns, quat_tns, trsl_tns
             )
@@ -355,7 +291,16 @@ class StructureModule(nn.Module):
             param_list.append(param_dict)
             plddt_list.append(plddt_dict)
 
-        return sfea_tns, cord_list, param_list, plddt_list, fram_tns_sc, None
+        fr_cdr_outputs = None
+        if mode == 'fr_cdr_sync' and cord_tns_init is not None and cmsk_tns_init is not None:
+            fr_cdr_outputs = self._build_fr_cdr_outputs(
+                sfea_tns=sfea_tns,
+                cord_tns_init=cord_tns_init,
+                cmsk_tns_init=cmsk_tns_init,
+                region_metadata=region_metadata,
+            )
+
+        return sfea_tns, cord_list, param_list, plddt_list, fram_tns_sc, fr_cdr_outputs
 
     def __init_fram_from_cord(self, aa_seqs, cord_tns, cmsk_tns):
         n_smpls, n_resds, _, _ = cord_tns.shape

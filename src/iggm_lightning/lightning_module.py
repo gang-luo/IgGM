@@ -286,13 +286,6 @@ class IgGMLightningModule(pl.LightningModule):
 
         self._apply_stage_mask(prot_data_curr, payload)
         inputs_addi = batch.get("inputs_addi")
-        
-        # inputs = self._build_inputs_cm(prot_data_curr, idx_step)
-        # amp_ctx = torch.autocast(device_type=self.device.type, enabled=self.enable_amp) if self.device.type in ("cuda", "cpu") else nullcontext()
-        # with amp_ctx:
-        #     outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
-        #     self._assert_and_log_shapes(inputs, outputs)
-        #     loss_dict = self._compute_loss(inputs, outputs)
 
         local_fail = False
         inputs = outputs = loss_dict = None
@@ -321,16 +314,16 @@ class IgGMLightningModule(pl.LightningModule):
         self.log(f"{stage}/loss_iframe", loss_dict["loss_iframe"], prog_bar=False, on_step=True, on_epoch=True)
         self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=False, on_step=True, on_epoch=True)
         self.log(f"{stage}/loss_srcv", loss_dict["loss_srcv"], prog_bar=False, on_step=True, on_epoch=True)
-        if 'loss_fr' in loss_dict:
-            self.log(f"{stage}/loss_fr", loss_dict['loss_fr'], prog_bar=False, on_step=True, on_epoch=True)
-        if 'loss_cdr_local' in loss_dict:
-            self.log(f"{stage}/loss_cdr_local", loss_dict['loss_cdr_local'], prog_bar=False, on_step=True, on_epoch=True)
-        if 'loss_occupancy' in loss_dict:
-            self.log(f"{stage}/loss_occupancy", loss_dict['loss_occupancy'], prog_bar=False, on_step=True, on_epoch=True)
-        if 'loss_seam' in loss_dict:
-            self.log(f"{stage}/loss_seam", loss_dict['loss_seam'], prog_bar=False, on_step=True, on_epoch=True)
-        if 'loss_clash' in loss_dict:
-            self.log(f"{stage}/loss_clash", loss_dict['loss_clash'], prog_bar=False, on_step=True, on_epoch=True)
+        # if 'loss_fr' in loss_dict:
+        #     self.log(f"{stage}/loss_fr", loss_dict['loss_fr'], prog_bar=False, on_step=True, on_epoch=True)
+        # if 'loss_cdr_local' in loss_dict:
+        #     self.log(f"{stage}/loss_cdr_local", loss_dict['loss_cdr_local'], prog_bar=False, on_step=True, on_epoch=True)
+        # if 'loss_occupancy' in loss_dict:
+        #     self.log(f"{stage}/loss_occupancy", loss_dict['loss_occupancy'], prog_bar=False, on_step=True, on_epoch=True)
+        # if 'loss_seam' in loss_dict:
+        #     self.log(f"{stage}/loss_seam", loss_dict['loss_seam'], prog_bar=False, on_step=True, on_epoch=True)
+        # if 'loss_clash' in loss_dict:
+        #     self.log(f"{stage}/loss_clash", loss_dict['loss_clash'], prog_bar=False, on_step=True, on_epoch=True)
 
         if stage in {"val", "test"}:
             pred_cord = outputs["3d"]["cord"][-1][0]
