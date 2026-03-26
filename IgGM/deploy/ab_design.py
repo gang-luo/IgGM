@@ -212,6 +212,7 @@ class AbDesigner(BaseDesigner):
         pred_local = bundle['cdr']['pred_local_coords'][0]
         occ_logits = bundle['cdr']['pred_occupancy_logits'][0]
         fr_pred_coords = bundle['fr']['pred_coords'][0]
+        merged_coords = bundle.get('merged', {}).get('coords', None)
         loop_valid_res_mask = inputs['loop_valid_res_mask'].to(torch.bool)
         loop_true_len = inputs['loop_true_len'].to(torch.long)
         pred_loop_len = self._predict_loop_lengths(occ_logits, loop_valid_res_mask, loop_true_len)
@@ -221,24 +222,27 @@ class AbDesigner(BaseDesigner):
         loop_global_res_indices = inputs['loop_global_res_indices'].to(torch.long)
         loop_left_anchor_idx = inputs['loop_left_anchor_idx'].to(torch.long)
         loop_right_anchor_idx = inputs['loop_right_anchor_idx'].to(torch.long)
-        loop_global_coords, _, _ = rebuild_loops_from_local_coords(
-            pred_local,
-            fr_pred_coords,
-            loop_global_res_indices,
-            pred_loop_len,
-            loop_left_anchor_idx,
-            loop_right_anchor_idx,
-            loop_atom_valid_mask,
-        )
-        full_coords = merge_noisy_fr_and_loops(
-            inputs['cord-p'][0],
-            fr_pred_coords,
-            loop_global_coords,
-            loop_global_res_indices,
-            pred_loop_len,
-            inputs['fr_mask'],
-            loop_atom_valid_mask,
-        )
+        if merged_coords is not None:
+            full_coords = merged_coords[0]
+        else:
+            loop_global_coords, _, _ = rebuild_loops_from_local_coords(
+                pred_local,
+                fr_pred_coords,
+                loop_global_res_indices,
+                pred_loop_len,
+                loop_left_anchor_idx,
+                loop_right_anchor_idx,
+                loop_atom_valid_mask,
+            )
+            full_coords = merge_noisy_fr_and_loops(
+                inputs['cord-p'][0],
+                fr_pred_coords,
+                loop_global_coords,
+                loop_global_res_indices,
+                pred_loop_len,
+                inputs['fr_mask'],
+                loop_atom_valid_mask,
+            )
         pmsk_vec_ligand = inputs['pmsk-ligand'].to(torch.bool)
         full_coords = torch.where(pmsk_vec_ligand.view(-1, 1, 1), full_coords, inputs['cord-o'])
         full_cmsk = inputs['cmsk-p'][0].clone()

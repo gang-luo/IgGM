@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2024, Tencent Inc. All rights reserved.
-"""CDR loop local-coordinate + occupancy prediction head."""
+"""CDR loop-local all-atom diffusion branch head."""
 
 from __future__ import annotations
 
@@ -9,70 +9,90 @@ from torch import nn
 
 
 class CDRLoopHead(nn.Module):
-    """Predict per-loop local coordinates and monotone occupancy logits."""
+    """Boltz-style lightweight token/atom denoiser in loop-local frame."""
 
     def __init__(
         self,
         c_s: int = 384,
+        c_e: int = 64,
         n_loop_types: int = 6,
         max_positions: int = 64,
-        c_hidden: int = 384,
-        c_type: int = 32,
-        c_pos: int = 32,
-        c_valid: int = 8,
+        c_token: int = 384,
+        c_atom: int = 192,
     ) -> None:
         super().__init__()
-        self.c_s = c_s
         self.max_positions = max_positions
-        self.loop_type = nn.Embedding(n_loop_types, c_type)
-        self.local_pos = nn.Embedding(max_positions, c_pos)
-        self.valid_flag = nn.Embedding(2, c_valid)
-        c_in = c_s + c_type + c_pos + c_valid
-        self.trunk = nn.Sequential(
-            nn.LayerNorm(c_in),
-            nn.Linear(c_in, c_hidden),
+        self.loop_type = nn.Embedding(n_loop_types, 32)
+        self.local_pos = nn.Embedding(max_positions, 32)
+        self.single_cond = nn.Sequential(
+            nn.LayerNorm(c_s + c_e + 32 + 32),
+            nn.Linear(c_s + c_e + 32 + 32, c_token),
             nn.ReLU(),
-            nn.Linear(c_hidden, c_hidden),
+            nn.Linear(c_token, c_token),
+        )
+        self.atom_encoder = nn.Sequential(
+            nn.LayerNorm(14 * 3 * 3 + c_token + 14),
+            nn.Linear(14 * 3 * 3 + c_token + 14, c_atom),
+            nn.ReLU(),
+            nn.Linear(c_atom, c_atom),
+        )
+        self.token_trunk = nn.Sequential(
+            nn.LayerNorm(c_token + c_atom),
+            nn.Linear(c_token + c_atom, c_token),
+            nn.ReLU(),
+            nn.Linear(c_token, c_token),
+        )
+        self.atom_decoder = nn.Sequential(
+            nn.LayerNorm(c_atom + c_token + 14 * 3),
+            nn.Linear(c_atom + c_token + 14 * 3, c_atom),
+            nn.ReLU(),
+            nn.Linear(c_atom, c_atom),
             nn.ReLU(),
         )
-        self.coord_head = nn.Linear(c_hidden, 14 * 3)
-        self.occ_head = nn.Linear(c_hidden, 1)
+        self.coord_head = nn.Linear(c_atom, 14 * 3)
+        self.occ_head = nn.Linear(c_token, 1)
 
     def forward(
         self,
-        sfea_tns: torch.Tensor,
+        loop_sfea: torch.Tensor,
+        loop_encd: torch.Tensor,
+        loop_xt_local: torch.Tensor,
+        loop_self_cond_x0_local: torch.Tensor,
         loop_type_ids: torch.Tensor,
-        loop_global_res_indices: torch.Tensor,
+        local_position_ids: torch.Tensor,
         loop_valid_res_mask: torch.Tensor,
         loop_atom_valid_mask: torch.Tensor,
     ) -> dict:
-        batch_size, _, _ = sfea_tns.shape
-        n_loops, max_lmax = loop_global_res_indices.shape
-        device = sfea_tns.device
-        if max_lmax > self.max_positions:
-            raise ValueError(f'loop length {max_lmax} exceeds max_positions={self.max_positions}')
+        bsz, n_loop, lmax = loop_xt_local.shape[:3]
+        if lmax > self.max_positions:
+            raise ValueError(f'loop length {lmax} exceeds max_positions={self.max_positions}')
 
-        gather_idx = loop_global_res_indices.clamp_min(0).unsqueeze(0).expand(batch_size, -1, -1)
-        gathered = torch.gather(
-            sfea_tns.unsqueeze(1).expand(-1, n_loops, -1, -1),
-            2,
-            gather_idx.unsqueeze(-1).expand(-1, -1, -1, sfea_tns.shape[-1]),
-        )
-        gathered = gathered * loop_valid_res_mask.unsqueeze(0).unsqueeze(-1).to(gathered.dtype)
+        type_feat = self.loop_type(loop_type_ids.to(loop_sfea.device)).view(bsz, n_loop, 1, -1).expand(-1, -1, lmax, -1)
+        pos_feat = self.local_pos(local_position_ids.to(loop_sfea.device)).view(1, 1, lmax, -1).expand(bsz, n_loop, -1, -1)
+        token_cond = self.single_cond(torch.cat([loop_sfea, loop_encd, type_feat, pos_feat], dim=-1))
 
-        loop_type_feat = self.loop_type(loop_type_ids.to(device)).view(1, n_loops, 1, -1).expand(batch_size, -1, max_lmax, -1)
-        pos_feat = self.local_pos(torch.arange(max_lmax, device=device)).view(1, 1, max_lmax, -1).expand(batch_size, n_loops, -1, -1)
-        valid_feat = self.valid_flag(loop_valid_res_mask.to(device=device, dtype=torch.long)).unsqueeze(0).expand(batch_size, -1, -1, -1)
+        xt = loop_xt_local.reshape(bsz, n_loop, lmax, -1)
+        sc = loop_self_cond_x0_local.reshape(bsz, n_loop, lmax, -1)
+        delta = xt - sc
+        atom_mask = loop_atom_valid_mask.to(xt.dtype)
+        atom_encoder_in = torch.cat([xt, sc, delta, token_cond, atom_mask], dim=-1)
+        atom_feat = self.atom_encoder(atom_encoder_in)
 
-        fused = torch.cat([gathered, loop_type_feat, pos_feat, valid_feat], dim=-1)
-        hidden = self.trunk(fused)
-        coord = self.coord_head(hidden).view(batch_size, n_loops, max_lmax, 14, 3)
-        coord = coord * loop_atom_valid_mask.unsqueeze(0).unsqueeze(-1).to(coord.dtype)
+        token_from_atom = atom_feat * loop_valid_res_mask.unsqueeze(-1).to(atom_feat.dtype)
+        token_feat = self.token_trunk(torch.cat([token_cond, token_from_atom], dim=-1))
 
-        occ_raw = self.occ_head(hidden).squeeze(-1)
+        atom_decoder_in = torch.cat([atom_feat, token_feat, xt], dim=-1)
+        atom_hidden = self.atom_decoder(atom_decoder_in)
+        r_update = self.coord_head(atom_hidden).view(bsz, n_loop, lmax, 14, 3)
+        r_update = r_update * loop_atom_valid_mask.unsqueeze(-1).to(r_update.dtype)
+        pred_x0_local = loop_xt_local + r_update
+
+        occ_raw = self.occ_head(token_feat).squeeze(-1)
         occ_logits = torch.flip(torch.cumsum(torch.flip(occ_raw, dims=[-1]), dim=-1), dims=[-1])
-        occ_logits = occ_logits.masked_fill(~loop_valid_res_mask.unsqueeze(0).to(device), -20.0)
+        occ_logits = occ_logits.masked_fill(~loop_valid_res_mask, -20.0)
+
         return {
-            'local_coords': coord,
-            'occupancy_logits': occ_logits,
+            'pred_x0_local': pred_x0_local,
+            'pred_occupancy_logits': occ_logits,
+            'loop_update_feat': token_feat * loop_valid_res_mask.unsqueeze(-1).to(token_feat.dtype),
         }

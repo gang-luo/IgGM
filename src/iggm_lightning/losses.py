@@ -68,6 +68,7 @@ class IgGMPaperLoss:
             'loss_occupancy': frame.new_zeros(()),
             'loss_seam': frame.new_zeros(()),
             'loss_clash': frame.new_zeros(()),
+            'loss_merged': frame.new_zeros(()),
         }
 
     def _fr_cdr_loss(self, inputs, outputs, style: str):
@@ -87,6 +88,7 @@ class IgGMPaperLoss:
                 'loss_occupancy': zero,
                 'loss_seam': zero,
                 'loss_clash': zero,
+                'loss_merged': zero,
             }
 
         fr = bundle['fr']
@@ -99,6 +101,14 @@ class IgGMPaperLoss:
         loss_fr_rot = ((fr['pred_rota'] - fr['target_rota']) ** 2).mean()
         loss_fr_trsl = ((fr['pred_trsl'] - fr['target_trsl']) ** 2).mean()
         loss_fr = loss_fr_coord + 0.5 * loss_fr_rot + 0.5 * loss_fr_trsl
+
+        merged = bundle.get('merged', {})
+        if isinstance(merged, dict) and 'coords' in merged:
+            merged_mask = inputs['cmsk-p'].to(dtype=fr['pred_coords'].dtype)
+            loss_merged = (((merged['coords'] - inputs['cord-o']) ** 2) * merged_mask.unsqueeze(-1)).sum()
+            loss_merged = loss_merged / merged_mask.sum().clamp_min(1.0)
+        else:
+            loss_merged = zero
 
         local_mask = cdr['loop_atom_valid_mask'].unsqueeze(-1).to(dtype=cdr['pred_local_coords'].dtype)
         loss_local = (((cdr['pred_local_coords'] - cdr['target_local_coords']) ** 2) * local_mask).sum()
@@ -121,6 +131,7 @@ class IgGMPaperLoss:
                 + self.cfg.occupancy_weight * loss_occupancy
                 + self.cfg.seam_weight * loss_seam
                 + self.cfg.clash_weight * loss_clash
+                + 0.25 * loss_merged
             )
         else:
             total = (
@@ -129,6 +140,7 @@ class IgGMPaperLoss:
                 + 0.75 * self.cfg.occupancy_weight * loss_occupancy
                 + self.cfg.seam_weight * loss_seam
                 + self.cfg.clash_weight * loss_clash
+                + 0.25 * loss_merged
             )
 
         return {
@@ -143,6 +155,7 @@ class IgGMPaperLoss:
             'loss_occupancy': loss_occupancy,
             'loss_seam': loss_seam,
             'loss_clash': loss_clash,
+            'loss_merged': loss_merged,
         }
 
     def _loop_endpoint_loss(self, cdr):

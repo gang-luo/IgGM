@@ -10,26 +10,25 @@ import torch.nn.functional as F
 
 
 class FRRigidHead(nn.Module):
-    """Predict one rigid transform for the antibody FR block.
+    """Predict FR rigid transform from full frame-state context and apply it internally."""
 
-    The head pools residue single features over FR positions and predicts a
-    quaternion + translation that can be interpreted as a rigid transform from
-    the current noisy FR coordinates toward a denoised FR estimate.
-    """
-
-    def __init__(self, c_s: int = 384, c_hidden: int = 384) -> None:
+    def __init__(self, c_s: int = 384, c_e: int = 64, c_hidden: int = 384) -> None:
         super().__init__()
-        self.c_s = c_s
-        self.c_hidden = c_hidden
-        self.net = nn.Sequential(
-            nn.LayerNorm(c_s),
-            nn.Linear(c_s, c_hidden),
+        self.res_proj = nn.Sequential(
+            nn.LayerNorm(c_s * 2 + c_e + 7),
+            nn.Linear(c_s * 2 + c_e + 7, c_hidden),
             nn.ReLU(),
+            nn.Linear(c_hidden, c_hidden),
+            nn.ReLU(),
+        )
+        self.pool_proj = nn.Sequential(
+            nn.LayerNorm(c_hidden),
             nn.Linear(c_hidden, c_hidden),
             nn.ReLU(),
         )
         self.linear_q = nn.Linear(c_hidden, 4)
         self.linear_t = nn.Linear(c_hidden, 3)
+        self.delta_feat = nn.Linear(c_hidden, c_s)
 
     @staticmethod
     def _quaternion_to_rotation(quat: torch.Tensor) -> torch.Tensor:
@@ -54,19 +53,46 @@ class FRRigidHead(nn.Module):
         )
         return rot.view(*quat.shape[:-1], 3, 3)
 
-    def forward(self, sfea_tns: torch.Tensor, fr_mask: torch.Tensor) -> dict:
+    @staticmethod
+    def _apply_rigid(coords: torch.Tensor, rot: torch.Tensor, trsl: torch.Tensor) -> torch.Tensor:
+        return torch.matmul(coords, rot.transpose(-1, -2)) + trsl.view(1, 1, 3)
+
+    def forward(
+        self,
+        sfea_tns: torch.Tensor,
+        sfea_tns_init: torch.Tensor,
+        encd_tns: torch.Tensor,
+        quat_tns: torch.Tensor,
+        trsl_tns: torch.Tensor,
+        fr_mask: torch.Tensor,
+        fr_base_coords_global: torch.Tensor,
+    ) -> dict:
         if fr_mask.ndim == 1:
             fr_mask = fr_mask.unsqueeze(0)
-        fr_mask = fr_mask.to(dtype=sfea_tns.dtype, device=sfea_tns.device)
-        denom = fr_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-        pooled = (sfea_tns * fr_mask.unsqueeze(-1)).sum(dim=1) / denom
-        hidden = self.net(pooled)
-        quat = F.normalize(self.linear_q(hidden), dim=-1)
-        trsl = self.linear_t(hidden)
+        fr_mask_bool = fr_mask.to(torch.bool)
+        res_in = torch.cat([sfea_tns, sfea_tns_init, encd_tns, quat_tns, trsl_tns], dim=-1)
+        res_hidden = self.res_proj(res_in)
+        mask_f = fr_mask_bool.unsqueeze(-1).to(res_hidden.dtype)
+        denom = mask_f.sum(dim=1).clamp_min(1.0)
+        pooled = (res_hidden * mask_f).sum(dim=1) / denom
+        pooled = self.pool_proj(pooled)
+
+        quat = F.normalize(self.linear_q(pooled), dim=-1)
+        trsl = self.linear_t(pooled)
         rota = self._quaternion_to_rotation(quat)
+
+        updated = fr_base_coords_global.clone()
+        for b in range(updated.shape[0]):
+            if fr_mask_bool[b].any():
+                moved = self._apply_rigid(fr_base_coords_global[b, fr_mask_bool[b]], rota[b], trsl[b])
+                updated[b, fr_mask_bool[b]] = moved.to(dtype=updated.dtype)
+
+        global_delta_feat = self.delta_feat(pooled).unsqueeze(1) * mask_f
         return {
             'quat': quat,
             'trsl': trsl,
             'rota': rota,
+            'updated_coords': updated,
+            'delta_sfea': global_delta_feat.to(dtype=sfea_tns.dtype),
             'mask': (denom.squeeze(-1) > 0).to(torch.bool),
         }
