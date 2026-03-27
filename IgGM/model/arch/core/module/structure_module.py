@@ -10,13 +10,9 @@ from IgGM.protein.prot_constants import N_ATOMS_PER_RESD, N_ANGLS_PER_RESD
 from IgGM.protein.utils import init_qta_params
 from .head import PLDDTHead, FrameAngleHead
 from .invariant_point_attention_chunk import InvariantPointAttention
-from .fr_rigid_head import FRRigidHead
-from .cdr_loop_head import CDRLoopHead
-from .loop_frame_builder import LoopFrameBuilder
-from .loop_coord_converter import LoopLocalCoordConverter
-from .loop_state_transition import LoopStateTransition
-from .loop_feature_feedback import LoopFeatureFeedback
-from .fr_cdr_merger import FRCDRMerger
+from .fr_branch import FRBranch
+from .cdr_branch import CDRBranch
+from .fr_cdr_fusion import FRCDRFusion
 
 
 class StructureModule(nn.Module):
@@ -58,69 +54,15 @@ class StructureModule(nn.Module):
 
         self.net['ipa'] = InvariantPointAttention(c_s=self.n_dims_sfea, c_z=self.n_dims_pfea)
         self.net['plddt'] = PLDDTHead(c_s=self.n_dims_sfea)
-        self.net['fr_rigid'] = FRRigidHead(c_s=self.n_dims_sfea)
-        self.net['cdr_loop'] = CDRLoopHead(c_s=self.n_dims_sfea, max_positions=self.max_loop_positions)
-
-        self.loop_frame_builder = LoopFrameBuilder()
-        self.loop_coord_converter = LoopLocalCoordConverter()
-        self.loop_state_transition = LoopStateTransition()
-        self.loop_feature_feedback = LoopFeatureFeedback(c_s=self.n_dims_sfea)
-        self.fr_cdr_merger = FRCDRMerger()
-
-    @staticmethod
-    def _kabsch_transform(src_coords, tgt_coords, valid_mask):
-        valid = valid_mask.to(torch.bool)
-        if valid.sum() < 3:
-            dtype = src_coords.dtype
-            device = src_coords.device
-            return torch.eye(3, dtype=dtype, device=device), torch.zeros(3, dtype=dtype, device=device)
-        src = src_coords[valid]
-        tgt = tgt_coords[valid]
-        src_cent = src.mean(dim=0)
-        tgt_cent = tgt.mean(dim=0)
-        src0 = src - src_cent
-        tgt0 = tgt - tgt_cent
-        cov = src0.transpose(0, 1) @ tgt0
-        u, _, vh = torch.linalg.svd(cov)
-        rot = vh.transpose(-1, -2) @ u.transpose(-1, -2)
-        if torch.det(rot) < 0:
-            vh[-1] *= -1
-            rot = vh.transpose(-1, -2) @ u.transpose(-1, -2)
-        trsl = tgt_cent - src_cent @ rot.transpose(-1, -2)
-        return rot, trsl
-
-    @staticmethod
-    def _apply_rigid(coords, rot, trsl):
-        return torch.matmul(coords, rot.transpose(-1, -2)) + trsl.view(1, 1, 3)
+        self.fr_branch = FRBranch(c_s=self.n_dims_sfea)
+        self.cdr_branch = CDRBranch(c_s=self.n_dims_sfea, max_positions=self.max_loop_positions)
+        self.fr_cdr_fusion = FRCDRFusion()
 
     @staticmethod
     def _expand_batch_mask(mask, n_smpls):
         if mask.shape[0] == n_smpls:
             return mask
         return mask.unsqueeze(0).expand(n_smpls, *mask.shape)
-
-    @staticmethod
-    def _gather_loop_sfea(sfea_tns, loop_global_res_indices, loop_valid_res_mask):
-        bsz, n_loop, _ = loop_global_res_indices.shape
-        idx = loop_global_res_indices.clamp_min(0)
-        gathered = torch.gather(
-            sfea_tns.unsqueeze(1).expand(-1, n_loop, -1, -1),
-            2,
-            idx.unsqueeze(-1).expand(-1, -1, -1, sfea_tns.shape[-1]),
-        )
-        return gathered * loop_valid_res_mask.unsqueeze(-1).to(gathered.dtype)
-
-
-    @staticmethod
-    def _gather_loop_encd(encd_tns, loop_global_res_indices, loop_valid_res_mask):
-        bsz, n_loop, _ = loop_global_res_indices.shape
-        idx = loop_global_res_indices.clamp_min(0)
-        gathered = torch.gather(
-            encd_tns.unsqueeze(1).expand(-1, n_loop, -1, -1),
-            2,
-            idx.unsqueeze(-1).expand(-1, -1, -1, encd_tns.shape[-1]),
-        )
-        return gathered * loop_valid_res_mask.unsqueeze(-1).to(gathered.dtype)
 
     def _coords_from_params(self, aa_seqs, param_dict, atom_set='fa'):
         n_smpls, n_resds, _ = param_dict['quat'].shape
@@ -130,64 +72,6 @@ class StructureModule(nn.Module):
         self.prot_struct.init_from_param(aa_seq_flat, flat, self.prot_converter, atom_set=atom_set)
         coords = self.prot_struct.cord_tns.view(n_smpls, n_resds, N_ATOMS_PER_RESD, 3)
         return coords.to(dtype=param_dict['quat'].dtype)
-
-    def _build_fr_cdr_outputs(
-            self,
-            fr_pred,
-            cdr_pred,
-            merged_coords,
-            fr_coords,
-            curr_cmsk,
-            fr_mask_batch,
-            region_metadata,
-    ):
-        clean_fr_ref = region_metadata['clean_fr_reference']
-        if clean_fr_ref.ndim == 3:
-            clean_fr_ref = clean_fr_ref.unsqueeze(0).expand(merged_coords.shape[0], -1, -1, -1)
-        clean_local = region_metadata['clean_loop_local_coords']
-        if clean_local.ndim == 4:
-            clean_local = clean_local.unsqueeze(0).expand(merged_coords.shape[0], -1, -1, -1, -1)
-
-        fr_valid = fr_mask_batch.unsqueeze(-1).expand_as(curr_cmsk.to(torch.bool)) & curr_cmsk.to(torch.bool)
-        target_rota, target_trsl = [], []
-        for idx in range(merged_coords.shape[0]):
-            src = fr_coords[idx].reshape(-1, 3)
-            tgt = clean_fr_ref[idx].reshape(-1, 3)
-            valid = fr_valid[idx].reshape(-1)
-            rota_t, trsl_t = self._kabsch_transform(src, tgt, valid)
-            target_rota.append(rota_t)
-            target_trsl.append(trsl_t)
-
-        return {
-            'fr': {
-                'pred_quat': fr_pred['quat'],
-                'pred_trsl': fr_pred['trsl'],
-                'pred_rota': fr_pred['rota'],
-                'pred_coords': fr_coords,
-                'target_rota': torch.stack(target_rota, dim=0),
-                'target_trsl': torch.stack(target_trsl, dim=0),
-                'target_coords': clean_fr_ref,
-                'mask': fr_mask_batch,
-            },
-            'cdr': {
-                'loop_xt_local': cdr_pred['loop_xt_local'],
-                'pred_local_coords': cdr_pred['pred_x0_local'],
-                'pred_occupancy_logits': cdr_pred['pred_occupancy_logits'],
-                'pred_loop_global': cdr_pred['pred_loop_global'],
-                'loop_frame_rota': cdr_pred['loop_frame_rota'],
-                'loop_frame_trsl': cdr_pred['loop_frame_trsl'],
-                'target_local_coords': clean_local.to(merged_coords.device),
-                'target_occupancy': region_metadata['loop_occ_target'].to(merged_coords.device).unsqueeze(0).expand(merged_coords.shape[0], -1, -1),
-                'loop_valid_res_mask': region_metadata['loop_valid_res_mask'].to(merged_coords.device).unsqueeze(0).expand(merged_coords.shape[0], -1, -1),
-                'loop_atom_valid_mask': region_metadata['loop_atom_valid_mask'].to(merged_coords.device).unsqueeze(0).expand(merged_coords.shape[0], -1, -1, -1),
-                'loop_global_res_indices': region_metadata['loop_global_res_indices'].to(merged_coords.device).unsqueeze(0).expand(merged_coords.shape[0], -1, -1),
-                'loop_true_len': region_metadata['loop_true_len'].to(merged_coords.device).unsqueeze(0).expand(merged_coords.shape[0], -1),
-            },
-            'merged': {
-                'coords': merged_coords,
-                'mask': curr_cmsk,
-            },
-        }
 
     def forward(
             self, aa_seqs, sfea_tns, pfea_tns, encd_tns,
@@ -230,8 +114,6 @@ class StructureModule(nn.Module):
         loop_left_anchor_idx = self._expand_batch_mask(region_metadata['loop_left_anchor_idx'].to(device=device), n_smpls)
         loop_right_anchor_idx = self._expand_batch_mask(region_metadata['loop_right_anchor_idx'].to(device=device), n_smpls)
 
-        local_pos = torch.arange(loop_global_res_indices.shape[-1], device=device, dtype=torch.long)
-
         loop_xt_local = region_metadata['noisy_loop_local_coords'].to(device=device, dtype=dtype)
         if loop_xt_local.ndim == 4:
             loop_xt_local = loop_xt_local.unsqueeze(0).expand(n_smpls, -1, -1, -1, -1).clone()
@@ -247,63 +129,46 @@ class StructureModule(nn.Module):
                 sfea_tns = self.net['ipa'](sfea_tns, pfea_tns, quat_tns, trsl_tns, chunk_size)
 
             # 刚体旋转/平移预测返回，输入：感知sfea_tns,encd_tns,初始sfea_tns_init
-            fr_pred = self.net['fr_rigid'](
+            fr_out = self.fr_branch(
                 sfea_tns=sfea_tns,
                 sfea_tns_init=sfea_tns_init,
                 encd_tns=encd_tns,
                 fr_mask=fr_mask,
-                fr_base_coords_global=curr_coords,
+                curr_coords=curr_coords,
+                rmsk_vec_motf=rmsk_vec_motf,
             )
-            fr_coords = fr_pred['updated_coords']
-            sfea_tns = sfea_tns + fr_pred['delta_sfea']
+            fr_pred = fr_out['fr_pred']
+            fr_coords = fr_out['fr_coords']
+            sfea_tns = fr_out['sfea_after_fr']
 
-
-            # 根据抗体fr及loop-ancho-idx获取旋转和平移
-            loop_frame_rota, loop_frame_trsl = self.loop_frame_builder(
-                fr_coords, # 抗体新坐标输入
-                loop_left_anchor_idx,
-                loop_right_anchor_idx,
-                loop_valid_res_mask,
-            )
-            # 初定义loop-sfea/encd
-            loop_sfea = self._gather_loop_sfea(sfea_tns, loop_global_res_indices, loop_valid_res_mask)
-            loop_encd = self._gather_loop_encd(encd_tns, loop_global_res_indices, loop_valid_res_mask)
-
-            # cdr-loops全原子扩散移动
-            cdr_pred = self.net['cdr_loop'](
-                loop_sfea=loop_sfea,
-                loop_encd=loop_encd,
-                loop_xt_local=loop_xt_local, # 扰动坐标
-                loop_type_ids=loop_type_ids,
-                local_position_ids=local_pos,
-                loop_valid_res_mask=loop_valid_res_mask,
-                loop_atom_valid_mask=loop_atom_valid_mask,
-            )
-
-            # loop依照 旋转和同步平移
-            pred_loop_global = self.loop_coord_converter.local_to_global_loop_coords(
-                cdr_pred['pred_x0_local'], loop_frame_rota, loop_frame_trsl, loop_atom_valid_mask,
-            ) 
-
-            # 合并fr和cdrs，得到全部合并坐标
-            merged_coords = self.fr_cdr_merger(
-                fr_base_coords_global=fr_coords,
-                pred_loop_global=pred_loop_global,
-                loop_global_res_indices=loop_global_res_indices,
-                loop_valid_res_mask=loop_valid_res_mask,
-                loop_atom_valid_mask=loop_atom_valid_mask,
-            )
-            
-            # 整理输入下一层的输入
-            sfea_tns = self.loop_feature_feedback(
-                pred_loop_global=pred_loop_global,
-                loop_global_res_indices=loop_global_res_indices,
-                loop_valid_res_mask=loop_valid_res_mask,
+            cdr_out = self.cdr_branch(
                 sfea_tns=sfea_tns,
+                encd_tns=encd_tns,
+                fr_coords=fr_coords,
+                loop_xt_local=loop_xt_local,
+                loop_type_ids=loop_type_ids,
+                loop_global_res_indices=loop_global_res_indices,
+                loop_valid_res_mask=loop_valid_res_mask,
+                loop_atom_valid_mask=loop_atom_valid_mask,
+                loop_left_anchor_idx=loop_left_anchor_idx,
+                loop_right_anchor_idx=loop_right_anchor_idx,
+            )
+            cdr_pred = cdr_out['cdr_pred']
+            pred_loop_global = cdr_out['pred_loop_global']
+            loop_frame_rota = cdr_out['loop_frame_rota']
+            loop_frame_trsl = cdr_out['loop_frame_trsl']
+            sfea_tns = cdr_out['sfea_after_cdr']
+            loop_xt_local = cdr_out['loop_xt_local_next']
+
+            merged_coords = self.fr_cdr_fusion.merge(
+                fr_coords=fr_coords,
+                pred_loop_global=pred_loop_global,
+                loop_global_res_indices=loop_global_res_indices,
+                loop_valid_res_mask=loop_valid_res_mask,
+                loop_atom_valid_mask=loop_atom_valid_mask,
             )
             curr_coords = merged_coords
             quat_tns, trsl_tns = self.__init_fram_from_cord(aa_seqs, curr_coords, cmsk_tns_init) # bb update
-            loop_xt_local = cdr_pred['pred_x0_local'].detach()
 
             # plddt预测
             plddt_dict = self.net['plddt'](sfea_tns.detach())
@@ -321,7 +186,7 @@ class StructureModule(nn.Module):
             }
 
 
-        fr_cdr_outputs = self._build_fr_cdr_outputs(
+        fr_cdr_outputs = self.fr_cdr_fusion.build_outputs(
             fr_pred=last_fr_pred,
             cdr_pred=last_cdr_pred,
             merged_coords=curr_coords,

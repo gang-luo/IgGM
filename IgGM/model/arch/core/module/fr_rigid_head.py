@@ -60,9 +60,9 @@ class FRRigidHead(nn.Module):
         sfea_tns: torch.Tensor,
         sfea_tns_init: torch.Tensor,
         encd_tns: torch.Tensor,
-        rmsk_vec_motf: torch.Tensor,
         fr_mask: torch.Tensor,
         fr_base_coords_global: torch.Tensor,
+        rmsk_vec_motf: torch.Tensor | None = None,
     ) -> dict:
         if fr_mask.ndim == 1:
             fr_mask = fr_mask.unsqueeze(0)
