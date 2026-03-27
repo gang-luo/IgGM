@@ -12,48 +12,90 @@ from .loop_geom_updater import LoopGeomUpdater
 
 
 class CDRLoopHead(nn.Module):
-    """LoopStateEncoder + LoopGeomUpdater composite head."""
+    """Boltz-style lightweight token/atom denoiser in loop-local frame."""
 
     def __init__(
         self,
         c_s: int = 384,
+        c_e: int = 64,
         n_loop_types: int = 6,
         max_positions: int = 64,
-        c_loop: int = 256,
+        c_token: int = 384,
+        c_atom: int = 192,
     ) -> None:
         super().__init__()
         self.max_positions = max_positions
-        self.state_encoder = LoopStateEncoder(c_loop=c_loop, n_loop_types=n_loop_types, max_positions=max_positions)
-        self.geom_updater = LoopGeomUpdater(c_s=c_s, c_loop=c_loop)
+        self.loop_type = nn.Embedding(n_loop_types, 32)
+        self.local_pos = nn.Embedding(max_positions, 32)
+        self.single_cond = nn.Sequential(
+            nn.LayerNorm(c_s + c_e + 32 + 32),
+            nn.Linear(c_s + c_e + 32 + 32, c_token),
+            nn.ReLU(),
+            nn.Linear(c_token, c_token),
+        )
+        self.atom_encoder = nn.Sequential(
+            nn.LayerNorm(14 * 3 * 3 + c_token + 14),
+            nn.Linear(14 * 3 * 3 + c_token + 14, c_atom),
+            nn.ReLU(),
+            nn.Linear(c_atom, c_atom),
+        )
+        self.token_trunk = nn.Sequential(
+            nn.LayerNorm(c_token + c_atom),
+            nn.Linear(c_token + c_atom, c_token),
+            nn.ReLU(),
+            nn.Linear(c_token, c_token),
+        )
+        self.atom_decoder = nn.Sequential(
+            nn.LayerNorm(c_atom + c_token + 14 * 3),
+            nn.Linear(c_atom + c_token + 14 * 3, c_atom),
+            nn.ReLU(),
+            nn.Linear(c_atom, c_atom),
+            nn.ReLU(),
+        )
+        self.coord_head = nn.Linear(c_atom, 14 * 3)
+        self.occ_head = nn.Linear(c_token, 1)
 
     def forward(
         self,
         loop_sfea: torch.Tensor,
+        loop_encd: torch.Tensor,
         loop_xt_local: torch.Tensor,
         loop_self_cond_x0_local: torch.Tensor,
-        timestep_embed: torch.Tensor,
         loop_type_ids: torch.Tensor,
         local_position_ids: torch.Tensor,
         loop_valid_res_mask: torch.Tensor,
         loop_atom_valid_mask: torch.Tensor,
     ) -> dict:
-        max_lmax = loop_xt_local.shape[2]
-        if max_lmax > self.max_positions:
-            raise ValueError(f'loop length {max_lmax} exceeds max_positions={self.max_positions}')
-        state_feat = self.state_encoder(
-            loop_xt_local=loop_xt_local,
-            loop_self_cond_x0_local=loop_self_cond_x0_local,
-            timestep_embed=timestep_embed,
-            loop_type_ids=loop_type_ids,
-            local_position_ids=local_position_ids,
-            loop_valid_res_mask=loop_valid_res_mask,
-            loop_atom_valid_mask=loop_atom_valid_mask,
-        )
-        return self.geom_updater(
-            loop_sfea=loop_sfea,
-            loop_state_feat=state_feat,
-            loop_xt_local=loop_xt_local,
-            timestep_embed=timestep_embed,
-            loop_valid_res_mask=loop_valid_res_mask,
-            loop_atom_valid_mask=loop_atom_valid_mask,
-        )
+        bsz, n_loop, lmax = loop_xt_local.shape[:3]
+        if lmax > self.max_positions:
+            raise ValueError(f'loop length {lmax} exceeds max_positions={self.max_positions}')
+
+        type_feat = self.loop_type(loop_type_ids.to(loop_sfea.device)).view(bsz, n_loop, 1, -1).expand(-1, -1, lmax, -1)
+        pos_feat = self.local_pos(local_position_ids.to(loop_sfea.device)).view(1, 1, lmax, -1).expand(bsz, n_loop, -1, -1)
+        token_cond = self.single_cond(torch.cat([loop_sfea, loop_encd, type_feat, pos_feat], dim=-1))
+
+        xt = loop_xt_local.reshape(bsz, n_loop, lmax, -1)
+        sc = loop_self_cond_x0_local.reshape(bsz, n_loop, lmax, -1)
+        delta = xt - sc
+        atom_mask = loop_atom_valid_mask.to(xt.dtype)
+        atom_encoder_in = torch.cat([xt, sc, delta, token_cond, atom_mask], dim=-1)
+        atom_feat = self.atom_encoder(atom_encoder_in)
+
+        token_from_atom = atom_feat * loop_valid_res_mask.unsqueeze(-1).to(atom_feat.dtype)
+        token_feat = self.token_trunk(torch.cat([token_cond, token_from_atom], dim=-1))
+
+        atom_decoder_in = torch.cat([atom_feat, token_feat, xt], dim=-1)
+        atom_hidden = self.atom_decoder(atom_decoder_in)
+        r_update = self.coord_head(atom_hidden).view(bsz, n_loop, lmax, 14, 3)
+        r_update = r_update * loop_atom_valid_mask.unsqueeze(-1).to(r_update.dtype)
+        pred_x0_local = loop_xt_local + r_update
+
+        occ_raw = self.occ_head(token_feat).squeeze(-1)
+        occ_logits = torch.flip(torch.cumsum(torch.flip(occ_raw, dims=[-1]), dim=-1), dims=[-1])
+        occ_logits = occ_logits.masked_fill(~loop_valid_res_mask, -20.0)
+
+        return {
+            'pred_x0_local': pred_x0_local,
+            'pred_occupancy_logits': occ_logits,
+            'loop_update_feat': token_feat * loop_valid_res_mask.unsqueeze(-1).to(token_feat.dtype),
+        }
