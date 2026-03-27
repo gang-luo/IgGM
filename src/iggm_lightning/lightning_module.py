@@ -287,26 +287,32 @@ class IgGMLightningModule(pl.LightningModule):
         self._apply_stage_mask(prot_data_curr, payload)
         inputs_addi = batch.get("inputs_addi")
 
-        local_fail = False
-        inputs = outputs = loss_dict = None
-        err_msg = ""
-        try:
-            inputs = self._build_inputs_cm(prot_data_curr, idx_step)
-            outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
-            self._assert_and_log_shapes(inputs, outputs)
-            loss_dict = self._compute_loss(inputs, outputs)
-        except Exception as exc:
-            local_fail = True
-            err_msg = str(exc)
 
-        # 异常处理
-        global_fail = self._ddp_any_true(local_fail)
-        loss_flag = loss_dict["loss"] if loss_dict is not None else None
-        local_nonfinite = bool(loss_flag is not None and (not torch.isfinite(loss_flag.detach()).item()))
-        global_nonfinite = self._ddp_any_true(local_nonfinite)
-        if global_nonfinite or global_fail:
-            self.log(f"{stage}/skip_failed_batch or skip_nonfinite_loss", torch.tensor(1.0, device=self.device), prog_bar=False, on_step=(stage == "train"), on_epoch=True, batch_size=1)
-            return self._zero_loss() if stage == "train" else None
+        inputs = self._build_inputs_cm(prot_data_curr, idx_step)
+        outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
+        self._assert_and_log_shapes(inputs, outputs)
+        loss_dict = self._compute_loss(inputs, outputs)
+        
+        # local_fail = False
+        # inputs = outputs = loss_dict = None
+        # err_msg = ""
+        # try:
+        #     inputs = self._build_inputs_cm(prot_data_curr, idx_step)
+        #     outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
+        #     self._assert_and_log_shapes(inputs, outputs)
+        #     loss_dict = self._compute_loss(inputs, outputs)
+        # except Exception as exc:
+        #     local_fail = True
+        #     err_msg = str(exc)
+
+        # # 异常处理
+        # # global_fail = self._ddp_any_true(local_fail)
+        # loss_flag = loss_dict["loss"] if loss_dict is not None else None
+        # local_nonfinite = bool(loss_flag is not None and (not torch.isfinite(loss_flag.detach()).item()))
+        # global_nonfinite = self._ddp_any_true(local_nonfinite)
+        # if global_nonfinite or global_fail:
+        #     self.log(f"{stage}/skip_failed_batch or skip_nonfinite_loss", torch.tensor(1.0, device=self.device), prog_bar=False, on_step=(stage == "train"), on_epoch=True, batch_size=1)
+        #     return self._zero_loss() if stage == "train" else None
 
         self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=True, on_epoch=True)
         self.log(f"{stage}/loss_geo", loss_dict["loss_geo"], prog_bar=False, on_step=True, on_epoch=True)

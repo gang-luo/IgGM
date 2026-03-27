@@ -52,8 +52,8 @@ class StructureModule(nn.Module):
 
         self.net['ipa'] = InvariantPointAttention(c_s=self.n_dims_sfea, c_z=self.n_dims_pfea)
         self.net['plddt'] = PLDDTHead(c_s=self.n_dims_sfea)
-        self.fr_branch = FRBranch(c_s=self.n_dims_sfea)
-        self.cdr_fusion_block = CDRFusionBlock(c_s=self.n_dims_sfea, max_positions=self.max_loop_positions)
+        self.net['fr_branch'] = FRBranch(c_s=self.n_dims_sfea)
+        self.net['cdr_fusion_block'] = CDRFusionBlock(c_s=self.n_dims_sfea, max_positions=self.max_loop_positions)
 
     @staticmethod
     def _expand_batch_mask(mask, n_smpls):
@@ -126,19 +126,16 @@ class StructureModule(nn.Module):
                 sfea_tns = self.net['ipa'](sfea_tns, pfea_tns, quat_tns, trsl_tns, chunk_size)
 
             # 刚体旋转/平移预测返回，输入：感知sfea_tns,encd_tns,初始sfea_tns_init
-            fr_out = self.fr_branch(
+            fr_out = self.net['fr_branch'](
                 sfea_tns=sfea_tns,
                 sfea_tns_init=sfea_tns_init,
                 encd_tns=encd_tns,
                 fr_mask=fr_mask,
                 curr_coords=curr_coords,
-                rmsk_vec_motf=rmsk_vec_motf,
             )
-            fr_pred = fr_out['fr_pred']
-            fr_coords = fr_out['fr_coords']
-            sfea_tns = fr_out['sfea_after_fr']
+            fr_pred, fr_coords, sfea_tns= fr_out['fr_pred'],fr_out['fr_coords'],fr_out['sfea_after_fr']
 
-            cdr_out = self.cdr_fusion_block(
+            cdr_out = self.net['cdr_fusion_block'](
                 sfea_tns=sfea_tns,
                 encd_tns=encd_tns,
                 fr_coords=fr_coords,
@@ -176,7 +173,7 @@ class StructureModule(nn.Module):
             }
 
 
-        fr_cdr_outputs = self.cdr_fusion_block.build_outputs(
+        fr_cdr_outputs = self.net['cdr_fusion_block'].build_outputs(
             fr_pred=last_fr_pred,
             cdr_pred=last_cdr_pred,
             merged_coords=curr_coords,

@@ -62,7 +62,6 @@ class FRRigidHead(nn.Module):
         encd_tns: torch.Tensor,
         fr_mask: torch.Tensor,
         fr_base_coords_global: torch.Tensor,
-        rmsk_vec_motf: torch.Tensor | None = None,
     ) -> dict:
         if fr_mask.ndim == 1:
             fr_mask = fr_mask.unsqueeze(0)
@@ -79,12 +78,7 @@ class FRRigidHead(nn.Module):
         rota = self._quaternion_to_rotation(quat)
 
         updated = fr_base_coords_global.clone()
-
-        # # 只需要平移和选装抗体，抗原不动，请你思考一下_apply_rigid是否实现了这个功能。
-        # if rmsk_vec_motf is not None:
-        #     quat_tns = quat_tns + rmsk_vec_motf.view(1, -1, 1) * (quat_tns_init - quat_tns)
-        #     trsl_tns = trsl_tns + rmsk_vec_motf.view(1, -1, 1) * (trsl_tns_init - trsl_tns)
-
+        
         for b in range(updated.shape[0]):
             if fr_mask_bool[b].any():
                 moved = self._apply_rigid(fr_base_coords_global[b, fr_mask_bool[b]], rota[b], trsl[b])

@@ -22,15 +22,14 @@ class FRBranch(nn.Module):
         encd_tns: torch.Tensor,
         fr_mask: torch.Tensor,
         curr_coords: torch.Tensor,
-        rmsk_vec_motf: torch.Tensor | None = None,
     ) -> dict:
+        
         fr_pred = self.fr_rigid(
             sfea_tns=sfea_tns,
             sfea_tns_init=sfea_tns_init,
             encd_tns=encd_tns,
             fr_mask=fr_mask,
             fr_base_coords_global=curr_coords,
-            rmsk_vec_motf=rmsk_vec_motf,
         )
         return {
             'fr_pred': fr_pred,
@@ -86,7 +85,7 @@ class CDRFusionBlock(nn.Module):
 
     @staticmethod
     def _local_to_global_loop_coords(coords_local, loop_frame_rota, loop_frame_trsl, loop_atom_valid_mask):
-        global_coords = torch.matmul(coords_local, loop_frame_rota.transpose(-1, -2).unsqueeze(-3).unsqueeze(-3))
+        global_coords = torch.matmul(coords_local, loop_frame_rota.transpose(-1, -2).unsqueeze(-3))
         global_coords = global_coords + loop_frame_trsl.unsqueeze(-2).unsqueeze(-2)
         return global_coords * loop_atom_valid_mask.unsqueeze(-1).to(global_coords.dtype)
 
