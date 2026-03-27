@@ -10,9 +10,7 @@ from IgGM.protein.prot_constants import N_ATOMS_PER_RESD, N_ANGLS_PER_RESD
 from IgGM.protein.utils import init_qta_params
 from .head import PLDDTHead, FrameAngleHead
 from .invariant_point_attention_chunk import InvariantPointAttention
-from .fr_branch import FRBranch
-from .cdr_branch import CDRBranch
-from .fr_cdr_fusion import FRCDRFusion
+from .fr_cdr_blocks import FRBranch, CDRFusionBlock
 
 
 class StructureModule(nn.Module):
@@ -55,8 +53,7 @@ class StructureModule(nn.Module):
         self.net['ipa'] = InvariantPointAttention(c_s=self.n_dims_sfea, c_z=self.n_dims_pfea)
         self.net['plddt'] = PLDDTHead(c_s=self.n_dims_sfea)
         self.fr_branch = FRBranch(c_s=self.n_dims_sfea)
-        self.cdr_branch = CDRBranch(c_s=self.n_dims_sfea, max_positions=self.max_loop_positions)
-        self.fr_cdr_fusion = FRCDRFusion()
+        self.cdr_fusion_block = CDRFusionBlock(c_s=self.n_dims_sfea, max_positions=self.max_loop_positions)
 
     @staticmethod
     def _expand_batch_mask(mask, n_smpls):
@@ -141,7 +138,7 @@ class StructureModule(nn.Module):
             fr_coords = fr_out['fr_coords']
             sfea_tns = fr_out['sfea_after_fr']
 
-            cdr_out = self.cdr_branch(
+            cdr_out = self.cdr_fusion_block(
                 sfea_tns=sfea_tns,
                 encd_tns=encd_tns,
                 fr_coords=fr_coords,
@@ -159,14 +156,7 @@ class StructureModule(nn.Module):
             loop_frame_trsl = cdr_out['loop_frame_trsl']
             sfea_tns = cdr_out['sfea_after_cdr']
             loop_xt_local = cdr_out['loop_xt_local_next']
-
-            merged_coords = self.fr_cdr_fusion.merge(
-                fr_coords=fr_coords,
-                pred_loop_global=pred_loop_global,
-                loop_global_res_indices=loop_global_res_indices,
-                loop_valid_res_mask=loop_valid_res_mask,
-                loop_atom_valid_mask=loop_atom_valid_mask,
-            )
+            merged_coords = cdr_out['merged_coords']
             curr_coords = merged_coords
             quat_tns, trsl_tns = self.__init_fram_from_cord(aa_seqs, curr_coords, cmsk_tns_init) # bb update
 
@@ -186,7 +176,7 @@ class StructureModule(nn.Module):
             }
 
 
-        fr_cdr_outputs = self.fr_cdr_fusion.build_outputs(
+        fr_cdr_outputs = self.cdr_fusion_block.build_outputs(
             fr_pred=last_fr_pred,
             cdr_pred=last_cdr_pred,
             merged_coords=curr_coords,

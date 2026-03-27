@@ -7,10 +7,6 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from .loop_state_encoder import LoopStateEncoder
-from .loop_geom_updater import LoopGeomUpdater
-
-
 class CDRLoopHead(nn.Module):
     """Boltz-style lightweight token/atom denoiser in loop-local frame."""
 

@@ -12,8 +12,8 @@
    - `StructureModule.forward`：显式传入 `rmsk_vec_motf` 与 `loop_self_cond_x0_local`，确保 FR/CDR 子模块接口对齐。
 
 2. **精简 StructureModule 内部辅助逻辑**
-   - 将重复的 `loop_sfea/loop_encd` gather 逻辑整合为统一 `_gather_loop_features(...)`。
-   - 删除未使用的 `LoopStateTransition` 依赖，减少同级冗余组件耦合。
+   - 将 FR/CDR 分块扩散、合并与 next-input 更新逻辑整合到 `fr_cdr_blocks.py`，`StructureModule` 仅保留主流程调度。
+   - 删除原先冗余的 loop/frame/merge 辅助文件，减少同级目录文件数量与维护负担。
 
 3. **评估逻辑标准化改造**
    - `StructureMetrics` 改为直接基于外部库计算：
