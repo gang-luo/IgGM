@@ -7,10 +7,6 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from .loop_state_encoder import LoopStateEncoder
-from .loop_geom_updater import LoopGeomUpdater
-
-
 class CDRLoopHead(nn.Module):
     """Boltz-style lightweight token/atom denoiser in loop-local frame."""
 
@@ -60,11 +56,11 @@ class CDRLoopHead(nn.Module):
         loop_sfea: torch.Tensor,
         loop_encd: torch.Tensor,
         loop_xt_local: torch.Tensor,
-        loop_self_cond_x0_local: torch.Tensor,
         loop_type_ids: torch.Tensor,
         local_position_ids: torch.Tensor,
         loop_valid_res_mask: torch.Tensor,
         loop_atom_valid_mask: torch.Tensor,
+        loop_self_cond_x0_local: torch.Tensor | None = None,
     ) -> dict:
         bsz, n_loop, lmax = loop_xt_local.shape[:3]
         if lmax > self.max_positions:
@@ -75,6 +71,8 @@ class CDRLoopHead(nn.Module):
         token_cond = self.single_cond(torch.cat([loop_sfea, loop_encd, type_feat, pos_feat], dim=-1))
 
         xt = loop_xt_local.reshape(bsz, n_loop, lmax, -1)
+        if loop_self_cond_x0_local is None:
+            loop_self_cond_x0_local = loop_xt_local
         sc = loop_self_cond_x0_local.reshape(bsz, n_loop, lmax, -1)
         delta = xt - sc
         atom_mask = loop_atom_valid_mask.to(xt.dtype)

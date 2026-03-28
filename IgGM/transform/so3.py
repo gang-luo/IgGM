@@ -241,8 +241,10 @@ def orthogonalise_matrix(R):
     We then round the values of S to [-1, 0, +1],
     making U @ S_rounded @ V.T an orthonormal matrix close to the original.
     """
-    u, s, vh = torch.linalg.svd(R[..., :3, :3])
-    return u @ torch.diag_embed(s.round()) @ vh
+    core = R[..., :3, :3].float()
+    u, s, vh = torch.linalg.svd(core)
+    orth_core = u @ torch.diag_embed(s.round()) @ vh
+    return orth_core.to(dtype=R.dtype)
 
 
 def so3_log_matrix(R: torch.Tensor):
@@ -270,10 +272,10 @@ def so3_log_matrix(R: torch.Tensor):
     # By definition, these are symmetric, so use eigh.
     # NOTE: linalg.eig() isn't in torch 1.8,
     #       and torch.eig() doesn't do batched matrices
-    eigval, eigvec = torch.linalg.eigh(nanmats)
+    eigval, eigvec = torch.linalg.eigh(nanmats.float())
     # Final eigenvalue == 1, might be slightly off because floats, but other two are -ve.
     # this *should* just be the last column if the docs for eigh are true.
-    nan_axes = eigvec[..., -1, :]
+    nan_axes = eigvec[..., -1, :].to(dtype=R.dtype)
     nan_angle = angle[nanlocs]
     nan_skew = vec2skew(nan_angle[..., None] * nan_axes)
     log_r_mat[nanlocs] = nan_skew
