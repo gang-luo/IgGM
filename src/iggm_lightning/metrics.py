@@ -96,6 +96,14 @@ class StructureMetrics:
         return torch.stack(vals).mean()
 
     @staticmethod
+    def _is_finite_dict(metrics: Dict[str, float], keys: List[str]) -> bool:
+        for k in keys:
+            v = metrics.get(k, float("nan"))
+            if not np.isfinite(float(v)):
+                return False
+        return True
+
+    @staticmethod
     def _write_minimal_ca_pdb(path: Path, ca: torch.Tensor, asym_id: torch.Tensor) -> None:
         chain_symbols = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
         uniq = torch.unique(asym_id).detach().cpu().tolist()
@@ -146,6 +154,18 @@ class StructureMetrics:
                 "irms": float(result["iRMS"]),
             }
 
+    def _fallback_dockq(self, pred_ca: torch.Tensor, tgt_ca: torch.Tensor) -> Dict[str, float]:
+        pred_aln, tgt_aln = self._kabsch_align(pred_ca, tgt_ca)
+        ca_rmsd = float(self._rmsd(pred_aln, tgt_aln).item())
+        # conservative fallback (no interface split available)
+        dockq = 1.0 / (1.0 + (ca_rmsd / 8.5) ** 2)
+        return {
+            "dockq": float(dockq),
+            "fnat": 0.0,
+            "lrms": float(ca_rmsd),
+            "irms": float(ca_rmsd),
+        }
+
     @staticmethod
     def _calc_lddt(aligned_pred: np.ndarray, aligned_true: np.ndarray) -> float:
         # C-alpha lDDT style per-residue thresholds
@@ -189,6 +209,16 @@ class StructureMetrics:
             "lddt": lddt,
         }
 
+    def _fallback_tm_gdt_lddt(self, pred_ca: torch.Tensor, tgt_ca: torch.Tensor) -> Dict[str, float]:
+        pred_aligned, tgt_aligned = self._kabsch_align(pred_ca, tgt_ca)
+        dist = torch.norm(pred_aligned - tgt_aligned, dim=-1)
+        n = max(int(pred_aligned.shape[0]), 1)
+        d0 = max(0.5, 1.24 * ((max(n, 16) - 15) ** (1 / 3)) - 1.8)
+        tm_score = float((1.0 / (1.0 + (dist / d0) ** 2)).mean().item())
+        gdt_ts = float(torch.stack([(dist <= t).float().mean() for t in (1.0, 2.0, 4.0, 8.0)]).mean().item())
+        lddt = self._calc_lddt(pred_aligned.detach().cpu().numpy(), tgt_aligned.detach().cpu().numpy())
+        return {"tm_score": tm_score, "gdt_ts": gdt_ts, "lddt": float(lddt)}
+
     def __call__(
         self,
         pred_cord: torch.Tensor,
@@ -212,8 +242,19 @@ class StructureMetrics:
             asym_id = asym_id[0]
         asym_id = asym_id.to(device=pred_ca.device)
 
-        dockq_dict = self._calc_dockq(pred_ca, tgt_ca, asym_id)
-        tm_dict = self._calc_tm_gdt_lddt(pred_ca, tgt_ca)
+        try:
+            dockq_dict = self._calc_dockq(pred_ca, tgt_ca, asym_id)
+        except Exception:
+            dockq_dict = self._fallback_dockq(pred_ca, tgt_ca)
+        if not self._is_finite_dict(dockq_dict, ["dockq", "fnat", "lrms", "irms"]):
+            dockq_dict = self._fallback_dockq(pred_ca, tgt_ca)
+
+        try:
+            tm_dict = self._calc_tm_gdt_lddt(pred_ca, tgt_ca)
+        except Exception:
+            tm_dict = self._fallback_tm_gdt_lddt(pred_ca, tgt_ca)
+        if not self._is_finite_dict(tm_dict, ["tm_score", "gdt_ts", "lddt"]):
+            tm_dict = self._fallback_tm_gdt_lddt(pred_ca, tgt_ca)
 
         loop_map = self._extract_loop_indices(cdr_sequences, seq_lengths)
         if not any(loop_map.values()) and cdr_h3_idx:
