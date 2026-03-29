@@ -128,6 +128,17 @@ class _ProteinSampleDataset(Dataset):
         while len(self._sample_cache) > self._cache_size:
             self._sample_cache.popitem(last=False)
 
+    @staticmethod
+    def _sequence_lengths_from_converted(converted: Dict[str, Any]) -> Dict[str, int]:
+        """Derive chain lengths from converted sample (post-crop aware)."""
+        out: Dict[str, int] = {}
+        for chain in converted.get("chains", []):
+            chain_id = str(chain.get("id", "")).upper()
+            seq = chain.get("sequence") or chain.get("seq") or ""
+            if chain_id in {"H", "L", "A"}:
+                out[chain_id] = len(str(seq))
+        return out
+
     def _resolve_sample_payload(self, item: Dict[str, Any]) -> Dict[str, Any]:
         sample_path = item.get("sample_path")
         processed_pdb_path = item.get("processed_pdb_path")
@@ -166,7 +177,8 @@ class _ProteinSampleDataset(Dataset):
         if converted is None:
             raise RuntimeError(f"Failed to convert processed PDB sample: {processed_pdb_path}")
         converted = self._apply_antigen_crop(converted)
-        region_metadata = self._build_region_metadata(record, converted)
+        seq_lengths = self._sequence_lengths_from_converted(converted) or seq_lengths
+        region_metadata = self._build_region_metadata(record, converted, seq_lengths_override=seq_lengths)
 
         complex_data = converted["complex"]
         mask_design = region_metadata["cdr_mask"].clone().to(torch.int8)
@@ -232,11 +244,18 @@ class _ProteinSampleDataset(Dataset):
                 out[key] = value
         return out
 
-    def _build_region_metadata(self, record: Dict[str, Any], converted: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_region_metadata(
+        self,
+        record: Dict[str, Any],
+        converted: Dict[str, Any],
+        seq_lengths_override: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
         """Build or refresh antibody region metadata for one converted sample."""
 
         complex_data = converted["complex"]
-        seq_lengths = dict(record.get("sequence_lengths") or {})
+        seq_lengths = dict(seq_lengths_override or {})
+        if not seq_lengths:
+            seq_lengths = dict(record.get("sequence_lengths") or {})
         if not seq_lengths:
             seqs = record.get("sequences") or {}
             seq_lengths = {k: len(v) for k, v in seqs.items() if isinstance(v, str)}
