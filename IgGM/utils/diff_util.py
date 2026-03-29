@@ -547,8 +547,10 @@ def orthogonalise(mat):
     making U @ S_rounded @ V.T an orthonormal matrix close to the original.
     """
     orth_mat = mat.clone()
-    u, s, vh = torch.linalg.svd(mat[..., :3, :3])
-    orth_mat[..., :3, :3] = u @ torch.diag_embed(s.round()) @ vh
+    core = mat[..., :3, :3].float()
+    u, s, vh = torch.linalg.svd(core)
+    orth_core = u @ torch.diag_embed(s.round()) @ vh
+    orth_mat[..., :3, :3] = orth_core.to(dtype=orth_mat.dtype)
     return orth_mat
 
 def aa_to_rmat(rot_axis: torch.Tensor, ang: torch.Tensor):

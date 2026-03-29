@@ -22,8 +22,6 @@ try:
 except ImportError:  # pragma: no cover
     import pytorch_lightning as pl
 
-import torch.distributed as dist
-
 from IgGM.model import DesignModel
 from IgGM.protein.prot_constants import RESD_NAMES_1C
 from .losses import IgGMLossConfig, IgGMPaperLoss
@@ -128,29 +126,6 @@ class IgGMLightningModule(pl.LightningModule):
         self.loss_fn = IgGMPaperLoss(loss_cfg)
         self.metric_fn = StructureMetrics(metric_cfg)
         self.stage_cfg = stage_cfg or StageTrainingConfig()
-        self._skip_optimizer_step_due_to_oom = False
-
-    @staticmethod
-    def _ddp_any_true(flag: bool) -> bool:
-        """Synchronize boolean failure flags across ranks for DDP-safe fallbacks."""
-        if not (dist.is_available() and dist.is_initialized()):
-            return bool(flag)
-        val = torch.tensor([1 if flag else 0], device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), dtype=torch.int32)
-        dist.all_reduce(val, op=dist.ReduceOp.MAX)
-        return bool(val.item() > 0)
-
-    def _zero_loss(self) -> torch.Tensor:
-        """Build a graph-safe zero loss to skip optimizer update without crashing."""
-        try:
-            param = next(self.model.parameters())
-            return param.sum() * 0.0
-        except StopIteration:
-            return torch.zeros((), device=self.device, requires_grad=True)
-
-    @staticmethod
-    def _is_oom_error(exc: Exception) -> bool:
-        msg = str(exc).lower()
-        return "out of memory" in msg or "cuda error: out of memory" in msg
         
     def _assert_and_log_shapes(self, inputs: Dict[str, Any], outputs: Dict[str, Any]) -> None:
         cord_p = inputs["cord-p"]
@@ -195,7 +170,6 @@ class IgGMLightningModule(pl.LightningModule):
         cdr = payload.get("cdr_sequences") or {}
         seq_lens = payload.get("sequence_lengths") or {}
         h_len = int(seq_lens.get("H", 0))
-        l_len = int(seq_lens.get("L", 0))
 
         def _offset_indices(keys: List[str], offset: int) -> List[int]:
             out: List[int] = []
@@ -287,26 +261,12 @@ class IgGMLightningModule(pl.LightningModule):
         self._apply_stage_mask(prot_data_curr, payload)
         inputs_addi = batch.get("inputs_addi")
 
-        local_fail = False
-        inputs = outputs = loss_dict = None
-        err_msg = ""
-        try:
-            inputs = self._build_inputs_cm(prot_data_curr, idx_step)
-            outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
-            self._assert_and_log_shapes(inputs, outputs)
-            loss_dict = self._compute_loss(inputs, outputs)
-        except Exception as exc:
-            local_fail = True
-            err_msg = str(exc)
-
-        # 异常处理
-        global_fail = self._ddp_any_true(local_fail)
-        loss_flag = loss_dict["loss"] if loss_dict is not None else None
-        local_nonfinite = bool(loss_flag is not None and (not torch.isfinite(loss_flag.detach()).item()))
-        global_nonfinite = self._ddp_any_true(local_nonfinite)
-        if global_nonfinite or global_fail:
-            self.log(f"{stage}/skip_failed_batch or skip_nonfinite_loss", torch.tensor(1.0, device=self.device), prog_bar=False, on_step=(stage == "train"), on_epoch=True, batch_size=1)
-            return self._zero_loss() if stage == "train" else None
+        inputs = self._build_inputs_cm(prot_data_curr, idx_step)
+        outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
+        self._assert_and_log_shapes(inputs, outputs)
+        loss_dict = self._compute_loss(inputs, outputs)
+        if not torch.isfinite(loss_dict["loss"]).item():
+            raise FloatingPointError(f"Non-finite loss detected at {stage} step: {loss_dict['loss'].item()}")
 
         self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=True, on_epoch=True)
         self.log(f"{stage}/loss_geo", loss_dict["loss_geo"], prog_bar=False, on_step=True, on_epoch=True)
@@ -333,7 +293,16 @@ class IgGMLightningModule(pl.LightningModule):
             pred_seq = self._decode_pred_seq(outputs["1d"][0])
             true_seq = payload.get("seq_true", inputs["seq-o"][0])
             cdr_h3 = (payload.get("cdr_sequences") or {}).get("cdr_H3", [])
-            metric_dict = self.metric_fn(pred_cord, tgt_cord, pred_seq, true_seq, cdr_h3, asym_id=inputs.get("asym-id"))
+            metric_dict = self.metric_fn(
+                pred_cord,
+                tgt_cord,
+                pred_seq,
+                true_seq,
+                cdr_h3,
+                asym_id=inputs.get("asym-id"),
+                cdr_sequences=(payload.get("cdr_sequences") or {}),
+                seq_lengths=(payload.get("sequence_lengths") or {}),
+            )
             for k, v in metric_dict.items():
                 self.log(f"{stage}/{k}", v, prog_bar=(k == "tm_score"), on_step=False, on_epoch=True)
 
@@ -398,33 +367,6 @@ class IgGMLightningModule(pl.LightningModule):
         if clip_val is None:
             return
         self.clip_gradients(optimizer, gradient_clip_val=clip_val, gradient_clip_algorithm="norm")
-
-    def backward(self, loss: torch.Tensor, *args: Any, **kwargs: Any) -> None:
-        """Catch backward OOM and skip optimizer step to keep long runs alive."""
-        try:
-            loss.backward(*args, **kwargs)
-        except RuntimeError as exc:
-            if not self._is_oom_error(exc):
-                raise
-            self._skip_optimizer_step_due_to_oom = True
-            self.log("train/skip_backward_oom", torch.tensor(1.0, device=self.device), prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
-            print(f"[IgGMLightningModule] backward OOM detected, skip optimizer step: {exc}")
-            for p in self.model.parameters():
-                p.grad = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-    def optimizer_step(self, epoch: int, batch_idx: int, optimizer, optimizer_closure) -> None:
-        # DDP-safe: if any rank hit backward OOM, all ranks skip this optimizer step.
-        skip_step = self._ddp_any_true(self._skip_optimizer_step_due_to_oom)
-        self._skip_optimizer_step_due_to_oom = False
-        if skip_step:
-            optimizer_closure()
-            optimizer.zero_grad(set_to_none=True)
-            self.log("train/skip_optim_step_oom", torch.tensor(1.0, device=self.device), prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
-            return
-        optimizer.step(closure=optimizer_closure)
-
 
     def on_train_batch_end(self, outputs, batch, batch_idx: int) -> None:
         if self.ema is not None:
