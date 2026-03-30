@@ -57,8 +57,6 @@ class StructureModule(nn.Module):
 
     @staticmethod
     def _expand_batch_mask(mask, n_smpls):
-        if mask.shape[0] == n_smpls:
-            return mask
         return mask.unsqueeze(0).expand(n_smpls, *mask.shape)
 
     def _coords_from_params(self, aa_seqs, param_dict, atom_set='fa'):

@@ -85,9 +85,13 @@ class CDRFusionBlock(nn.Module):
 
     @staticmethod
     def _local_to_global_loop_coords(coords_local, loop_frame_rota, loop_frame_trsl, loop_atom_valid_mask):
-        global_coords = torch.matmul(coords_local, loop_frame_rota.transpose(-1, -2).unsqueeze(-3))
+        # coords_local: [B, N_loop, L_max, N_atom, 3]
+        # loop_frame_rota: [B, N_loop, 3, 3]
+        # broadcast rotation across (L_max, N_atom) directly.
+        global_coords = torch.matmul(coords_local, loop_frame_rota.transpose(-1, -2).unsqueeze(2))
         global_coords = global_coords + loop_frame_trsl.unsqueeze(-2).unsqueeze(-2)
         return global_coords * loop_atom_valid_mask.unsqueeze(-1).to(global_coords.dtype)
+
 
     def _feedback_sfea(self, pred_loop_global, loop_global_res_indices, loop_valid_res_mask, sfea_tns):
         bsz = pred_loop_global.shape[0]
@@ -127,20 +131,22 @@ class CDRFusionBlock(nn.Module):
             dtype = src_coords.dtype
             device = src_coords.device
             return torch.eye(3, dtype=dtype, device=device), torch.zeros(3, dtype=dtype, device=device)
-        src = src_coords[valid]
-        tgt = tgt_coords[valid]
+        out_dtype = src_coords.dtype
+        src = src_coords[valid].float()
+        tgt = tgt_coords[valid].float()
         src_cent = src.mean(dim=0)
         tgt_cent = tgt.mean(dim=0)
         src0 = src - src_cent
         tgt0 = tgt - tgt_cent
         cov = src0.transpose(0, 1) @ tgt0
+        cov = cov.float()
         u, _, vh = torch.linalg.svd(cov)
         rot = vh.transpose(-1, -2) @ u.transpose(-1, -2)
-        if torch.det(rot) < 0:
+        if torch.det(rot.float()) < 0:
             vh[-1] *= -1
             rot = vh.transpose(-1, -2) @ u.transpose(-1, -2)
         trsl = tgt_cent - src_cent @ rot.transpose(-1, -2)
-        return rot, trsl
+        return rot.to(dtype=out_dtype), trsl.to(dtype=out_dtype)
 
     def forward(
         self,
@@ -174,7 +180,6 @@ class CDRFusionBlock(nn.Module):
             local_position_ids=local_pos,
             loop_valid_res_mask=loop_valid_res_mask,
             loop_atom_valid_mask=loop_atom_valid_mask,
-            loop_self_cond_x0_local=loop_xt_local,
         )
 
         pred_loop_global = self._local_to_global_loop_coords(
@@ -253,7 +258,7 @@ class CDRFusionBlock(nn.Module):
                 'pred_loop_global': cdr_pred['pred_loop_global'],
                 'loop_frame_rota': cdr_pred['loop_frame_rota'],
                 'loop_frame_trsl': cdr_pred['loop_frame_trsl'],
-                'target_local_coords': clean_local.to(merged_coords.device),
+                'target_local_coords': clean_local,
                 'target_occupancy': region_metadata['loop_occ_target'].to(merged_coords.device).unsqueeze(0).expand(merged_coords.shape[0], -1, -1),
                 'loop_valid_res_mask': region_metadata['loop_valid_res_mask'].to(merged_coords.device).unsqueeze(0).expand(merged_coords.shape[0], -1, -1),
                 'loop_atom_valid_mask': region_metadata['loop_atom_valid_mask'].to(merged_coords.device).unsqueeze(0).expand(merged_coords.shape[0], -1, -1, -1),

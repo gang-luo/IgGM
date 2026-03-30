@@ -7,6 +7,7 @@ from .file import jload, jdump, get_tmp_dpath, download_file
 from .env import seed_all_rng, setup_logger, setup
 from .diff_util import ss2ptr, ptr2ss, prob2seq, so3_scale, intp_prob_mat_dsct, intp_trsl_mat, intp_rota_tns, IsotropicGaussianSO3, IGSO3Buffer, rota2quat, replace_with_mask, calc_trsl_vec
 from .fr_cdr_diffusion_utils import (
+    apply_rigid_transform_coords,
     apply_rigid_transform_to_masked_coords,
     build_anchor_frame_from_full_coords,
     check_loop_roundtrip,

@@ -26,7 +26,7 @@ class FRRigidHead(nn.Module):
         )
         self.linear_q = nn.Linear(c_hidden, 4)
         self.linear_t = nn.Linear(c_hidden, 3)
-        self.delta_feat = nn.Linear(c_hidden, c_s)
+        self.delta_feat = nn.Linear(c_hidden, c_s) 
 
     @staticmethod
     def _quaternion_to_rotation(quat: torch.Tensor) -> torch.Tensor:

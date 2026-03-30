@@ -106,7 +106,6 @@ class _ProteinSampleDataset(Dataset):
         complex_data["cmsk"] = concatenated_cmsk
         complex_data["asym_id"] = asym_id.unsqueeze(0)
         complex_data["mask_ab"] = mask_ab
-        # complex_data["mask_design"] = torch.zeros(len(concatenated_seq), dtype=torch.int8)
         complex_data["a-cord"] = antigen["cord"]
         complex_data["a-cmsk"] = antigen["cmsk"]
         complex_data["epitope"] = antigen["epitope"]
@@ -127,7 +126,7 @@ class _ProteinSampleDataset(Dataset):
         self._sample_cache.move_to_end(key)
         while len(self._sample_cache) > self._cache_size:
             self._sample_cache.popitem(last=False)
-
+        
     def _resolve_sample_payload(self, item: Dict[str, Any]) -> Dict[str, Any]:
         sample_path = item.get("sample_path")
         processed_pdb_path = item.get("processed_pdb_path")
@@ -240,6 +239,7 @@ class _ProteinSampleDataset(Dataset):
         if not seq_lengths:
             seqs = record.get("sequences") or {}
             seq_lengths = {k: len(v) for k, v in seqs.items() if isinstance(v, str)}
+        seq_lengths['A'] = seq_lengths['A'] if seq_lengths['A'] < self._max_antigen_len else self._max_antigen_len
         saved = record.get("antibody_region")
         if isinstance(saved, dict) and saved:
             region_metadata = self._to_tensor_dict(saved)

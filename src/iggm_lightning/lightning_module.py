@@ -26,7 +26,7 @@ import torch.distributed as dist
 
 from IgGM.model import DesignModel
 from IgGM.protein.prot_constants import RESD_NAMES_1C
-from .losses import IgGMLossConfig, IgGMPaperLoss
+from .losses import IgGMLossConfig,IgGMPaperLoss
 from .metrics import MetricConfig, StructureMetrics
 
 
@@ -260,12 +260,13 @@ class IgGMLightningModule(pl.LightningModule):
 
     def _compute_loss(self, inputs: Dict[str, Any], outputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         use_seq = self._is_stage2() and bool(self.stage_cfg.stage2_enable_seq_recovery)
-        original = self.loss_fn.cfg.enable_seq_recovery
-        self.loss_fn.cfg.enable_seq_recovery = use_seq
+        # original = self.loss_fn.cfg.enable_seq_recovery
+        # self.loss_fn.cfg.enable_seq_recovery = use_seq
         try:
             return self.loss_fn(inputs, outputs)
         finally:
-            self.loss_fn.cfg.enable_seq_recovery = original
+            print("loss计算有问题哦")
+            # self.loss_fn.cfg.enable_seq_recovery = original
 
     @staticmethod
     def _decode_pred_seq(logits_1d: torch.Tensor) -> str:
@@ -315,21 +316,11 @@ class IgGMLightningModule(pl.LightningModule):
         #     return self._zero_loss() if stage == "train" else None
 
         self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=True, on_epoch=True)
-        self.log(f"{stage}/loss_geo", loss_dict["loss_geo"], prog_bar=False, on_step=True, on_epoch=True)
-        self.log(f"{stage}/loss_frame", loss_dict["loss_frame"], prog_bar=False, on_step=True, on_epoch=True)
-        self.log(f"{stage}/loss_iframe", loss_dict["loss_iframe"], prog_bar=False, on_step=True, on_epoch=True)
-        self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=False, on_step=True, on_epoch=True)
-        self.log(f"{stage}/loss_srcv", loss_dict["loss_srcv"], prog_bar=False, on_step=True, on_epoch=True)
-        # if 'loss_fr' in loss_dict:
-        #     self.log(f"{stage}/loss_fr", loss_dict['loss_fr'], prog_bar=False, on_step=True, on_epoch=True)
-        # if 'loss_cdr_local' in loss_dict:
-        #     self.log(f"{stage}/loss_cdr_local", loss_dict['loss_cdr_local'], prog_bar=False, on_step=True, on_epoch=True)
-        # if 'loss_occupancy' in loss_dict:
-        #     self.log(f"{stage}/loss_occupancy", loss_dict['loss_occupancy'], prog_bar=False, on_step=True, on_epoch=True)
-        # if 'loss_seam' in loss_dict:
-        #     self.log(f"{stage}/loss_seam", loss_dict['loss_seam'], prog_bar=False, on_step=True, on_epoch=True)
-        # if 'loss_clash' in loss_dict:
-        #     self.log(f"{stage}/loss_clash", loss_dict['loss_clash'], prog_bar=False, on_step=True, on_epoch=True)
+        # self.log(f"{stage}/loss_geo", loss_dict["loss_geo"], prog_bar=False, on_step=True, on_epoch=True)
+        # self.log(f"{stage}/loss_frame", loss_dict["loss_frame"], prog_bar=False, on_step=True, on_epoch=True)
+        # self.log(f"{stage}/loss_iframe", loss_dict["loss_iframe"], prog_bar=False, on_step=True, on_epoch=True)
+        # self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=False, on_step=True, on_epoch=True)
+        # self.log(f"{stage}/loss_srcv", loss_dict["loss_srcv"], prog_bar=False, on_step=True, on_epoch=True)
 
         if stage in {"val", "test"}:
             pred_cord = outputs["3d"]["cord"][-1][0]

@@ -28,8 +28,8 @@ optimizer:
   grad_clip: 1.0
 
 loss:
-  gamma: 0.8
-  loss_viol_weight: 0.02
+  # gamma: 0.8
+  vio_weight: 0.02
 
 metrics:
   dockq_threshold: 0.23
@@ -41,7 +41,7 @@ trainer:
   devices: [0]
   log_every_n_steps: 5
   accumulate_grad_batches: 2
-  num_sanity_val_steps: 1
+  num_sanity_val_steps: 0
   strategy: ddp
   ddp_static_graph: false
   ddp_find_unused_parameters: true
@@ -68,7 +68,7 @@ stage_training:
   mix_cdr_h2: 2
   mix_cdr_all: 2
   lazy_cache_size: 128
-  diffusion_mode: fr_cdr_sync
+  diffusion_mode: legacy
   fr_noise_scale_trsl: 1.0
   fr_noise_scale_rota: 1.0
   cdr_local_noise_scale: 1.0

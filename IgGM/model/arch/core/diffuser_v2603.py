@@ -16,7 +16,6 @@ from IgGM.protein import AtomMapper
 from IgGM.protein.prot_constants import RESD_NAMES_1C
 from IgGM.utils import (
     IsotropicGaussianSO3,
-    apply_rigid_transform_coords,
     apply_rigid_transform_to_masked_coords,
     check_loop_roundtrip,
     extract_clean_fr_reference,
@@ -232,25 +231,25 @@ class Diffuser:
 
         # redefine the original FR coordinates and extract per-loop clean local coordinates
         clean_fr_reference = extract_clean_fr_reference(cord_tns_orig, fr_mask, atom_mask=cmsk_mat_orig)
-
-        # antibody fr region rotation and translation perturbation
-        fr_rotation, fr_translation = self._sample_fr_rigid_transform(idxs_step, device, dtype)
-        noisy_cord_tns = apply_rigid_transform_coords(
-            cord_tns_orig,
-            fr_rotation,
-            fr_translation,
-        )
-        
-        # antibody loops reconstruct noisy local coordinates
         clean_loop_local_coords, clean_anchor_rots, clean_anchor_trans = extract_per_loop_clean_local_coords(
-            noisy_cord_tns, # 直接在旋转平移的基础上抽取位置
+            cord_tns_orig,
             loop_global_res_indices,
             loop_true_len,
             loop_left_anchor_idx,
             loop_right_anchor_idx,
             loop_atom_valid_mask,
         )
-        # # define the noise scale and sample noise for constrcut loop local coordinates
+
+        # ab fr region rotation and translation perturbation
+        fr_rotation, fr_translation = self._sample_fr_rigid_transform(idxs_step, device, dtype)
+        noisy_fr_coords = apply_rigid_transform_to_masked_coords(
+            cord_tns_orig,
+            fr_mask,
+            fr_rotation,
+            fr_translation,
+            atom_mask=cmsk_mat_orig,
+        )
+
         alpha_bar_local = self.trsl_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
         local_noise_scale = (
             self.cdr_local_noise_scale
@@ -263,7 +262,7 @@ class Diffuser:
 
         noisy_loop_global_coords, noisy_anchor_rots, noisy_anchor_trans = rebuild_loops_from_local_coords(
             noisy_loop_local_coords,
-            noisy_cord_tns,
+            noisy_fr_coords,
             loop_global_res_indices,
             loop_true_len,
             loop_left_anchor_idx,
@@ -272,7 +271,7 @@ class Diffuser:
         )
         cord_tns_noisy = merge_noisy_fr_and_loops(
             cord_tns_orig,
-            noisy_cord_tns,
+            noisy_fr_coords,
             noisy_loop_global_coords,
             loop_global_res_indices,
             loop_true_len,

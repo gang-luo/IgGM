@@ -120,6 +120,34 @@ def apply_rigid_transform_to_masked_coords(
     out[residue_mask] = transformed
     return out
 
+def apply_rigid_transform_coords(
+    full_coords: torch.Tensor,
+    rotation: torch.Tensor,
+    translation: torch.Tensor,
+    atom_mask: torch.Tensor | None = None,
+    pivot: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Apply one rigid transform in full-complex coordinates."""
+
+    out = full_coords.clone()
+
+    if pivot is None:
+        if atom_mask is not None:
+            mask = atom_mask.to(full_coords.dtype)
+            denom = mask.sum().clamp_min(1.0)
+            pivot = (full_coords * mask.unsqueeze(-1)).sum(dim=tuple(range(full_coords.ndim - 1))) / denom
+        else:
+            pivot = full_coords.mean(dim=tuple(range(full_coords.ndim - 1)))
+    transformed = torch.matmul(
+        full_coords - pivot,
+        rotation.transpose(-1, -2),
+    ) + pivot + translation
+
+    if atom_mask is not None:
+        transformed = transformed * atom_mask.unsqueeze(-1).to(transformed.dtype)
+
+    out = transformed
+    return out
 
 
 def extract_per_loop_clean_local_coords(
