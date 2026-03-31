@@ -1,14 +1,11 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2024, gang luo
 from __future__ import annotations
 
 import torch
 from torch import nn
 
 from IgGM.protein import ProtStruct, ProtConverter, AtomMapper
-from IgGM.protein.prot_constants import N_ATOMS_PER_RESD, N_ANGLS_PER_RESD
 from IgGM.protein.utils import init_qta_params
-from .head import PLDDTHead, FrameAngleHead
+from .head import PLDDTHead
 from .invariant_point_attention_chunk import InvariantPointAttention
 from .fr_cdr_blocks import FRBranch, CDRFusionBlock
 
@@ -24,7 +21,6 @@ class StructureModule(nn.Module):
             n_dims_encd=64,
             pred_oxyg=False,
             pred_schn=False,
-            structure_mode='legacy',
             max_loop_positions=64,
     ):
         super().__init__()
@@ -34,15 +30,12 @@ class StructureModule(nn.Module):
         self.n_dims_encd = n_dims_encd
         self.pred_oxyg = pred_oxyg
         self.pred_schn = pred_schn
-        self.structure_mode = structure_mode
         self.max_loop_positions = max_loop_positions
 
         self.activation_checkpoint = False
         self.activation_checkpoint_fn = torch.utils.checkpoint.checkpoint
 
         self.atom_mapper = AtomMapper()
-        self.prot_struct = ProtStruct()
-        self.prot_converter = ProtConverter()
         self.atom_set = 'fa' if self.pred_schn else ('b4' if self.pred_oxyg else 'b3')
 
         self.net = nn.ModuleDict()
@@ -55,26 +48,13 @@ class StructureModule(nn.Module):
         self.net['fr_branch'] = FRBranch(c_s=self.n_dims_sfea)
         self.net['cdr_fusion_block'] = CDRFusionBlock(c_s=self.n_dims_sfea, max_positions=self.max_loop_positions)
 
-    @staticmethod
-    def _expand_batch_mask(mask, n_smpls):
-        return mask.unsqueeze(0).expand(n_smpls, *mask.shape)
-
-    def _coords_from_params(self, aa_seqs, param_dict, atom_set='fa'):
-        n_smpls, n_resds, _ = param_dict['quat'].shape
-        aa_seq_flat = ''.join(aa_seqs)
-        n_frams = n_smpls * n_resds
-        flat = {k: v.view(n_frams, *v.shape[2:]) for k, v in param_dict.items()}
-        self.prot_struct.init_from_param(aa_seq_flat, flat, self.prot_converter, atom_set=atom_set)
-        coords = self.prot_struct.cord_tns.view(n_smpls, n_resds, N_ATOMS_PER_RESD, 3)
-        return coords.to(dtype=param_dict['quat'].dtype)
 
     def forward(
             self, aa_seqs, sfea_tns, pfea_tns, encd_tns,
             n_lyrs=-1, cord_tns_init=None, cmsk_tns_init=None, rmsk_vec_motf=None,
-            chunk_size=None, region_metadata=None, structure_mode=None,
+            chunk_size=None, region_metadata=None, 
     ):
         n_smpls, n_resds, _ = sfea_tns.shape
-        # n_frams = n_smpls * n_resds
         dtype, device = sfea_tns.dtype, sfea_tns.device
         n_lyrs = self.n_lyrs if n_lyrs == -1 else n_lyrs
         assert all(len(x) == n_resds for x in aa_seqs)
@@ -85,17 +65,17 @@ class StructureModule(nn.Module):
         pfea_tns = self.net['norm_p'](pfea_tns)
         sfea_tns = self.net['linear_s'](sfea_tns_init)
 
-        if (cord_tns_init is None) or (cmsk_tns_init is None):
-            quat_tns_init, trsl_tns_init, _ = init_qta_params(n_smpls, n_resds, mode='black-hole')
-            quat_tns_init = quat_tns_init.to(dtype).to(device)
-            trsl_tns_init = trsl_tns_init.to(dtype).to(device)
-            cmsk_tns_init = torch.ones((n_smpls, n_resds, N_ATOMS_PER_RESD), device=device, dtype=dtype)
-            cord_tns_init = torch.zeros((n_smpls, n_resds, N_ATOMS_PER_RESD, 3), device=device, dtype=dtype)
-        else:
-            quat_tns_init, trsl_tns_init = self.__init_fram_from_cord(aa_seqs, cord_tns_init, cmsk_tns_init)
+        # if (cord_tns_init is None) or (cmsk_tns_init is None):
+        #     quat_tns_init, trsl_tns_init, _ = init_qta_params(n_smpls, n_resds, mode='black-hole')
+        #     quat_tns_init = quat_tns_init.to(dtype).to(device)
+        #     trsl_tns_init = trsl_tns_init.to(dtype).to(device)
+        #     cmsk_tns_init = torch.ones((n_smpls, n_resds, N_ATOMS_PER_RESD), device=device, dtype=dtype)
+        #     cord_tns_init = torch.zeros((n_smpls, n_resds, N_ATOMS_PER_RESD, 3), device=device, dtype=dtype)
+        # else:
+        #     quat_tns_init, trsl_tns_init = self.__init_fram_from_cord(aa_seqs, cord_tns_init, cmsk_tns_init)
 
-        quat_tns = quat_tns_init.detach().clone()
-        trsl_tns = trsl_tns_init.detach().clone()
+        # quat_tns = quat_tns_init.detach().clone()
+        # trsl_tns = trsl_tns_init.detach().clone()
         curr_coords = cord_tns_init.detach().clone()
         curr_cmsk = cmsk_tns_init.detach().clone()
 
@@ -118,6 +98,7 @@ class StructureModule(nn.Module):
 
             # 抗体fr旋转平移预测
             # 1. IPA几何结构感知，输入：bb的quat_tns+trsl_tns；输出：sfea_tns
+            quat_tns, trsl_tns = self.__init_fram_from_cord(aa_seqs, curr_coords, cmsk_tns_init)
             if self.activation_checkpoint:
                 sfea_tns = self.activation_checkpoint_fn(self.net['ipa'], sfea_tns, pfea_tns, quat_tns, trsl_tns, chunk_size, use_reentrant=False)
             else:
@@ -131,8 +112,9 @@ class StructureModule(nn.Module):
                 fr_mask=fr_mask,
                 curr_coords=curr_coords,
             )
-            fr_pred, fr_coords, sfea_tns= fr_out['fr_pred'],fr_out['fr_coords'],fr_out['sfea_after_fr']
+            fr_coords, sfea_tns, fr_pred = fr_out['fr_coords'],fr_out['sfea_after_fr'],fr_out['fr_pred']
 
+            # cdr坐标去噪
             cdr_out = self.net['cdr_fusion_block'](
                 sfea_tns=sfea_tns,
                 encd_tns=encd_tns,
@@ -145,43 +127,30 @@ class StructureModule(nn.Module):
                 loop_left_anchor_idx=loop_left_anchor_idx,
                 loop_right_anchor_idx=loop_right_anchor_idx,
             )
-            cdr_pred = cdr_out['cdr_pred']
-            pred_loop_global = cdr_out['pred_loop_global']
-            loop_frame_rota = cdr_out['loop_frame_rota']
-            loop_frame_trsl = cdr_out['loop_frame_trsl']
-            sfea_tns = cdr_out['sfea_after_cdr']
-            loop_xt_local = cdr_out['loop_xt_local_next']
-            merged_coords = cdr_out['merged_coords']
-            curr_coords = merged_coords
-            quat_tns, trsl_tns = self.__init_fram_from_cord(aa_seqs, curr_coords, cmsk_tns_init) # bb update
-
+            
+            curr_coords, sfea_tns, loop_xt_local, cdr_pred = cdr_out['merged_coords'], cdr_out['sfea_after_cdr'],cdr_out['loop_xt_new_local'],cdr_out['cdr_pred']
+            
             # plddt预测
             plddt_dict = self.net['plddt'](sfea_tns.detach())
 
             # save for loss compute
             cord_list.append(curr_coords.clone())
             plddt_list.append(plddt_dict)
-            last_fr_pred = fr_pred
-            last_cdr_pred = {
-                **cdr_pred,
-                'pred_loop_global': pred_loop_global,
-                'loop_frame_rota': loop_frame_rota,
-                'loop_frame_trsl': loop_frame_trsl,
-                'loop_xt_local': loop_xt_local,
-            }
 
+            # last_fr_pred = fr_pred
+            # last_cdr_pred = cdr_pred
 
-        fr_cdr_outputs = self.net['cdr_fusion_block'].build_outputs(
-            fr_pred=last_fr_pred,
-            cdr_pred=last_cdr_pred,
-            merged_coords=curr_coords,
-            fr_coords=fr_coords,
-            curr_cmsk=curr_cmsk,
-            fr_mask_batch=fr_mask,
-            region_metadata=region_metadata,
-        )
+        # fr_cdr_outputs = self.net['cdr_fusion_block'].build_outputs(
+        #     fr_pred=last_fr_pred,
+        #     cdr_pred=last_cdr_pred,
+        #     merged_coords=curr_coords,
+        #     fr_coords=fr_coords,
+        #     curr_cmsk=curr_cmsk,
+        #     fr_mask_batch=fr_mask,
+        #     region_metadata=region_metadata,
+        # )
         
-        return sfea_tns, cord_list, None, plddt_list, None, fr_cdr_outputs
+        return sfea_tns, cord_list, plddt_list
 
     def __init_fram_from_cord(self, aa_seqs, cord_tns, cmsk_tns):
         n_smpls, n_resds, _, _ = cord_tns.shape
@@ -196,3 +165,7 @@ class StructureModule(nn.Module):
         cmsk_tns_bb = torch.stack(cmsk_mat_bb_list, dim=0)
         quat_tns, trsl_tns, _ = init_qta_params(n_smpls, n_resds, mode='3d-cord', cord_tns=cord_tns_bb, cmsk_tns=cmsk_tns_bb)
         return quat_tns, trsl_tns
+
+    @staticmethod
+    def _expand_batch_mask(mask, n_smpls):
+        return mask.unsqueeze(0).expand(n_smpls, *mask.shape)

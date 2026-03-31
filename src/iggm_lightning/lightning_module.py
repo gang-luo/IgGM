@@ -36,14 +36,6 @@ def mem(tag):
     p = torch.cuda.max_memory_allocated() / 1024**3
     print(f"[{tag}] alloc={a:.2f} GB reserved={r:.2f} GB peak={p:.2f} GB")
 
-# #  maxlen filter
-# def _should_skip_batch(prot_data_curr: Dict[str, Any]) -> bool:
-#     asym_id = prot_data_curr.get("asym_id")
-#     if asym_id is None:
-#         return False
-#     seq_len = int(asym_id.shape[-1])
-#     return seq_len > int(1600)
-
 @dataclass
 class OptimizerConfig:
     name: str = "adamw"
@@ -151,30 +143,6 @@ class IgGMLightningModule(pl.LightningModule):
     def _is_oom_error(exc: Exception) -> bool:
         msg = str(exc).lower()
         return "out of memory" in msg or "cuda error: out of memory" in msg
-        
-    def _assert_and_log_shapes(self, inputs: Dict[str, Any], outputs: Dict[str, Any]) -> None:
-        cord_p = inputs["cord-p"]
-        assert cord_p.ndim == 4 and cord_p.shape[-1] == 3, f"cord-p shape invalid: {cord_p.shape}"
-        bsz, n_res, n_atom, _ = cord_p.shape
-        assert inputs["cmsk-p"].shape == (bsz, n_res, n_atom), "cmsk-p shape mismatch"
-        assert inputs["sfea-i"].shape[:2] == (bsz, n_res), "sfea-i batch/residue mismatch"
-        assert inputs["pfea-i"].shape[:3] == (bsz, n_res, n_res), "pfea-i shape mismatch"
-        assert len(inputs["step"]) == bsz, "step length must match batch size"
-
-        if "3d" in outputs and "cord" in outputs["3d"]:
-            pred_cord = outputs["3d"]["cord"][-1]
-            assert pred_cord.shape[:3] == (bsz, n_res, n_atom), "pred cord shape mismatch"
-
-        if self.debug_shapes and not self._shape_printed:
-            print(
-                "[IgGMLightningModule][shape-check] "
-                f"step={len(inputs['step'])}, "
-                f"cord-p={tuple(inputs['cord-p'].shape)}, "
-                f"cmsk-p={tuple(inputs['cmsk-p'].shape)}, "
-                f"sfea-i={tuple(inputs['sfea-i'].shape)}, "
-                f"pfea-i={tuple(inputs['pfea-i'].shape)}"
-            )
-            self._shape_printed = True
 
     def _move_to_device(self, obj: Any) -> Any:
         if torch.is_tensor(obj):
@@ -265,7 +233,7 @@ class IgGMLightningModule(pl.LightningModule):
         try:
             return self.loss_fn(inputs, outputs)
         finally:
-            print("loss计算有问题哦")
+            pass
             # self.loss_fn.cfg.enable_seq_recovery = original
 
     @staticmethod
@@ -288,10 +256,8 @@ class IgGMLightningModule(pl.LightningModule):
         self._apply_stage_mask(prot_data_curr, payload)
         inputs_addi = batch.get("inputs_addi")
 
-
         inputs = self._build_inputs_cm(prot_data_curr, idx_step)
         outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
-        self._assert_and_log_shapes(inputs, outputs)
         loss_dict = self._compute_loss(inputs, outputs)
         
         # local_fail = False
@@ -316,10 +282,9 @@ class IgGMLightningModule(pl.LightningModule):
         #     return self._zero_loss() if stage == "train" else None
 
         self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=True, on_epoch=True)
-        # self.log(f"{stage}/loss_geo", loss_dict["loss_geo"], prog_bar=False, on_step=True, on_epoch=True)
-        # self.log(f"{stage}/loss_frame", loss_dict["loss_frame"], prog_bar=False, on_step=True, on_epoch=True)
-        # self.log(f"{stage}/loss_iframe", loss_dict["loss_iframe"], prog_bar=False, on_step=True, on_epoch=True)
-        # self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=False, on_step=True, on_epoch=True)
+        self.log(f"{stage}/loss_backbone", loss_dict["loss_backbone"], prog_bar=False, on_step=True, on_epoch=True)
+        self.log(f"{stage}/loss_cdr", loss_dict["loss_cdr"], prog_bar=False, on_step=True, on_epoch=True)
+        self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=False, on_step=True, on_epoch=True)
         # self.log(f"{stage}/loss_srcv", loss_dict["loss_srcv"], prog_bar=False, on_step=True, on_epoch=True)
 
         if stage in {"val", "test"}:

@@ -31,8 +31,10 @@ RESD_MAP_1TO3 = OrderedDict([
 RESD_MAP_3TO1 = {v: k for k, v in RESD_MAP_1TO3.items()}
 
 # note that order not compact with alphafold
-RESD_NAMES_1C = sorted(list(RESD_MAP_1TO3.keys()))
-RESD_NAMES_3C = sorted(list(RESD_MAP_1TO3.values()))
+# RESD_NAMES_1C = sorted(list(RESD_MAP_1TO3.keys())) # luog-fix
+# RESD_NAMES_3C = sorted(list(RESD_MAP_1TO3.values()))  # luog-fix
+RESD_NAMES_1C = list(RESD_MAP_1TO3.keys())
+RESD_NAMES_3C = list(RESD_MAP_1TO3.values())
 RESD_NUM = len(RESD_NAMES_1C)  # := 20.
 RESD_WITH_X = RESD_NAMES_1C + ['X']
 
@@ -41,15 +43,15 @@ N_ATOMS_PER_RESD = 14  # TRP
 N_ANGLS_PER_RESD = 7  # TRP (omega, phi, psi, chi1, chi2, chi3, and chi4)
 
 # atom names for each residue type (excluding hydrogen atoms)
-# residue_atoms in openfold
+# residue_atoms in openfold   # luog-fix
 ATOM_NAMES_PER_RESD = {
     'ALA': ['C', 'CA', 'CB', 'N', 'O'],
     'ARG': ['C', 'CA', 'CB', 'CG', 'CD', 'CZ', 'N', 'NE', 'O', 'NH1', 'NH2'],
-    'ASP': ['C', 'CA', 'CB', 'CG', 'N', 'O', 'OD1', 'OD2'],
     'ASN': ['C', 'CA', 'CB', 'CG', 'N', 'ND2', 'O', 'OD1'],
+    'ASP': ['C', 'CA', 'CB', 'CG', 'N', 'O', 'OD1', 'OD2'],
     'CYS': ['C', 'CA', 'CB', 'N', 'O', 'SG'],
-    'GLU': ['C', 'CA', 'CB', 'CG', 'CD', 'N', 'O', 'OE1', 'OE2'],
     'GLN': ['C', 'CA', 'CB', 'CG', 'CD', 'N', 'NE2', 'O', 'OE1'],
+    'GLU': ['C', 'CA', 'CB', 'CG', 'CD', 'N', 'O', 'OE1', 'OE2'],
     'GLY': ['C', 'CA', 'N', 'O'],
     'HIS': ['C', 'CA', 'CB', 'CG', 'CD2', 'CE1', 'N', 'ND1', 'NE2', 'O'],
     'ILE': ['C', 'CA', 'CB', 'CG1', 'CG2', 'CD1', 'N', 'O'],

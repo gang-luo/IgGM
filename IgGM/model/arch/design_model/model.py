@@ -34,7 +34,6 @@ class DesignModel(BaseModel):
             pred_oxyg=True,  # whether to predict backbone oxygen atoms' 3D coordinates
             use_icf=True,  # whether to use inter-chain interface feature as extra input
             feat_type='mix-4',  # inter-chain interface feature
-            structure_mode='legacy',
 
     ):    
         """Constructor function."""
@@ -51,7 +50,6 @@ class DesignModel(BaseModel):
         self.n_lyrs_2d = n_lyrs_2d
         self.n_lyrs_3d = n_lyrs_3d
         self.pred_oxyg = pred_oxyg
-        self.structure_mode = structure_mode
 
         # additional configurations
         self.n_bins = 18
@@ -85,7 +83,6 @@ class DesignModel(BaseModel):
         model = cls(
             n_dims_sfea_init=config.c_s,
             n_dims_pfea_init=config.c_p,
-            structure_mode=getattr(config, 'structure_mode', 'legacy'),
         )
         model.load_state_dict(state, strict=False)
         logging.info('restore the pre-trained IgGM-Ag model %s', path)
@@ -312,14 +309,13 @@ class DesignModel(BaseModel):
 
         # AF2SMod
         region_metadata = self.__extract_region_metadata(inputs)
-        sfea_tns_st, cord_list, param_list, plddt_list, _, fr_cdr_outputs = self.net['af2_smod'](
+        sfea_tns_st, cord_list, plddt_list = self.net['af2_smod'](
             inputs['seq-p'], sfea_tns, pfea_tns, penc_tns,
             cord_tns_init=inputs['cord-p'],
             cmsk_tns_init=inputs['cmsk-p'],
             rmsk_vec_motf=rmsk_vec_motf,
             chunk_size=chunk_size,
             region_metadata=region_metadata,
-            structure_mode=inputs.get('structure_mode', inputs.get('diffusion_mode', self.structure_mode)),
         )
 
         # predict denoised amino-acid sequences
@@ -330,8 +326,8 @@ class DesignModel(BaseModel):
         # predict inter-residue geometries
         logt_tns_cb, logt_tns_om, logt_tns_th, logt_tns_ph = self.net['da_pred'](pfea_tns)
 
-        masked = inputs['pmsk'].to(torch.bool)
-        cord_masked = inputs['pmsk-ligand'].to(torch.bool)
+        # masked = inputs['pmsk'].to(torch.bool)
+        # cord_masked = inputs['pmsk-ligand'].to(torch.bool)
 
         # pack output tensors into a dict
         outputs = {
@@ -340,7 +336,7 @@ class DesignModel(BaseModel):
             'pfea': pfea_tns,
             '1d': logt_tns_aa,
             '2d': {'cb': logt_tns_cb, 'om': logt_tns_om, 'th': logt_tns_th, 'ph': logt_tns_ph},
-            '3d': {'cord': cord_list, 'param': param_list, 'plddt': plddt_list, 'fr_cdr': fr_cdr_outputs, 'structure_mode': inputs.get('structure_mode', inputs.get('diffusion_mode', self.structure_mode))},
+            '3d': {'cord': cord_list,  'plddt': plddt_list},
         }
         return outputs
 
@@ -374,7 +370,6 @@ class DesignModel(BaseModel):
             n_dims_encd=self.n_dims_penc,
             pred_oxyg=self.pred_oxyg,
             pred_schn=False,
-            structure_mode=self.structure_mode,
         )
 
         # residue type predictor
@@ -398,10 +393,7 @@ class DesignModel(BaseModel):
             n_dims_mfea=self.n_dims_sfea,
             n_dims_pfea=self.n_dims_pfea,
         )
-
-
         return net
-
 
     def __extract_region_metadata(self, inputs):
         keys = [

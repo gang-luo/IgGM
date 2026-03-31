@@ -145,7 +145,7 @@ class IgGMPaperLoss:
             "residue_index": torch.arange(seq_len, device=pred.device).view(1, -1).expand(bsz, -1),
             "atom14_atom_exists": atom_exists.to(dtype=pred.dtype),
             "asym_id": asym_id.to(device=pred.device),
-            "residx_atom14_to_atom37": restype_atom14_to_atom37.to(device=pred.device),
+            "residx_atom14_to_atom37": torch.Tensor(restype_atom14_to_atom37).to(device=pred.device),
         }
 
         try:
@@ -208,6 +208,6 @@ class IgGMPaperLoss:
         return {
             "loss": total,
             "loss_viol": loss_vio,
-            "loss_fr": loss_backbone,
-            "loss_cdr_local": loss_cdr,
+            "loss_backbone": loss_backbone,
+            "loss_cdr": loss_cdr,
         }

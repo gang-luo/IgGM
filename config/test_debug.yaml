@@ -68,9 +68,5 @@ stage_training:
   mix_cdr_h2: 2
   mix_cdr_all: 2
   lazy_cache_size: 128
-  diffusion_mode: legacy
-  fr_noise_scale_trsl: 1.0
-  fr_noise_scale_rota: 1.0
-  cdr_local_noise_scale: 1.0
   occupancy_mode: joint_predict
   

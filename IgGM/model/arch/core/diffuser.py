@@ -39,10 +39,6 @@ class Diffuser:
             pert_seq=True,  # whether to perturb amino-acid sequences
             cord_scale=4.0,  # coordinate scaling factor (in Angstrom)
             igso3_buffer=None,  # buffered rotational matrices sampled from IGSO(3) distributions
-            diffusion_mode="legacy",  # legacy | fr_cdr_sync
-            fr_noise_scale_trsl=1.0,
-            fr_noise_scale_rota=1.0,
-            cdr_local_noise_scale=1.0,
             occupancy_mode="joint_predict",
     ):
         """Constructor function."""
@@ -52,10 +48,9 @@ class Diffuser:
         self.pert_seq = pert_seq
         self.cord_scale = cord_scale
         self.igso3_buffer = igso3_buffer
-        self.diffusion_mode = diffusion_mode
-        self.fr_noise_scale_trsl = float(fr_noise_scale_trsl)
-        self.fr_noise_scale_rota = float(fr_noise_scale_rota)
-        self.cdr_local_noise_scale = float(cdr_local_noise_scale)
+        self.fr_noise_scale_trsl = float(1.0)
+        self.fr_noise_scale_rota =  float(1.0)
+        self.cdr_local_noise_scale =  float(1.0)
         self.occupancy_mode = occupancy_mode
 
         # additional configurations
@@ -97,11 +92,10 @@ class Diffuser:
         """
         
         # 直接从在此处构建fr+cdr同步扰动结果，附加各个mask和loop等信息
-        if self.diffusion_mode == "fr_cdr_sync":
-            prot_data_pert = self._run_fr_cdr_sync(prot_data_orig, idxs_step)
-            if return_time_steps:
-                return prot_data_pert, idxs_step
-            return prot_data_pert
+        prot_data_pert = self._run_fr_cdr_sync(prot_data_orig, idxs_step)
+        if return_time_steps:
+            return prot_data_pert, idxs_step
+        return prot_data_pert
 
         # # initialization
         # n_resds = len(prot_data_orig['seq'])
@@ -279,7 +273,7 @@ class Diffuser:
             fr_mask,
             loop_atom_valid_mask,
         )
-        cmsk_tns_pert = cmsk_mat_orig.unsqueeze(0)
+        cmsk_tns_pert = cmsk_mat_orig.unsqueeze(0)  # 结构扰动不改变原子mask
 
         prot_data_pert = {
             "step": [idxs_step],
@@ -290,7 +284,7 @@ class Diffuser:
             "pmsk-ligand": prot_data_orig["mask_ab"],
 
             "seq-p": aa_seqs_pert,
-            "cord-p": cord_tns_noisy.unsqueeze(0),
+            "cord-p": cord_tns_noisy.unsqueeze(0), # 
             "cmsk-p": cmsk_tns_pert,
 
             "asym-id": prot_data_orig["asym_id"].detach().clone(),
@@ -313,6 +307,7 @@ class Diffuser:
             "clean_fr_reference": clean_fr_reference.detach().clone(),
             "clean_loop_local_coords": clean_loop_local_coords.detach().clone(),
             "noisy_loop_local_coords": noisy_loop_local_coords.detach().clone(),
+            "noisy_loop_global_coords": noisy_loop_global_coords.detach().clone(),
             "anchor_frame_meta": {
                 "clean_rot": clean_anchor_rots.detach().clone(),
                 "clean_trans": clean_anchor_trans.detach().clone(),
@@ -321,7 +316,6 @@ class Diffuser:
                 "fr_rotation": fr_rotation.detach().clone(),
                 "fr_translation": fr_translation.detach().clone(),
             },
-            "diffusion_mode": self.diffusion_mode,
             "occupancy_mode": self.occupancy_mode,
         }
         return prot_data_pert
