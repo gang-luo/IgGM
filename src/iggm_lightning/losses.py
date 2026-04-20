@@ -5,15 +5,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
-
+from typing import Dict, List, Optional
 import torch
 import torch.nn.functional as F
 
-from IgGM.utils.diff_util import ss2ptr
 from IgGM.protein.prot_constants import RESD_NAMES_1C,restype_atom14_to_atom37
+from IgGM.utils import skew2vec,log_rmat
 from openfold.utils.loss import find_structural_violations, violation_loss 
-# from IgGM.protein.prot_constants import restype_atom14_to_atom37
 
 
 @dataclass
@@ -77,31 +75,74 @@ class IgGMPaperLoss:
         atom_mask: torch.Tensor,
         align_res_mask: torch.Tensor,
         align_atom_idx: List[int],
+        asym_id: torch.Tensor,
+        align_mode: str = "complex",              
     ) -> torch.Tensor:
+        """
+        align_mode: str - alignment strategy:
+            • "complex"  : align using ALL chains (default, original behavior)
+            • "antigen"  : align using ONLY antigen chain (asym_id == 0)
+            • "antibody" : align using ONLY antibody chains (asym_id != 0)
+            • "chain_N"  : align using ONLY specific chain (asym_id == N), e.g., "chain_1"
+        """
         aligned = pred.clone()
         bsz = pred.shape[0]
+        
         for b in range(bsz):
-            align_atoms = atom_mask[b, :, align_atom_idx].all(dim=-1) & align_res_mask[b]
-            src = pred[b, :, align_atom_idx].reshape(-1, 3)
+            base_mask = align_res_mask[b]  # [num_res]
+            chain_mask = torch.ones_like(base_mask, dtype=torch.bool)
+            if asym_id is not None and asym_id.numel() > 0:
+                if align_mode == "antigen":
+                    chain_mask = (asym_id[b] == 0)
+                elif align_mode == "antibody":
+                    chain_mask = (asym_id[b] != 0)
+                elif align_mode.startswith("chain_"):
+                    try:
+                        target_chain = int(align_mode.split("_")[1])
+                        chain_mask = (asym_id[b] == target_chain)
+                    except (IndexError, ValueError):
+                        pass  
+                effective_mask = base_mask & chain_mask
+            else:
+                effective_mask = base_mask
+            
+            align_atoms = atom_mask[b, :, align_atom_idx].all(dim=-1) & effective_mask
+            src = pred[b, :, align_atom_idx].reshape(-1, 3)  # [num_res * num_atoms, 3]
             dst = tgt[b, :, align_atom_idx].reshape(-1, 3)
             val = align_atoms[:, None].expand(-1, len(align_atom_idx)).reshape(-1)
             rot, tr = self._kabsch_transform(src, dst, val)
             aligned[b] = torch.matmul(pred[b], rot.transpose(-1, -2)) + tr.view(1, 1, 3)
         return aligned
 
+    # def _backbone_mse(
+    #     self,
+    #     pred_aligned: torch.Tensor,
+    #     tgt: torch.Tensor,
+    #     atom_mask: torch.Tensor,
+    #     ab_mask: torch.Tensor,
+    # ) -> torch.Tensor:
+    #     bb_idx = [1]  # CA
+    #     # bb_idx = [1, 4]  # CA/CB
+    #     valid = ab_mask.unsqueeze(-1).expand(-1, -1, len(bb_idx)) & atom_mask[:, :, bb_idx]
+    #     diff = pred_aligned[:, :, bb_idx] - tgt[:, :, bb_idx]
+    #     denom = valid.to(diff.dtype).sum().clamp_min(1.0)
+    #     return ((diff ** 2) * valid.unsqueeze(-1).to(diff.dtype)).sum() / denom
+
+
     def _backbone_mse(
         self,
-        pred_aligned: torch.Tensor,
-        tgt: torch.Tensor,
-        atom_mask: torch.Tensor,
-        ab_mask: torch.Tensor,
+        inputs: torch.Tensor,
+        outputs: torch.Tensor,
     ) -> torch.Tensor:
-        bb_idx = [1]  # CA
-        # bb_idx = [1, 4]  # CA/CB
-        valid = ab_mask.unsqueeze(-1).expand(-1, -1, len(bb_idx)) & atom_mask[:, :, bb_idx]
-        diff = pred_aligned[:, :, bb_idx] - tgt[:, :, bb_idx]
-        denom = valid.to(diff.dtype).sum().clamp_min(1.0)
-        return ((diff ** 2) * valid.unsqueeze(-1).to(diff.dtype)).sum() / denom
+        
+        tgt_rota, tgt_trsl, = inputs['anchor_frame_meta']['rota_label'], inputs['anchor_frame_meta']['fr_translation']
+        pre_rota, pre_trsl = outputs['3d']['rota'][-1], outputs["3d"]["trsl"][-1]
+        eps_rota_pred = skew2vec(log_rmat(pre_rota))  # (B, 3) 切空间向量
+        
+        denom = F.mse_loss(eps_rota_pred, tgt_rota, reduction='mean')+ F.mse_loss(pre_trsl, tgt_trsl, reduction='mean')
+        
+        return denom
+
 
     def _cdr_all_atom_mse(
         self,
@@ -145,7 +186,7 @@ class IgGMPaperLoss:
             "residue_index": torch.arange(seq_len, device=pred.device).view(1, -1).expand(bsz, -1),
             "atom14_atom_exists": atom_exists.to(dtype=pred.dtype),
             "asym_id": asym_id.to(device=pred.device),
-            "residx_atom14_to_atom37": torch.Tensor(restype_atom14_to_atom37).to(device=pred.device),
+            "residx_atom14_to_atom37": torch.tensor(restype_atom14_to_atom37, device=pred.device),
         }
 
         try:
@@ -179,35 +220,49 @@ class IgGMPaperLoss:
     def _aligned_backbone_cdr_vio_loss(self, inputs: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         pred = outputs["3d"]["cord"][-1]
         tgt = self._ensure_batched(inputs["cord-o"], ndim_no_batch=3).to(device=pred.device, dtype=pred.dtype)
+
         atom_mask = inputs["cmsk-p"].to(device=pred.device).to(torch.bool)
-        # atom_mask = self._ensure_batched(inputs["cmsk-p"], ndim_no_batch=3).to(device=pred.device).to(torch.bool)
         bsz, seq_len = pred.shape[:2]
 
         ab_mask = self._normalize_res_mask(inputs["pmsk-ligand"], batch_size=bsz, seq_len=seq_len).to(pred.device)
         cdr_mask = self._normalize_res_mask(inputs["cdr_mask"], batch_size=bsz, seq_len=seq_len).to(pred.device)
 
-        pred_aligned = self._align_pred_to_target(
-            pred=pred,
-            tgt=tgt,
-            atom_mask=atom_mask,
-            align_res_mask=ab_mask,
-            align_atom_idx=[1],  # CA
-            # align_atom_idx=[1, 4],  # CA/CB
-        )
-        loss_backbone = self._backbone_mse(pred_aligned, tgt, atom_mask, ab_mask)
-        loss_cdr = self._cdr_all_atom_mse(pred_aligned, tgt, atom_mask, cdr_mask)
-        # Structural violation terms are rigid-transform invariant, so aligned coords are safe here.
-        loss_vio = self._openfold_violation_loss(pred_aligned, atom_mask.to(pred.dtype), inputs["seq-o"], asym_id=inputs.get("asym-id", None))
+        # tgt_aligned = self._align_pred_to_target( # 把tgt对齐到pred上便于梯度传播，计算loss时用pred_aligned和tgt比较
+        #     pred=tgt, 
+        #     tgt=pred,
+        #     atom_mask=atom_mask,
+        #     align_res_mask=ab_mask,
+        #     align_atom_idx=[1],  # CA
+        #     # align_atom_idx=[1, 4],  # CA/CB
+        #     asym_id = inputs["asym-id"],
+        #     align_mode = "antibody",
+        # )
+
+        # loss_backbone = self._backbone_mse(pred, tgt, atom_mask, ab_mask)
+        loss_backbone = self._backbone_mse(inputs, outputs)
+        # loss_cdr = self._cdr_all_atom_mse(pred, tgt_aligned, atom_mask, cdr_mask)
+        
+        # # Structural violation terms are rigid-transform invariant, so aligned coords are safe here.
+        # loss_vio = self._openfold_violation_loss(pred, atom_mask.to(pred.dtype), inputs["seq-o"], asym_id=inputs.get("asym-id", None))
 
         total = (
+            # self.cfg.cdr_all_atom_weight * loss_cdr
             self.cfg.backbone_weight * loss_backbone
-            + self.cfg.cdr_all_atom_weight * loss_cdr
-            + self.cfg.vio_weight * loss_vio
+            # + self.cfg.cdr_all_atom_weight * loss_cdr
+            # + self.cfg.vio_weight * loss_vio
         )
         
+        
+        torch.save({
+            'perturb': inputs['cord-p'],
+            'pre': outputs["3d"]["cord"][-1],
+            # 'tgt_aligned': tgt_aligned,
+            'clean': inputs["cord-o"]
+        }, f'/root/private_data/luog/codex/IgGM/see/seefile/val_loss_backbone.pt')
+
         return {
             "loss": total,
-            "loss_viol": loss_vio,
+            # "loss_viol": loss_vio,
             "loss_backbone": loss_backbone,
-            "loss_cdr": loss_cdr,
+            # "loss_cdr": loss_cdr,
         }

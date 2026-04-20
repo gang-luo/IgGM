@@ -8,7 +8,7 @@ data:
   test_ids: data/sabdab_zip/processed/sabdab_debug/split/test_prot_ids.txt
   train_clusters: data/sabdab_zip/processed/sabdab_debug/split/train_prot_cluster.txt
   batch_size: 1
-  num_workers: 24
+  num_workers: 12
   n_steps: 200
   forward_chunk_size: 64
   max_antigen_len: 256  # 384

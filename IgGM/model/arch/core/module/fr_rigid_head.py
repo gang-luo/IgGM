@@ -6,6 +6,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+from IgGM.transform.so3 import skew2vec
+from IgGM.utils.diff_util import log_rmat, so3_scale
+
 
 class FRRigidHead(nn.Module):
     """Predict FR rigid transform from full frame-state context and apply it internally."""
@@ -61,11 +64,19 @@ class FRRigidHead(nn.Module):
         sfea_tns_init: torch.Tensor,
         encd_tns: torch.Tensor,
         fr_mask: torch.Tensor,
-        fr_base_coords_global: torch.Tensor,
+        fr_base_coords_global: torch.Tensor,  # 当前带噪坐标 (供其他损失使用)
+        noisy_rota: torch.Tensor,             # 🔑 必须传入: 当前时间步的带噪旋转 (B, 3, 3)
+        noisy_trsl: torch.Tensor,             # 🔑 必须传入: 当前时间步的带噪平移 (B, 3)
+        alpha_bar_dict: dict,
     ) -> dict:
+        noisy_rota = noisy_rota.unsqueeze(0)  # (B, 3, 3) for broadcasting
+        noisy_trsl = noisy_trsl.unsqueeze(0)  # (B, 3) for broadcasting
+
         if fr_mask.ndim == 1:
             fr_mask = fr_mask.unsqueeze(0)
         fr_mask_bool = fr_mask.to(torch.bool)
+        
+        # 1. 特征提取 (保持不变)
         res_in = torch.cat([sfea_tns, sfea_tns_init, encd_tns], dim=-1)
         res_hidden = self.res_proj(res_in)
         mask_f = fr_mask_bool.unsqueeze(-1).to(res_hidden.dtype)
@@ -73,23 +84,85 @@ class FRRigidHead(nn.Module):
         pooled = (res_hidden * mask_f).sum(dim=1) / denom
         pooled = self.pool_proj(pooled)
 
+        # 2. 网络输出: 视为“预测的带噪噪声” (与你的 sampler 输出对齐)
         quat = F.normalize(self.linear_q(pooled), dim=-1)
-        trsl = self.linear_t(pooled)
-        rota = self._quaternion_to_rotation(quat)
+        trsl_pred = self.linear_t(pooled)          # (B, 3)
+        rota_pred = self._quaternion_to_rotation(quat) # (B, 3, 3)
 
+        # 3. 提取调度系数
+        sqrt_ab_t_trsl = torch.sqrt(alpha_bar_dict["alpha_bar_trsl"]).view(-1, 1) # (B, 1)
+        sqrt_ab_t_rota = torch.sqrt(alpha_bar_dict["alpha_bar_rota"]).view(-1)    # (B,)
+
+        # 4. 严格按扩散公式反推 x0 (平移)
+        # T0 = (Tt - ε_pred) / √α_t
+        x0_trsl = (noisy_trsl - trsl_pred) / sqrt_ab_t_trsl  # (B, 3)
+
+        # 5. 严格按扩散公式反推 x0 (旋转)
+        # 假设你的前向加噪为: Rt = Scale(R0, √α) @ Scale(ε, √(1-α))
+        # 则: R0 = Scale( Rt @ ε_pred^T, 1/√α )
+        # 注意: 旋转矩阵求逆 = 转置        
+        R0_scaled = torch.bmm(noisy_rota, rota_pred.transpose(-1, -2)) # (B, 3, 3)
+        x0_rota = so3_scale(R0_scaled, 1.0 / sqrt_ab_t_rota)           # (B, 3, 3)
+
+        # 6. 用反推的 x0 重建坐标 (供 clash/原子冲突等辅助损失使用)
         updated = fr_base_coords_global.clone()
-        
         for b in range(updated.shape[0]):
             if fr_mask_bool[b].any():
-                moved = self._apply_rigid(fr_base_coords_global[b, fr_mask_bool[b]], rota[b], trsl[b])
-                updated[b, fr_mask_bool[b]] = moved.to(dtype=updated.dtype)
+                valid_coords = fr_base_coords_global[b, fr_mask_bool[b]]
+                # 刚体变换: X_new = X_old @ R^T + T
+                moved = torch.matmul(valid_coords, x0_rota[b].T) + x0_trsl[b].view(1, 3)
+                updated[b, fr_mask_bool[b]] = moved
 
         global_delta_feat = self.delta_feat(pooled).unsqueeze(1) * mask_f
+        
         return {
             'quat': quat,
-            'trsl': trsl,
-            'rota': rota,
-            'updated_coords': updated,
-            'delta_sfea': global_delta_feat.to(dtype=sfea_tns.dtype),
-            'mask': (denom.squeeze(-1) > 0).to(torch.bool),
+            'trsl': trsl_pred, # 供 backbone_mse 计算损失
+            'rota': rota_pred,
+            'eps_rota': skew2vec(log_rmat(rota_pred)), # 供 backbone_mse 计算损失
+            'updated_coords': updated, # 供 clash/结构损失使用
+            'delta_sfea': global_delta_feat,
+            'mask': (denom.squeeze(-1) > 0).to(torch.bool)
         }
+
+    # def forward(
+    #     self,
+    #     sfea_tns: torch.Tensor,
+    #     sfea_tns_init: torch.Tensor,
+    #     encd_tns: torch.Tensor,
+    #     fr_mask: torch.Tensor,
+    #     fr_base_coords_global: torch.Tensor,
+        
+    # ) -> dict:
+    #     if fr_mask.ndim == 1:
+    #         fr_mask = fr_mask.unsqueeze(0)
+    #     fr_mask_bool = fr_mask.to(torch.bool)
+    #     res_in = torch.cat([sfea_tns, sfea_tns_init, encd_tns], dim=-1)
+    #     res_hidden = self.res_proj(res_in)
+    #     mask_f = fr_mask_bool.unsqueeze(-1).to(res_hidden.dtype)
+    #     denom = mask_f.sum(dim=1).clamp_min(1.0)
+    #     pooled = (res_hidden * mask_f).sum(dim=1) / denom
+    #     pooled = self.pool_proj(pooled)
+
+    #     quat = F.normalize(self.linear_q(pooled), dim=-1)
+    #     trsl = self.linear_t(pooled)
+    #     rota = self._quaternion_to_rotation(quat)
+
+    #     # comput updataed coords for FR residues
+        
+    #     updated = fr_base_coords_global.clone()
+        
+    #     for b in range(updated.shape[0]):
+    #         if fr_mask_bool[b].any():
+    #             moved = self._apply_rigid(fr_base_coords_global[b, fr_mask_bool[b]], rota[b], trsl[b])
+    #             updated[b, fr_mask_bool[b]] = moved.to(dtype=updated.dtype)
+
+    #     global_delta_feat = self.delta_feat(pooled).unsqueeze(1) * mask_f
+    #     return {
+    #         'quat': quat,
+    #         'trsl': trsl,
+    #         'rota': rota,
+    #         'updated_coords': updated,
+    #         'delta_sfea': global_delta_feat.to(dtype=sfea_tns.dtype),
+    #         'mask': (denom.squeeze(-1) > 0).to(torch.bool),
+    #     }

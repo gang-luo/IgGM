@@ -8,7 +8,7 @@ data:
   test_ids: data/sabdab_2603/processed/split/test_prot_ids.txt
   train_clusters: data/sabdab_2603/processed/split/train_prot_cluster.txt
   batch_size: 1
-  num_workers: 16
+  num_workers: 8
   n_steps: 200
   forward_chunk_size: 128
   max_antigen_len: 256  # 384
@@ -35,13 +35,13 @@ metrics:
   dockq_threshold: 0.23
 
 trainer:
-  max_epochs: 10
-  precision: bf16-mixed # 16-mixed
+  max_epochs: 40
+  precision: bf16 # bf16-mixed
   accelerator: gpu
-  devices: [0]
+  devices: [0] # [0,1]
   log_every_n_steps: 5
-  accumulate_grad_batches: 2
-  num_sanity_val_steps: 0
+  accumulate_grad_batches: 4
+  num_sanity_val_steps: 1
   strategy: ddp
   ddp_static_graph: false
   ddp_find_unused_parameters: true
@@ -61,7 +61,7 @@ runtime:
   run_test: true
 
 stage_training:
-  stage1_epochs: 5
+  stage1_epochs: 0
   stage2_enable_seq_recovery: true
   mix_cdr_h3: 4
   mix_cdr_h1: 2

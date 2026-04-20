@@ -853,7 +853,7 @@ if __name__ == "__main__":
 #   --dataset_name sabdab_2603 \
 #   --raw_root ./data/origin_file \
 #   --out_root ./data/sabdab_2603/processed \
-#   --limit 20 \
+#   --limit 100 \
 #   --build_splits \
 #   --split_out_dir ./data/sabdab_2603/processed/split \
 #   --cluster_identity 0.95

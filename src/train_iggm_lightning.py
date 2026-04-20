@@ -12,7 +12,6 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
-import os
 import warnings
 
 # 屏蔽常见 Python warning
@@ -126,7 +125,7 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--weight_decay", type=float, default=float(optim.get("weight_decay", 1e-2)))
     p.add_argument("--grad_clip", type=float, default=float(optim.get("grad_clip", 1.0)))
 
-    p.add_argument("--vio_weight", type=float, default=float(loss_cfg.get("loss_viol_weight", 0.02)))
+    p.add_argument("--vio_weight", type=float, default=float(loss_cfg.get("vio_weight", 0.02)))
     p.add_argument("--dockq_threshold", type=float, default=float(metric_cfg.get("dockq_threshold", 0.23)))
 
     p.add_argument("--max_epochs", type=int, default=int(trainer.get("max_epochs", 1)))
@@ -158,7 +157,7 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--mix_cdr_h2", type=int, default=int(stage_training.get("mix_cdr_h2", 2)))
     p.add_argument("--mix_cdr_all", type=int, default=int(stage_training.get("mix_cdr_all", 2)))
     p.add_argument("--lazy_cache_size", type=int, default=int(stage_training.get("lazy_cache_size", 128)))
-    p.add_argument("--occupancy_mode", default=diffusion.get("occupancy_mode", "joint_predict"))
+    p.add_argument("--occupancy_mode", default=stage_training.get("occupancy_mode", diffusion.get("occupancy_mode", "joint_predict")))
     return p
 
 
@@ -175,6 +174,8 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
 
+    import torch.multiprocessing as mp
+    mp.set_start_method('spawn', force=True) 
 
     args = _parse_args()
     pl.seed_everything(args.seed, workers=True)
@@ -287,6 +288,7 @@ def main() -> None:
         log_every_n_steps=args.log_every_n_steps,
         accumulate_grad_batches=max(1, args.accumulate_grad_batches),
         num_sanity_val_steps=max(0, args.num_sanity_val_steps),
+        # detect_anomaly=True,
     )
 
     last_ckpt = ckpt_dir / "last.ckpt"

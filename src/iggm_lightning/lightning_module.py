@@ -122,6 +122,8 @@ class IgGMLightningModule(pl.LightningModule):
         self.stage_cfg = stage_cfg or StageTrainingConfig()
         self._skip_optimizer_step_due_to_oom = False
 
+        self.idx_save=0
+
     @staticmethod
     def _ddp_any_true(flag: bool) -> bool:
         """Synchronize boolean failure flags across ranks for DDP-safe fallbacks."""
@@ -227,14 +229,15 @@ class IgGMLightningModule(pl.LightningModule):
         return inputs
 
     def _compute_loss(self, inputs: Dict[str, Any], outputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        use_seq = self._is_stage2() and bool(self.stage_cfg.stage2_enable_seq_recovery)
-        # original = self.loss_fn.cfg.enable_seq_recovery
-        # self.loss_fn.cfg.enable_seq_recovery = use_seq
-        try:
-            return self.loss_fn(inputs, outputs)
-        finally:
-            pass
-            # self.loss_fn.cfg.enable_seq_recovery = original
+        # use_seq = self._is_stage2() and bool(self.stage_cfg.stage2_enable_seq_recovery)
+        # # original = self.loss_fn.cfg.enable_seq_recovery
+        # # self.loss_fn.cfg.enable_seq_recovery = use_seq
+        # try:
+        #     return self.loss_fn(inputs, outputs)
+        # finally:
+        #     pass
+        #     # self.loss_fn.cfg.enable_seq_recovery = original
+        return self.loss_fn(inputs, outputs)
 
     @staticmethod
     def _decode_pred_seq(logits_1d: torch.Tensor) -> str:
@@ -255,37 +258,20 @@ class IgGMLightningModule(pl.LightningModule):
 
         self._apply_stage_mask(prot_data_curr, payload)
         inputs_addi = batch.get("inputs_addi")
-
-        inputs = self._build_inputs_cm(prot_data_curr, idx_step)
-        outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
-        loss_dict = self._compute_loss(inputs, outputs)
         
-        # local_fail = False
-        # inputs = outputs = loss_dict = None
-        # err_msg = ""
-        # try:
-        #     inputs = self._build_inputs_cm(prot_data_curr, idx_step)
-        #     outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
-        #     self._assert_and_log_shapes(inputs, outputs)
-        #     loss_dict = self._compute_loss(inputs, outputs)
-        # except Exception as exc:
-        #     local_fail = True
-        #     err_msg = str(exc)
+        local_fail = False
+        inputs = outputs = loss_dict = None
+        try:
+            inputs = self._build_inputs_cm(prot_data_curr, idx_step)
+            outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
+            loss_dict = self._compute_loss(inputs, outputs)
 
-        # # 异常处理
-        # # global_fail = self._ddp_any_true(local_fail)
-        # loss_flag = loss_dict["loss"] if loss_dict is not None else None
-        # local_nonfinite = bool(loss_flag is not None and (not torch.isfinite(loss_flag.detach()).item()))
-        # global_nonfinite = self._ddp_any_true(local_nonfinite)
-        # if global_nonfinite or global_fail:
-        #     self.log(f"{stage}/skip_failed_batch or skip_nonfinite_loss", torch.tensor(1.0, device=self.device), prog_bar=False, on_step=(stage == "train"), on_epoch=True, batch_size=1)
-        #     return self._zero_loss() if stage == "train" else None
-
-        self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=True, on_epoch=True)
-        self.log(f"{stage}/loss_backbone", loss_dict["loss_backbone"], prog_bar=False, on_step=True, on_epoch=True)
-        self.log(f"{stage}/loss_cdr", loss_dict["loss_cdr"], prog_bar=False, on_step=True, on_epoch=True)
-        self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=False, on_step=True, on_epoch=True)
-        # self.log(f"{stage}/loss_srcv", loss_dict["loss_srcv"], prog_bar=False, on_step=True, on_epoch=True)
+            self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=True, on_epoch=True)
+            self.log(f"{stage}/loss_backbone", loss_dict["loss_backbone"], prog_bar=False, on_step=True, on_epoch=True)
+            # self.log(f"{stage}/loss_cdr", loss_dict["loss_cdr"], prog_bar=False, on_step=True, on_epoch=True)
+            # self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=False, on_step=True, on_epoch=True)
+        except Exception as exc:
+            local_fail = True
 
         if stage in {"val", "test"}:
             pred_cord = outputs["3d"]["cord"][-1][0]
@@ -307,6 +293,23 @@ class IgGMLightningModule(pl.LightningModule):
             )
             for k, v in metric_dict.items():
                 self.log(f"{stage}/{k}", v, prog_bar=(k == "tm_score"), on_step=False, on_epoch=True)
+            
+        
+            # torch.save({
+            #     'perturb': inputs['cord-p'],
+            #     'pre': outputs["3d"]["cord"][-1],
+            #     'clean': inputs["cord-o"]
+            # }, f'/root/private_data/luog/codex/IgGM/see/seefile/val_{self.idx_save}.pt')
+            self.idx_save += 1
+
+
+        global_fail = self._ddp_any_true(local_fail)
+        loss_flag = loss_dict["loss"] if loss_dict is not None else None
+        local_nonfinite = bool(loss_flag is not None and (not torch.isfinite(loss_flag.detach()).item()))
+        global_nonfinite = self._ddp_any_true(local_nonfinite)
+        if global_nonfinite or global_fail:
+            self.log(f"{stage}/skip_failed_batch or skip_nonfinite_loss", torch.tensor(1.0, device=self.device), prog_bar=False, on_step=(stage == "train"), on_epoch=True, batch_size=1)
+            return self._zero_loss() if stage == "train" else None
 
         return loss_dict["loss"]
 

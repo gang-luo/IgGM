@@ -188,6 +188,7 @@ class _ProteinSampleDataset(Dataset):
             "sequence_lengths": seq_lengths,
             "antibody_region": region_metadata,
         }
+        payload = self._center_complex_payload(payload)
         self._cache_put(cache_key, payload)
         return payload
 
@@ -285,6 +286,36 @@ class _ProteinSampleDataset(Dataset):
         valid = (ca_mask.unsqueeze(0) * ca_mask.unsqueeze(1)).bool()
         contact = (pair_dist <= float(cutoff)) & chain_cross & valid
         return contact.to(torch.float32)
+    
+    @staticmethod
+    def _center_complex_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Center the whole complex by subtracting one global centroid."""
+        prot = payload.get("prot_data_curr")
+        if prot is None:
+            return payload
+
+        cord = prot.get("cord")
+        cmsk = prot.get("cmsk")
+
+        # Use atom mask to compute one centroid for the whole complex.
+        atom_mask = cmsk.to(dtype=cord.dtype)
+        denom = atom_mask.sum().clamp(min=1.0)
+        center = (cord * atom_mask.unsqueeze(-1)).sum(dim=(0, 1)) / denom
+
+        # Shift complex-level coordinates
+        prot["cord"] = cord - center.view(1, 1, 3)
+
+        # Shift antigen coordinates if present
+        if "a-cord" in prot and torch.is_tensor(prot["a-cord"]):
+            prot["a-cord"] = prot["a-cord"] - center.view(1, 1, 3)
+
+        # Shift chain-level coordinates if they still exist in payload
+        chains = payload.get("chains")
+        if isinstance(chains, list):
+            for chain in chains:
+                if isinstance(chain, dict) and torch.is_tensor(chain.get("cord")):
+                    chain["cord"] = chain["cord"] - center.view(1, 1, 3)
+        return payload
     
     def __getitem__(self, index):
         
@@ -538,3 +569,4 @@ class ProcessedSabdabDataModule(pl.LightningDataModule):
 
     def test_dataloader(self):
         return DataLoader(self.test_ds,batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, collate_fn=_batch_one)
+

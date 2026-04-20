@@ -27,8 +27,8 @@ class DesignModel(BaseModel):
             n_dims_sfea=192,  # number of dimensions in single features (D_s)
             n_dims_pfea=128,  # number of dimensions in pair features (D_p)
             n_dims_penc=64,  # number of dimensions in positional encodings
-            n_lyrs_2d=4,  # number of <EvoformerBlockSS> layers
-            n_lyrs_3d=2,  # number of <AF2SMod> layers
+            n_lyrs_2d=2,  # number of <EvoformerBlockSS> layers
+            n_lyrs_3d=1,  # number of <AF2SMod> layers
             # n_lyrs_2d=16,  # number of <EvoformerBlockSS> layers
             # n_lyrs_3d=8,  # number of <AF2SMod> layers
             pred_oxyg=True,  # whether to predict backbone oxygen atoms' 3D coordinates
@@ -309,7 +309,7 @@ class DesignModel(BaseModel):
 
         # AF2SMod
         region_metadata = self.__extract_region_metadata(inputs)
-        sfea_tns_st, cord_list, plddt_list = self.net['af2_smod'](
+        sfea_tns_st, cord_list, plddt_list, trsl_list, rota_list = self.net['af2_smod'](
             inputs['seq-p'], sfea_tns, pfea_tns, penc_tns,
             cord_tns_init=inputs['cord-p'],
             cmsk_tns_init=inputs['cmsk-p'],
@@ -336,7 +336,7 @@ class DesignModel(BaseModel):
             'pfea': pfea_tns,
             '1d': logt_tns_aa,
             '2d': {'cb': logt_tns_cb, 'om': logt_tns_om, 'th': logt_tns_th, 'ph': logt_tns_ph},
-            '3d': {'cord': cord_list,  'plddt': plddt_list},
+            '3d': {'cord': cord_list,  'plddt': plddt_list, 'trsl': trsl_list, 'rota': rota_list},
         }
         return outputs
 

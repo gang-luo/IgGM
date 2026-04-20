@@ -22,19 +22,30 @@ class FRBranch(nn.Module):
         encd_tns: torch.Tensor,
         fr_mask: torch.Tensor,
         curr_coords: torch.Tensor,
+        noise_info: None,
+
     ) -> dict:
-        
+        noise_fr_rotation = noise_info['anchor_frame_meta']['fr_rotation']
+        noise_fr_translation = noise_info['anchor_frame_meta']['fr_translation']
+        alpha_bar_dict = noise_info['anchor_frame_meta']['bar_value']
+
         fr_pred = self.fr_rigid(
             sfea_tns=sfea_tns,
             sfea_tns_init=sfea_tns_init,
             encd_tns=encd_tns,
             fr_mask=fr_mask,
             fr_base_coords_global=curr_coords,
+            noisy_rota=noise_fr_rotation,
+            noisy_trsl=noise_fr_translation,
+            alpha_bar_dict = alpha_bar_dict,
         )
+
         return {
             'fr_pred': fr_pred,
             'fr_coords': fr_pred['updated_coords'],
             'sfea_after_fr': sfea_tns + fr_pred['delta_sfea'],
+            'trsl': fr_pred['trsl'],
+            'rota': fr_pred['rota'],
         }
 
 

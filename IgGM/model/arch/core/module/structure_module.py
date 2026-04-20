@@ -79,7 +79,7 @@ class StructureModule(nn.Module):
         curr_coords = cord_tns_init.detach().clone()
         curr_cmsk = cmsk_tns_init.detach().clone()
 
-        cord_list, plddt_list, fr_cdr_outputs = [], [], None
+        cord_list, plddt_list, fr_cdr_outputs, trsl_list, rota_list  = [], [], None, [], []
 
         fr_mask = self._expand_batch_mask(region_metadata['fr_mask'].to(device=device, dtype=torch.bool), n_smpls)
         loop_type_ids = self._expand_batch_mask(region_metadata['loop_type_ids'].to(device=device), n_smpls)
@@ -111,8 +111,9 @@ class StructureModule(nn.Module):
                 encd_tns=encd_tns,
                 fr_mask=fr_mask,
                 curr_coords=curr_coords,
+                noise_info = region_metadata,
             )
-            fr_coords, sfea_tns, fr_pred = fr_out['fr_coords'],fr_out['sfea_after_fr'],fr_out['fr_pred']
+            fr_coords, sfea_tns, fr_pred, trsl, rota = fr_out['fr_coords'],fr_out['sfea_after_fr'],fr_out['fr_pred'],fr_out['trsl'],fr_out['rota']
 
             # cdr坐标去噪
             cdr_out = self.net['cdr_fusion_block'](
@@ -136,7 +137,9 @@ class StructureModule(nn.Module):
             # save for loss compute
             cord_list.append(curr_coords.clone())
             plddt_list.append(plddt_dict)
-
+            trsl_list.append(trsl)
+            rota_list.append(rota)
+            
             # last_fr_pred = fr_pred
             # last_cdr_pred = cdr_pred
 
@@ -150,7 +153,7 @@ class StructureModule(nn.Module):
         #     region_metadata=region_metadata,
         # )
         
-        return sfea_tns, cord_list, plddt_list
+        return sfea_tns, cord_list, plddt_list, trsl_list, rota_list
 
     def __init_fram_from_cord(self, aa_seqs, cord_tns, cmsk_tns):
         n_smpls, n_resds, _, _ = cord_tns.shape
