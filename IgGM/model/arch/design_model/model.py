@@ -397,6 +397,7 @@ class DesignModel(BaseModel):
 
     def __extract_region_metadata(self, inputs):
         keys = [
+            'antibody_mask', 'antibody_local_coords',
             'fr_mask', 'cdr_mask', 'loop_masks', 'loop_type_ids', 'loop_names',
             'loop_left_anchor_idx', 'loop_right_anchor_idx', 'loop_true_len', 'loop_lmax',
             'loop_occ_target', 'loop_valid_res_mask', 'loop_atom_valid_mask',

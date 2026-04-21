@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from IgGM.transform.so3 import skew2vec
 from IgGM.utils.diff_util import log_rmat, so3_scale
+from IgGM.utils.fr_cdr_diffusion_utils import local_to_global_coords
 
 
 class FRRigidHead(nn.Module):
@@ -63,23 +64,28 @@ class FRRigidHead(nn.Module):
         sfea_tns: torch.Tensor,
         sfea_tns_init: torch.Tensor,
         encd_tns: torch.Tensor,
-        fr_mask: torch.Tensor,
+        antibody_mask: torch.Tensor,
         fr_base_coords_global: torch.Tensor,  # 当前带噪坐标 (供其他损失使用)
-        noisy_rota: torch.Tensor,             # 🔑 必须传入: 当前时间步的带噪旋转 (B, 3, 3)
-        noisy_trsl: torch.Tensor,             # 🔑 必须传入: 当前时间步的带噪平移 (B, 3)
+        xt_rota: torch.Tensor,                # 当前时间步的抗体刚体旋转参数 (x_t)
+        xt_trsl: torch.Tensor,                # 当前时间步的抗体刚体平移参数 (x_t)
         alpha_bar_dict: dict,
+        antibody_local_coords: torch.Tensor,  # clean local coordinates in antibody rigid frame
     ) -> dict:
-        noisy_rota = noisy_rota.unsqueeze(0)  # (B, 3, 3) for broadcasting
-        noisy_trsl = noisy_trsl.unsqueeze(0)  # (B, 3) for broadcasting
+        if xt_rota.ndim == 2:
+            xt_rota = xt_rota.unsqueeze(0)
+        if xt_trsl.ndim == 1:
+            xt_trsl = xt_trsl.unsqueeze(0)
+        if antibody_local_coords.ndim == 3:
+            antibody_local_coords = antibody_local_coords.unsqueeze(0)
 
-        if fr_mask.ndim == 1:
-            fr_mask = fr_mask.unsqueeze(0)
-        fr_mask_bool = fr_mask.to(torch.bool)
+        if antibody_mask.ndim == 1:
+            antibody_mask = antibody_mask.unsqueeze(0)
+        ab_mask_bool = antibody_mask.to(torch.bool)
         
         # 1. 特征提取 (保持不变)
         res_in = torch.cat([sfea_tns, sfea_tns_init, encd_tns], dim=-1)
         res_hidden = self.res_proj(res_in)
-        mask_f = fr_mask_bool.unsqueeze(-1).to(res_hidden.dtype)
+        mask_f = ab_mask_bool.unsqueeze(-1).to(res_hidden.dtype)
         denom = mask_f.sum(dim=1).clamp_min(1.0)
         pooled = (res_hidden * mask_f).sum(dim=1) / denom
         pooled = self.pool_proj(pooled)
@@ -95,23 +101,21 @@ class FRRigidHead(nn.Module):
 
         # 4. 严格按扩散公式反推 x0 (平移)
         # T0 = (Tt - ε_pred) / √α_t
-        x0_trsl = (noisy_trsl - trsl_pred) / sqrt_ab_t_trsl  # (B, 3)
+        x0_trsl = (xt_trsl - trsl_pred) / sqrt_ab_t_trsl  # (B, 3)
 
         # 5. 严格按扩散公式反推 x0 (旋转)
         # 假设你的前向加噪为: Rt = Scale(R0, √α) @ Scale(ε, √(1-α))
         # 则: R0 = Scale( Rt @ ε_pred^T, 1/√α )
         # 注意: 旋转矩阵求逆 = 转置        
-        R0_scaled = torch.bmm(noisy_rota, rota_pred.transpose(-1, -2)) # (B, 3, 3)
+        R0_scaled = torch.bmm(xt_rota, rota_pred.transpose(-1, -2)) # (B, 3, 3)
         x0_rota = so3_scale(R0_scaled, 1.0 / sqrt_ab_t_rota)           # (B, 3, 3)
 
-        # 6. 用反推的 x0 重建坐标 (供 clash/原子冲突等辅助损失使用)
+        # 6. 用反推的 x0 重建全局抗体坐标，再回写到全复合体坐标
         updated = fr_base_coords_global.clone()
         for b in range(updated.shape[0]):
-            if fr_mask_bool[b].any():
-                valid_coords = fr_base_coords_global[b, fr_mask_bool[b]]
-                # 刚体变换: X_new = X_old @ R^T + T
-                moved = torch.matmul(valid_coords, x0_rota[b].T) + x0_trsl[b].view(1, 3)
-                updated[b, fr_mask_bool[b]] = moved
+            if ab_mask_bool[b].any():
+                moved = local_to_global_coords(antibody_local_coords[b], x0_rota[b], x0_trsl[b])
+                updated[b, ab_mask_bool[b]] = moved.to(dtype=updated.dtype)
 
         global_delta_feat = self.delta_feat(pooled).unsqueeze(1) * mask_f
         

@@ -81,13 +81,17 @@ class StructureModule(nn.Module):
 
         cord_list, plddt_list, fr_cdr_outputs, trsl_list, rota_list  = [], [], None, [], []
 
-        fr_mask = self._expand_batch_mask(region_metadata['fr_mask'].to(device=device, dtype=torch.bool), n_smpls)
+        antibody_mask = self._expand_batch_mask(region_metadata['antibody_mask'].to(device=device, dtype=torch.bool), n_smpls)
         loop_type_ids = self._expand_batch_mask(region_metadata['loop_type_ids'].to(device=device), n_smpls)
         loop_global_res_indices = self._expand_batch_mask(region_metadata['loop_global_res_indices'].to(device=device), n_smpls)
         loop_valid_res_mask = self._expand_batch_mask(region_metadata['loop_valid_res_mask'].to(device=device, dtype=torch.bool), n_smpls)
         loop_atom_valid_mask = self._expand_batch_mask(region_metadata['loop_atom_valid_mask'].to(device=device, dtype=torch.bool), n_smpls)
         loop_left_anchor_idx = self._expand_batch_mask(region_metadata['loop_left_anchor_idx'].to(device=device), n_smpls)
         loop_right_anchor_idx = self._expand_batch_mask(region_metadata['loop_right_anchor_idx'].to(device=device), n_smpls)
+
+        antibody_local_coords = region_metadata['antibody_local_coords'].to(device=device, dtype=dtype)
+        if antibody_local_coords.ndim == 3:
+            antibody_local_coords = antibody_local_coords.unsqueeze(0).expand(n_smpls, -1, -1, -1).clone()
 
         loop_xt_local = region_metadata['noisy_loop_local_coords'].to(device=device, dtype=dtype)
         if loop_xt_local.ndim == 4:
@@ -109,9 +113,12 @@ class StructureModule(nn.Module):
                 sfea_tns=sfea_tns,
                 sfea_tns_init=sfea_tns_init,
                 encd_tns=encd_tns,
-                fr_mask=fr_mask,
+                antibody_mask=antibody_mask,
                 curr_coords=curr_coords,
-                noise_info = region_metadata,
+                noise_info={
+                    **region_metadata,
+                    'antibody_local_coords': antibody_local_coords,
+                },
             )
             fr_coords, sfea_tns, fr_pred, trsl, rota = fr_out['fr_coords'],fr_out['sfea_after_fr'],fr_out['fr_pred'],fr_out['trsl'],fr_out['rota']
 

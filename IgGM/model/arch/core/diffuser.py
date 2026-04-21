@@ -16,11 +16,10 @@ from IgGM.protein import AtomMapper
 from IgGM.protein.prot_constants import RESD_NAMES_1C
 from IgGM.utils import (
     IsotropicGaussianSO3,
-    apply_rigid_transform_coords,
-    apply_rigid_transform_to_masked_coords,
-    check_loop_roundtrip,
     extract_clean_fr_reference,
     extract_per_loop_clean_local_coords,
+    global_to_local_coords,
+    local_to_global_coords,
     merge_noisy_fr_and_loops,
     prob2seq,
     ptr2ss,
@@ -184,7 +183,7 @@ class Diffuser:
         return prob_tns_orig, prob_tns_pert, aa_seqs_pert
 
     def _sample_fr_rigid_transform(self, idxs_step, device, dtype):
-        """Sample one rigid transform for the full FR block at timestep t."""
+        """Sample one rigid transform noise for the antibody-level rigid params at timestep t."""
 
         alpha_bar_trsl = self.trsl_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
         alpha_bar_rota = self.rota_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
@@ -198,7 +197,42 @@ class Diffuser:
         fr_noise = rota_buf[random.randrange(self.rota_buf_size)].unsqueeze(0)
         fr_rotation = so3_scale(fr_noise, torch.sqrt(1.0 - alpha_bar_rota) * self.fr_noise_scale_rota)[0]
 
-        return fr_rotation, fr_translation,{"alpha_bar_trsl":alpha_bar_trsl, "alpha_bar_rota":alpha_bar_rota}
+        return fr_rotation, fr_translation, {"alpha_bar_trsl": alpha_bar_trsl, "alpha_bar_rota": alpha_bar_rota}
+
+    @staticmethod
+    def _build_antibody_rigid_params(cord_tns_orig, cmsk_mat_orig, antibody_mask):
+        """Build clean antibody-level rigid params and local coordinates."""
+
+        ab_mask = antibody_mask.to(torch.bool)
+        coords_ab = cord_tns_orig[ab_mask]  # [N_ab, A, 3]
+        atom_mask_ab = cmsk_mat_orig[ab_mask].to(cord_tns_orig.dtype)  # [N_ab, A]
+
+        ca_mask = atom_mask_ab[:, 1]
+        ca = coords_ab[:, 1]
+        if ca_mask.sum() > 0:
+            trsl_orig = (ca * ca_mask.unsqueeze(-1)).sum(dim=0) / ca_mask.sum().clamp_min(1.0)
+        else:
+            trsl_orig = coords_ab.mean(dim=(0, 1))
+
+        n_ca = coords_ab[:, 1] - coords_ab[:, 0]
+        x_axis = coords_ab[-1, 1] - coords_ab[0, 1]
+        if torch.linalg.norm(x_axis) < 1e-6:
+            x_axis = torch.tensor([1.0, 0.0, 0.0], device=cord_tns_orig.device, dtype=cord_tns_orig.dtype)
+        x_axis = x_axis / x_axis.norm().clamp_min(1e-6)
+        guide = n_ca.mean(dim=0)
+        if torch.linalg.norm(guide) < 1e-6:
+            guide = torch.tensor([0.0, 1.0, 0.0], device=cord_tns_orig.device, dtype=cord_tns_orig.dtype)
+        z_axis = torch.cross(x_axis, guide, dim=-1)
+        if torch.linalg.norm(z_axis) < 1e-6:
+            z_axis = torch.tensor([0.0, 0.0, 1.0], device=cord_tns_orig.device, dtype=cord_tns_orig.dtype)
+        z_axis = z_axis / z_axis.norm().clamp_min(1e-6)
+        y_axis = torch.cross(z_axis, x_axis, dim=-1)
+        y_axis = y_axis / y_axis.norm().clamp_min(1e-6)
+        rota_orig = torch.stack([x_axis, y_axis, z_axis], dim=-1)  # [3, 3]
+
+        ab_local = global_to_local_coords(coords_ab, rota_orig, trsl_orig)
+        ab_local = ab_local * atom_mask_ab.unsqueeze(-1)
+        return rota_orig, trsl_orig, ab_local
 
     def _run_fr_cdr_sync(self, prot_data_orig, idxs_step):
         """Build a synchronized noisy state with FR rigid motion + CDR local diffusion."""
@@ -210,6 +244,7 @@ class Diffuser:
         cord_tns_orig = prot_data_orig["cord"]
         cmsk_mat_orig = prot_data_orig["cmsk"]
         pmsk_vec = prot_data_orig["mask_design"]
+        antibody_mask = prot_data_orig["mask_ab"].to(device=device, dtype=torch.bool)
 
         fr_mask = prot_data_orig["fr_mask"].to(device=device, dtype=torch.bool)
         cdr_mask = prot_data_orig["cdr_mask"].to(device=device, dtype=torch.bool)
@@ -230,17 +265,25 @@ class Diffuser:
         # redefine the original FR coordinates and extract per-loop clean local coordinates
         clean_fr_reference = extract_clean_fr_reference(cord_tns_orig, fr_mask, atom_mask=cmsk_mat_orig)
 
-        # antibody fr region rotation and translation perturbation
-        fr_rotation, fr_translation, bar_value = self._sample_fr_rigid_transform(idxs_step, device, dtype)
-        noisy_cord_tns = apply_rigid_transform_coords(
+        # stage-1 forward perturbation: antibody-level rigid params q0 -> qt
+        rota_orig, trsl_orig, ab_local_coords = self._build_antibody_rigid_params(
             cord_tns_orig,
-            fr_rotation,
-            fr_translation,
+            cmsk_mat_orig,
+            antibody_mask,
         )
+        fr_rotation, fr_translation, bar_value = self._sample_fr_rigid_transform(idxs_step, device, dtype)
+        rota_xt = torch.bmm(
+            so3_scale(rota_orig.unsqueeze(0), torch.sqrt(bar_value["alpha_bar_rota"])),
+            fr_rotation.unsqueeze(0),
+        )[0]
+        trsl_xt = torch.sqrt(bar_value["alpha_bar_trsl"]) * trsl_orig + fr_translation
+        noisy_ab_cord_tns = cord_tns_orig.clone()
+        noisy_ab_cord_tns[antibody_mask] = local_to_global_coords(ab_local_coords, rota_xt, trsl_xt)
+        noisy_ab_cord_tns = noisy_ab_cord_tns * cmsk_mat_orig.unsqueeze(-1).to(noisy_ab_cord_tns.dtype)
         
-        # antibody loops reconstruct noisy local coordinates
+        # stage-2 forward perturbation: loop-anchor local all-atom Gaussian perturbation
         clean_loop_local_coords, clean_anchor_rots, clean_anchor_trans = extract_per_loop_clean_local_coords(
-            noisy_cord_tns, # 直接在旋转平移的基础上抽取位置
+            noisy_ab_cord_tns,
             loop_global_res_indices,
             loop_true_len,
             loop_left_anchor_idx,
@@ -260,7 +303,7 @@ class Diffuser:
 
         noisy_loop_global_coords, noisy_anchor_rots, noisy_anchor_trans = rebuild_loops_from_local_coords(
             noisy_loop_local_coords,
-            noisy_cord_tns,
+            noisy_ab_cord_tns,
             loop_global_res_indices,
             loop_true_len,
             loop_left_anchor_idx,
@@ -269,7 +312,7 @@ class Diffuser:
         )
         cord_tns_noisy = merge_noisy_fr_and_loops(
             cord_tns_orig,
-            noisy_cord_tns,
+            noisy_ab_cord_tns,
             noisy_loop_global_coords,
             loop_global_res_indices,
             loop_true_len,
@@ -316,10 +359,17 @@ class Diffuser:
                 "clean_trans": clean_anchor_trans.detach().clone(),
                 "noisy_rot": noisy_anchor_rots.detach().clone(),
                 "noisy_trans": noisy_anchor_trans.detach().clone(),
-                "fr_rotation": fr_rotation.detach().clone(),
-                "fr_translation": fr_translation.detach().clone(),
+                "fr_rotation": fr_rotation.detach().clone(),  # rotation noise label (eps_r)
+                "fr_translation": fr_translation.detach().clone(),  # translation noise label (eps_t)
+                "rota_label": skew2vec(log_rmat(fr_rotation.unsqueeze(0))).squeeze(0).detach().clone(),  # legacy loss target
+                "rota_orig": rota_orig.detach().clone(),
+                "trsl_orig": trsl_orig.detach().clone(),
+                "rota_xt": rota_xt.detach().clone(),
+                "trsl_xt": trsl_xt.detach().clone(),
                 'bar_value': {k: v.detach().clone() for k, v in bar_value.items()},
             },
+            "antibody_local_coords": ab_local_coords.detach().clone(),
+            "antibody_mask": antibody_mask.detach().clone(),
             "occupancy_mode": self.occupancy_mode,
         }
         return prot_data_pert
