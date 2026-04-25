@@ -141,12 +141,12 @@ class IgGMPaperLoss:
     def _cdr_all_atom_mse(
         self,
         pred_aligned: torch.Tensor,
-        tgt: torch.Tensor,
-        atom_mask: torch.Tensor,
+        tgt_atom14: torch.Tensor,
+        atom14_mask: torch.Tensor,
         cdr_mask: torch.Tensor,
     ) -> torch.Tensor:
-        valid = cdr_mask.unsqueeze(-1) & atom_mask
-        diff = pred_aligned - tgt
+        valid = cdr_mask.unsqueeze(-1) & atom14_mask
+        diff = pred_aligned - tgt_atom14
         denom = valid.to(diff.dtype).sum().clamp_min(1.0)
         return ((diff ** 2) * valid.unsqueeze(-1).to(diff.dtype)).sum() / denom
     
@@ -217,6 +217,8 @@ class IgGMPaperLoss:
         tgt = self._ensure_batched(inputs["cord-o"], ndim_no_batch=3).to(device=pred.device, dtype=pred.dtype)
 
         atom_mask = inputs["cmsk-p"].to(device=pred.device).to(torch.bool)
+        atom14_tgt = self._ensure_batched(inputs.get("cords_atom14", inputs["cord-o"]), ndim_no_batch=3).to(device=pred.device, dtype=pred.dtype)
+        atom14_mask = self._ensure_batched(inputs.get("cmsk_atom14", inputs["cmsk-p"]), ndim_no_batch=2).to(device=pred.device).to(torch.bool)
         bsz, seq_len = pred.shape[:2]
 
         ab_mask = self._normalize_res_mask(inputs["pmsk-ligand"], batch_size=bsz, seq_len=seq_len).to(pred.device)
@@ -234,7 +236,7 @@ class IgGMPaperLoss:
         )
 
         loss_backbone = self._backbone_mse(inputs, outputs)
-        loss_cdr = self._cdr_all_atom_mse(pred_aligned, tgt, atom_mask, cdr_mask)
+        loss_cdr = self._cdr_all_atom_mse(pred_aligned, atom14_tgt, atom14_mask, cdr_mask)
         loss_vio = self._openfold_violation_loss(pred, atom_mask.to(pred.dtype), inputs["seq-o"], asym_id=inputs.get("asym-id", None)) # Structural violation terms are rigid-transform invariant, so aligned coords are safe here.
 
         total = (

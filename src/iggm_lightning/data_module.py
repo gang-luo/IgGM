@@ -26,6 +26,8 @@ from IgGM.protein.antibody_regions import (
 from IgGM.protein import crop_sequence_with_epitope
 from IgGM.protein.data_transform.processing_multimer import get_asym_ids
 
+from .atom14_sync import Atom14SeqSync
+
 
 @dataclass
 class SplitConfig:
@@ -53,6 +55,7 @@ class _ProteinSampleDataset(Dataset):
         self._chunk_size = None if chunk_size is None else max(1, int(chunk_size))
         self._max_antigen_len = None if max_antigen_len is None else max(1, int(max_antigen_len))
         self._warn_count = 0
+        self._atom14_sync = Atom14SeqSync()
 
 
     def _warn_once(self, msg: str) -> None:
@@ -169,12 +172,21 @@ class _ProteinSampleDataset(Dataset):
 
         complex_data = converted["complex"]
         mask_design = region_metadata["cdr_mask"].clone().to(torch.int8)
+        atom14_sup = self._atom14_sync.build_supervision(
+            seq=complex_data["seq"],
+            cord_n14_tf=complex_data["cord"],
+            cmsk_n14_tf=complex_data["cmsk"],
+            cdr_mask=region_metadata["cdr_mask"],
+        )
+
         payload = {
             "seq_true": complex_data["seq"],
             "prot_data_curr": {
                 "seq": complex_data["seq"],
                 "cord": complex_data["cord"],
                 "cmsk": complex_data["cmsk"],
+                "cords_atom14": atom14_sup["cords_atom14"],
+                "cmsk_atom14": atom14_sup["cmsk_atom14"],
                 "mask_design": mask_design,
                 "mask_ab": complex_data["mask_ab"],
                 "asym_id": complex_data["asym_id"],
@@ -304,6 +316,8 @@ class _ProteinSampleDataset(Dataset):
 
         # Shift complex-level coordinates
         prot["cord"] = cord - center.view(1, 1, 3)
+        if "cords_atom14" in prot and torch.is_tensor(prot["cords_atom14"]):
+            prot["cords_atom14"] = prot["cords_atom14"] - center.view(1, 1, 3)
 
         # Shift antigen coordinates if present
         if "a-cord" in prot and torch.is_tensor(prot["a-cord"]):

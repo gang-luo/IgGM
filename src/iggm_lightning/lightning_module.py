@@ -27,6 +27,7 @@ import torch.distributed as dist
 from IgGM.model import DesignModel
 from IgGM.protein.prot_constants import RESD_NAMES_1C
 from .losses import IgGMLossConfig,IgGMPaperLoss
+from .atom14_sync import Atom14SeqSync
 from .metrics import MetricConfig, StructureMetrics
 
 
@@ -120,6 +121,7 @@ class IgGMLightningModule(pl.LightningModule):
         self.loss_fn = IgGMPaperLoss(loss_cfg)
         self.metric_fn = StructureMetrics(metric_cfg)
         self.stage_cfg = stage_cfg or StageTrainingConfig()
+        self.atom14_sync = Atom14SeqSync()
         self._skip_optimizer_step_due_to_oom = False
 
         self.idx_save=0
@@ -278,8 +280,13 @@ class IgGMLightningModule(pl.LightningModule):
             tgt_cord = inputs["cord-o"]
             if tgt_cord.ndim == 4:
                 tgt_cord = tgt_cord[0]
-            pred_seq = self._decode_pred_seq(outputs["1d"][0])
             true_seq = payload.get("seq_true", inputs["seq-o"][0])
+            pred_seq = self.atom14_sync.decode_cdr_sequence(
+                seq_true=true_seq,
+                pred_cord_n14_tf=pred_cord,
+                pred_cmsk_n14_tf=inputs.get("cmsk_atom14", inputs["cmsk-p"])[0],
+                cdr_mask=inputs["cdr_mask"][0] if inputs["cdr_mask"].ndim == 2 else inputs["cdr_mask"],
+            )
             cdr_h3 = (payload.get("cdr_sequences") or {}).get("cdr_H3", [])
             metric_dict = self.metric_fn(
                 pred_cord,

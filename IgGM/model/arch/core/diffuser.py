@@ -325,6 +325,8 @@ class Diffuser:
             "seq-o": aa_seq_orig,
             "cord-o": cord_tns_orig,
             "cmsk-o": cmsk_mat_orig,
+            "cords_atom14": prot_data_orig.get("cords_atom14", cord_tns_orig).detach().clone(),
+            "cmsk_atom14": prot_data_orig.get("cmsk_atom14", cmsk_mat_orig).detach().clone(),
             "pmsk": pmsk_vec,
             "pmsk-ligand": prot_data_orig["mask_ab"],
 
