@@ -11,7 +11,7 @@ from IgGM.model.layer.embedding import SinusoidalPositionEmbedding, RelativePosi
 from IgGM.model.module.evoformer import EvoformerStackSS
 from IgGM.protein.prot_constants import RESD_NAMES_1C
 from ..base_model import BaseModel
-from ..core.module import PairPredictor, StructureModule
+from ..core.module import PairPredictor, StructureModule, structure_module_2604
 from ...build import MODEL_REGISTRY
 
 @MODEL_REGISTRY.register()
@@ -363,7 +363,7 @@ class DesignModel(BaseModel):
         )
 
         # AF2SMod
-        net['af2_smod'] = StructureModule(
+        net['af2_smod'] = structure_module_2604( # new structure_module
             n_lyrs=self.n_lyrs_3d,
             n_dims_sfea=self.n_dims_sfea,
             n_dims_pfea=self.n_dims_pfea,

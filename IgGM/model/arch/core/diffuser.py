@@ -98,71 +98,71 @@ class Diffuser:
             return prot_data_pert, idxs_step
         return prot_data_pert
 
-        # initialization
-        n_resds = len(prot_data_orig['seq'])
-        device = prot_data_orig['cord'].device
+        # # initialization
+        # n_resds = len(prot_data_orig['seq'])
+        # device = prot_data_orig['cord'].device
 
-        # obtain the original sequence & structure
-        aa_seq_orig = prot_data_orig['seq']
-        cord_tns_orig = prot_data_orig['cord']
-        cmsk_mat_orig = prot_data_orig['cmsk']
-        pmsk_vec = prot_data_orig['mask_design']
-        pmsk_vec_ligand = prot_data_orig['mask_ab']
+        # # obtain the original sequence & structure
+        # aa_seq_orig = prot_data_orig['seq']
+        # cord_tns_orig = prot_data_orig['cord']
+        # cmsk_mat_orig = prot_data_orig['cmsk']
+        # pmsk_vec = prot_data_orig['mask_design']
+        # pmsk_vec_ligand = prot_data_orig['mask_ab']
 
 
-        # convert the original sequence & structure into Prob-Trsl-Rota parameters
-        prob_tns_orig, trsl_tns_orig, rota_tns_orig, fmsk_mat_orig = \
-            ss2ptr([aa_seq_orig], cord_tns_orig, cmsk_mat_orig)
+        # # convert the original sequence & structure into Prob-Trsl-Rota parameters
+        # prob_tns_orig, trsl_tns_orig, rota_tns_orig, fmsk_mat_orig = \
+        #     ss2ptr([aa_seq_orig], cord_tns_orig, cmsk_mat_orig)
 
-        # perturb probabilistic distributions
-        trmat_ac = self.trmat_list_ac[idxs_step].to(device)
-        prob_tns_pert = torch.matmul(prob_tns_orig, trmat_ac)
-        prob_tns_pert = nn.functional.normalize(prob_tns_pert, p=1.0, dim=2)
-        prob_tns_pert = torch.where(
-            pmsk_vec.view(-1 ,n_resds, 1).to(torch.bool), prob_tns_pert, prob_tns_orig)
+        # # perturb probabilistic distributions
+        # trmat_ac = self.trmat_list_ac[idxs_step].to(device)
+        # prob_tns_pert = torch.matmul(prob_tns_orig, trmat_ac)
+        # prob_tns_pert = nn.functional.normalize(prob_tns_pert, p=1.0, dim=2)
+        # prob_tns_pert = torch.where(
+        #     pmsk_vec.view(-1 ,n_resds, 1).to(torch.bool), prob_tns_pert, prob_tns_orig)
 
-        # perturb translation vectors
-        alpha_bar = self.trsl_schedule.alphas_bar[idxs_step].to(device)
-        trsl_tns_nois = torch.randn_like(trsl_tns_orig[0])
-        trsl_tns_pert = torch.sqrt(alpha_bar) * trsl_tns_orig[0] + \
-                                  self.cord_scale * torch.sqrt(1.0 - alpha_bar) * trsl_tns_nois
-        trsl_tns_pert = torch.where(
-            pmsk_vec_ligand.view(n_resds, 1).to(torch.bool), trsl_tns_pert, trsl_tns_orig)
+        # # perturb translation vectors
+        # alpha_bar = self.trsl_schedule.alphas_bar[idxs_step].to(device)
+        # trsl_tns_nois = torch.randn_like(trsl_tns_orig[0])
+        # trsl_tns_pert = torch.sqrt(alpha_bar) * trsl_tns_orig[0] + \
+        #                           self.cord_scale * torch.sqrt(1.0 - alpha_bar) * trsl_tns_nois
+        # trsl_tns_pert = torch.where(
+        #     pmsk_vec_ligand.view(n_resds, 1).to(torch.bool), trsl_tns_pert, trsl_tns_orig)
 
-        # perturb rotation matrices
-        alpha_bar = self.rota_schedule.alphas_bar[idxs_step].to(device)
-        rota_buf = self.rota_buf_list_fwd[idxs_step].to(device)
-        idxs_buf = random.choices(range(self.rota_buf_size), k=n_resds)
-        rota_tns_nois = rota_buf[idxs_buf]
-        rota_tns_pert= torch.bmm(
-            so3_scale(rota_tns_orig[0], torch.sqrt(alpha_bar)), rota_tns_nois)
-        rota_tns_pert = torch.where(
-            pmsk_vec_ligand.view(n_resds, 1, 1).to(torch.bool), rota_tns_pert, rota_tns_orig)
+        # # perturb rotation matrices
+        # alpha_bar = self.rota_schedule.alphas_bar[idxs_step].to(device)
+        # rota_buf = self.rota_buf_list_fwd[idxs_step].to(device)
+        # idxs_buf = random.choices(range(self.rota_buf_size), k=n_resds)
+        # rota_tns_nois = rota_buf[idxs_buf]
+        # rota_tns_pert= torch.bmm(
+        #     so3_scale(rota_tns_orig[0], torch.sqrt(alpha_bar)), rota_tns_nois)
+        # rota_tns_pert = torch.where(
+        #     pmsk_vec_ligand.view(n_resds, 1, 1).to(torch.bool), rota_tns_pert, rota_tns_orig)
 
-        # convert Prob-Trsl-Rota parameters into amino-acid sequences & per-atom 3D coordinates
-        aa_seqs_pert, cord_tns_pert, cmsk_tns_pert = \
-            ptr2ss(prob_tns_pert, trsl_tns_pert, rota_tns_pert, fmsk_mat_orig, stoc_seq=True)
+        # # convert Prob-Trsl-Rota parameters into amino-acid sequences & per-atom 3D coordinates
+        # aa_seqs_pert, cord_tns_pert, cmsk_tns_pert = \
+        #     ptr2ss(prob_tns_pert, trsl_tns_pert, rota_tns_pert, fmsk_mat_orig, stoc_seq=True)
 
-        # pack perturbed amino-acid sequences & backbone structures into a dict
-        prot_data_pert = {
-            'step': [idxs_step],
-            'seq-o': aa_seq_orig,
-            'cord-o': cord_tns_orig,  # L x M x 3
-            'cmsk-o': cmsk_mat_orig,  # L x M
-            'pmsk': pmsk_vec,  # L
-            'pmsk-ligand': pmsk_vec_ligand,  # L
-            'seq-p': aa_seqs_pert,
-            'cord-p': cord_tns_pert,  # N x L x M x 3
-            'cmsk-p': cmsk_tns_pert,  # N x L x M
+        # # pack perturbed amino-acid sequences & backbone structures into a dict
+        # prot_data_pert = {
+        #     'step': [idxs_step],
+        #     'seq-o': aa_seq_orig,
+        #     'cord-o': cord_tns_orig,  # L x M x 3
+        #     'cmsk-o': cmsk_mat_orig,  # L x M
+        #     'pmsk': pmsk_vec,  # L
+        #     'pmsk-ligand': pmsk_vec_ligand,  # L
+        #     'seq-p': aa_seqs_pert,
+        #     'cord-p': cord_tns_pert,  # N x L x M x 3
+        #     'cmsk-p': cmsk_tns_pert,  # N x L x M
 
-            'asym-id': prot_data_orig['asym_id'].detach().clone(),
-            'a-cord': prot_data_orig['a-cord'].detach().clone(),
-            'a-cmsk': prot_data_orig['a-cmsk'].detach().clone(),
-        }
+        #     'asym-id': prot_data_orig['asym_id'].detach().clone(),
+        #     'a-cord': prot_data_orig['a-cord'].detach().clone(),
+        #     'a-cmsk': prot_data_orig['a-cmsk'].detach().clone(),
+        # }
 
-        if return_time_steps:
-            return prot_data_pert, idxs_step
-        return prot_data_pert
+        # if return_time_steps:
+        #     return prot_data_pert, idxs_step
+        # return prot_data_pert
 
     def _sample_probabilities(self, aa_seq_orig, pmsk_vec, idxs_step, device):
         """Sample noisy residue-type distributions; shared by legacy and fr_cdr_sync modes."""
@@ -182,7 +182,7 @@ class Diffuser:
         aa_seqs_pert = prob2seq(prob_tns_pert, stoc_seq=True)
         return prob_tns_orig, prob_tns_pert, aa_seqs_pert
 
-    def _sample_fr_rigid_transform(self, idxs_step, device, dtype):
+    def _sample_fr_rigid_transform(self, rota_orig, trsl_orig, idxs_step, device, dtype):
         """Sample one rigid transform noise for the antibody-level rigid params at timestep t."""
 
         alpha_bar_trsl = self.trsl_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
@@ -197,7 +197,13 @@ class Diffuser:
         fr_noise = rota_buf[random.randrange(self.rota_buf_size)].unsqueeze(0)
         fr_rotation = so3_scale(fr_noise, torch.sqrt(1.0 - alpha_bar_rota) * self.fr_noise_scale_rota)[0]
 
-        return fr_rotation, fr_translation, {"alpha_bar_trsl": alpha_bar_trsl, "alpha_bar_rota": alpha_bar_rota}
+        rota_xt = torch.bmm(
+            so3_scale(rota_orig.unsqueeze(0), torch.sqrt(alpha_bar_rota)),
+            fr_rotation.unsqueeze(0),
+        )[0]
+        trsl_xt = torch.sqrt(alpha_bar_trsl) * trsl_orig + fr_translation
+
+        return fr_rotation, fr_translation, rota_xt, trsl_xt
 
     @staticmethod
     def _build_antibody_rigid_params(cord_tns_orig, cmsk_mat_orig, antibody_mask):
@@ -262,21 +268,14 @@ class Diffuser:
         # 氨基酸序列扰动-仅在CDR区域进行扰动，以便于对齐后续的结构扰动结果
         _, _, aa_seqs_pert = self._sample_probabilities(aa_seq_orig, pmsk_vec, idxs_step, device)
 
-        # redefine the original FR coordinates and extract per-loop clean local coordinates
-        clean_fr_reference = extract_clean_fr_reference(cord_tns_orig, fr_mask, atom_mask=cmsk_mat_orig)
-
         # stage-1 forward perturbation: antibody-level rigid params q0 -> qt
         rota_orig, trsl_orig, ab_local_coords = self._build_antibody_rigid_params(
             cord_tns_orig,
             cmsk_mat_orig,
             antibody_mask,
         )
-        fr_rotation, fr_translation, bar_value = self._sample_fr_rigid_transform(idxs_step, device, dtype)
-        rota_xt = torch.bmm(
-            so3_scale(rota_orig.unsqueeze(0), torch.sqrt(bar_value["alpha_bar_rota"])),
-            fr_rotation.unsqueeze(0),
-        )[0]
-        trsl_xt = torch.sqrt(bar_value["alpha_bar_trsl"]) * trsl_orig + fr_translation
+        _, _ , rota_xt, trsl_xt = self._sample_fr_rigid_transform(rota_orig, trsl_orig, idxs_step, device, dtype)
+
         noisy_ab_cord_tns = cord_tns_orig.clone()
         noisy_ab_cord_tns[antibody_mask] = local_to_global_coords(ab_local_coords, rota_xt, trsl_xt)
         noisy_ab_cord_tns = noisy_ab_cord_tns * cmsk_mat_orig.unsqueeze(-1).to(noisy_ab_cord_tns.dtype)
@@ -350,23 +349,12 @@ class Diffuser:
             "loop_valid_res_mask": loop_valid_res_mask.detach().clone(),
             "loop_atom_valid_mask": loop_atom_valid_mask.detach().clone(),
             "loop_global_res_indices": loop_global_res_indices.detach().clone(),
-            "clean_fr_reference": clean_fr_reference.detach().clone(),
             "clean_loop_local_coords": clean_loop_local_coords.detach().clone(),
             "noisy_loop_local_coords": noisy_loop_local_coords.detach().clone(),
             "noisy_loop_global_coords": noisy_loop_global_coords.detach().clone(),
             "anchor_frame_meta": {
-                "clean_rot": clean_anchor_rots.detach().clone(),
-                "clean_trans": clean_anchor_trans.detach().clone(),
-                "noisy_rot": noisy_anchor_rots.detach().clone(),
-                "noisy_trans": noisy_anchor_trans.detach().clone(),
-                "fr_rotation": fr_rotation.detach().clone(),  # rotation noise label (eps_r)
-                "fr_translation": fr_translation.detach().clone(),  # translation noise label (eps_t)
-                "rota_label": skew2vec(log_rmat(fr_rotation.unsqueeze(0))).squeeze(0).detach().clone(),  # legacy loss target
                 "rota_orig": rota_orig.detach().clone(),
                 "trsl_orig": trsl_orig.detach().clone(),
-                "rota_xt": rota_xt.detach().clone(),
-                "trsl_xt": trsl_xt.detach().clone(),
-                'bar_value': {k: v.detach().clone() for k, v in bar_value.items()},
             },
             "antibody_local_coords": ab_local_coords.detach().clone(),
             "antibody_mask": antibody_mask.detach().clone(),

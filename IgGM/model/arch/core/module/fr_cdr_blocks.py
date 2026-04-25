@@ -25,9 +25,8 @@ class FRBranch(nn.Module):
         noise_info: dict,
 
     ) -> dict:
-        xt_rota = noise_info['anchor_frame_meta']['rota_xt']
-        xt_trsl = noise_info['anchor_frame_meta']['trsl_xt']
-        alpha_bar_dict = noise_info['anchor_frame_meta']['bar_value']
+        xt_rota = noise_info['anchor_frame_meta']['rota_orig']
+        xt_trsl = noise_info['anchor_frame_meta']['trsl_orig']
         ab_local_coords = noise_info['antibody_local_coords']
 
         fr_pred = self.fr_rigid(
@@ -38,16 +37,15 @@ class FRBranch(nn.Module):
             fr_base_coords_global=curr_coords,
             xt_rota=xt_rota,
             xt_trsl=xt_trsl,
-            alpha_bar_dict=alpha_bar_dict,
             antibody_local_coords=ab_local_coords,
         )
 
         return {
             'fr_pred': fr_pred,
             'fr_coords': fr_pred['updated_coords'],
-            'sfea_after_fr': sfea_tns + fr_pred['delta_sfea'],
-            'trsl': fr_pred['trsl'],
-            'rota': fr_pred['rota'],
+            'sfea_tns': sfea_tns + fr_pred['delta_sfea'],
+            'trsl': fr_pred['updated_trsl'],
+            'rota': fr_pred['updated_rota'],
         }
 
 
@@ -157,15 +155,15 @@ class CDRFusionBlock(nn.Module):
             loop_right_anchor_idx,
             loop_valid_res_mask,
         )
-        loop_sfea = self._gather_loop_features(sfea_tns, loop_global_res_indices, loop_valid_res_mask)
-        loop_encd = self._gather_loop_features(encd_tns, loop_global_res_indices, loop_valid_res_mask)
+        loop_sfea = self._gather_loop_features(sfea_tns, loop_global_res_indices, loop_valid_res_mask) # 提取loops部分的表征
+        loop_encd = self._gather_loop_features(encd_tns, loop_global_res_indices, loop_valid_res_mask) # 提取loops部分的encode feas
 
         cdr_pred = self.cdr_loop(
             loop_sfea=loop_sfea,
             loop_encd=loop_encd,
-            loop_xt_local=loop_xt_local,
+            loop_xt_local=loop_xt_local, # xt represent
             loop_type_ids=loop_type_ids,
-            local_position_ids=local_pos, # 这个是什么？
+            local_position_ids=local_pos, # cdrs的序列idx用于定义local坐标
             loop_valid_res_mask=loop_valid_res_mask,
             loop_atom_valid_mask=loop_atom_valid_mask,
         )

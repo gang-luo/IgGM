@@ -261,17 +261,17 @@ class IgGMLightningModule(pl.LightningModule):
         
         local_fail = False
         inputs = outputs = loss_dict = None
-        try:
-            inputs = self._build_inputs_cm(prot_data_curr, idx_step)
-            outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
-            loss_dict = self._compute_loss(inputs, outputs)
+    # try:
+        inputs = self._build_inputs_cm(prot_data_curr, idx_step)
+        outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
+        loss_dict = self._compute_loss(inputs, outputs)
 
-            self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=True, on_epoch=True)
-            self.log(f"{stage}/loss_backbone", loss_dict["loss_backbone"], prog_bar=False, on_step=True, on_epoch=True)
-            # self.log(f"{stage}/loss_cdr", loss_dict["loss_cdr"], prog_bar=False, on_step=True, on_epoch=True)
-            # self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=False, on_step=True, on_epoch=True)
-        except Exception as exc:
-            local_fail = True
+        self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=True, on_epoch=True)
+        # self.log(f"{stage}/loss_backbone", loss_dict["loss_backbone"], prog_bar=False, on_step=True, on_epoch=True)
+        # self.log(f"{stage}/loss_cdr", loss_dict["loss_cdr"], prog_bar=False, on_step=True, on_epoch=True)
+        # self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=False, on_step=True, on_epoch=True)
+    # except Exception as exc:
+    #     local_fail = True
 
         if stage in {"val", "test"}:
             pred_cord = outputs["3d"]["cord"][-1][0]

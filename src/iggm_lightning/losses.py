@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2024, Tencent Inc. All rights reserved.
 """Loss functions for legacy IgGM and FR/CDR sync training."""
 
 from __future__ import annotations
@@ -17,7 +15,7 @@ from openfold.utils.loss import find_structural_violations, violation_loss
 @dataclass
 class IgGMLossConfig:
     backbone_weight: float = 1.0
-    cdr_all_atom_weight: float = 1.0
+    cdr_all_atom_weight: float = 0.1 # 1.0
     vio_weight: float = 0.02
 
 
@@ -114,35 +112,31 @@ class IgGMPaperLoss:
             aligned[b] = torch.matmul(pred[b], rot.transpose(-1, -2)) + tr.view(1, 1, 3)
         return aligned
 
-    # def _backbone_mse(
-    #     self,
-    #     pred_aligned: torch.Tensor,
-    #     tgt: torch.Tensor,
-    #     atom_mask: torch.Tensor,
-    #     ab_mask: torch.Tensor,
-    # ) -> torch.Tensor:
-    #     bb_idx = [1]  # CA
-    #     # bb_idx = [1, 4]  # CA/CB
-    #     valid = ab_mask.unsqueeze(-1).expand(-1, -1, len(bb_idx)) & atom_mask[:, :, bb_idx]
-    #     diff = pred_aligned[:, :, bb_idx] - tgt[:, :, bb_idx]
-    #     denom = valid.to(diff.dtype).sum().clamp_min(1.0)
-    #     return ((diff ** 2) * valid.unsqueeze(-1).to(diff.dtype)).sum() / denom
-
 
     def _backbone_mse(
         self,
-        inputs: torch.Tensor,
-        outputs: torch.Tensor,
+        inputs: Dict[str, torch.Tensor],
+        outputs: Dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        
-        tgt_rota, tgt_trsl, = inputs['anchor_frame_meta']['rota_label'], inputs['anchor_frame_meta']['fr_translation']
-        pre_rota, pre_trsl = outputs['3d']['rota'][-1], outputs["3d"]["trsl"][-1]
-        eps_rota_pred = skew2vec(log_rmat(pre_rota))  # (B, 3) 切空间向量
-        
-        denom = F.mse_loss(eps_rota_pred, tgt_rota, reduction='mean')+ F.mse_loss(pre_trsl, tgt_trsl, reduction='mean')
-        
-        return denom
 
+        tgt_rota = inputs['anchor_frame_meta']['rota_orig']
+        tgt_trsl = inputs['anchor_frame_meta']['trsl_orig']
+
+        pre_rota = outputs['3d']['rota'][-1]
+        pre_trsl = outputs["3d"]["trsl"][-1]
+
+        tgt_rota = tgt_rota.to(device=pre_rota.device, dtype=pre_rota.dtype)
+        tgt_trsl = tgt_trsl.to(device=pre_trsl.device, dtype=pre_trsl.dtype)
+
+        # # Correct SO(3) tangent-vector error:
+        r_err = torch.matmul(tgt_rota, pre_rota.transpose(-1, -2)) # 对应去噪的旋转左乘
+        eps_rota = skew2vec(log_rmat(r_err))
+        loss_rota = (eps_rota ** 2).mean()
+
+        # Translation, only valid if both are absolute global translations
+        loss_trsl = F.mse_loss(pre_trsl, tgt_trsl, reduction='mean')
+
+        return loss_rota + loss_trsl
 
     def _cdr_all_atom_mse(
         self,
@@ -155,6 +149,7 @@ class IgGMPaperLoss:
         diff = pred_aligned - tgt
         denom = valid.to(diff.dtype).sum().clamp_min(1.0)
         return ((diff ** 2) * valid.unsqueeze(-1).to(diff.dtype)).sum() / denom
+    
 
     def _seq_to_aatype(self, seq_obj, bsz: int, seq_len: int, device: torch.device) -> torch.Tensor:
         aa_to_idx = {aa: i for i, aa in enumerate(RESD_NAMES_1C)}
@@ -227,31 +222,26 @@ class IgGMPaperLoss:
         ab_mask = self._normalize_res_mask(inputs["pmsk-ligand"], batch_size=bsz, seq_len=seq_len).to(pred.device)
         cdr_mask = self._normalize_res_mask(inputs["cdr_mask"], batch_size=bsz, seq_len=seq_len).to(pred.device)
 
-        # tgt_aligned = self._align_pred_to_target( # 把tgt对齐到pred上便于梯度传播，计算loss时用pred_aligned和tgt比较
-        #     pred=tgt, 
-        #     tgt=pred,
-        #     atom_mask=atom_mask,
-        #     align_res_mask=ab_mask,
-        #     align_atom_idx=[1],  # CA
-        #     # align_atom_idx=[1, 4],  # CA/CB
-        #     asym_id = inputs["asym-id"],
-        #     align_mode = "antibody",
-        # )
+        fr_mask = ab_mask & (~cdr_mask)
+        pred_aligned = self._align_pred_to_target( # 把pred对齐到tgt上，避免造成额外的平移和旋转结果。
+            pred=pred, 
+            tgt=tgt,
+            atom_mask=atom_mask,
+            align_res_mask=fr_mask,
+            align_atom_idx=[0,1,2],  # N, CA, C
+            asym_id = inputs["asym-id"],
+            align_mode = "antibody",
+        )
 
-        # loss_backbone = self._backbone_mse(pred, tgt, atom_mask, ab_mask)
         loss_backbone = self._backbone_mse(inputs, outputs)
-        # loss_cdr = self._cdr_all_atom_mse(pred, tgt_aligned, atom_mask, cdr_mask)
-        
-        # # Structural violation terms are rigid-transform invariant, so aligned coords are safe here.
-        # loss_vio = self._openfold_violation_loss(pred, atom_mask.to(pred.dtype), inputs["seq-o"], asym_id=inputs.get("asym-id", None))
+        loss_cdr = self._cdr_all_atom_mse(pred_aligned, tgt, atom_mask, cdr_mask)
+        loss_vio = self._openfold_violation_loss(pred, atom_mask.to(pred.dtype), inputs["seq-o"], asym_id=inputs.get("asym-id", None)) # Structural violation terms are rigid-transform invariant, so aligned coords are safe here.
 
         total = (
-            # self.cfg.cdr_all_atom_weight * loss_cdr
-            self.cfg.backbone_weight * loss_backbone
-            # + self.cfg.cdr_all_atom_weight * loss_cdr
-            # + self.cfg.vio_weight * loss_vio
+            self.cfg.backbone_weight * loss_backbone 
+            + self.cfg.cdr_all_atom_weight * loss_cdr
+            + self.cfg.vio_weight * loss_vio
         )
-        
         
         torch.save({
             'perturb': inputs['cord-p'],
@@ -262,7 +252,7 @@ class IgGMPaperLoss:
 
         return {
             "loss": total,
-            # "loss_viol": loss_vio,
+            "loss_viol": loss_vio,
             "loss_backbone": loss_backbone,
-            # "loss_cdr": loss_cdr,
+            "loss_cdr": loss_cdr,
         }
