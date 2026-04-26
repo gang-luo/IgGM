@@ -1,10 +1,9 @@
 """Atom14 virtual-atom encoding/decoding utilities for CDR sequence synchronization.
 
-BoltzGen-style residue codebook is used:
-- sidechain slots (atom14 positions 5..14) are split into
-  (a) virtual markers superposed onto backbone N/O atoms,
-  (b) remaining physical sidechain atoms.
-- residue type is decoded from marker counts (#N, #O) using the paper codebook.
+Implementation note for this IgGM codebase:
+- tensors are consumed in the repository's native n14-tf layout (variable real-atom prefix + padded tail),
+  so virtual markers are written directly into padded tail slots;
+- BoltzGen residue codebook is applied as (#N, #O) marker counts.
 """
 
 from __future__ import annotations
@@ -14,8 +13,7 @@ from typing import Dict, List, Tuple
 
 import torch
 
-from IgGM.protein import AtomMapper
-from IgGM.protein.prot_constants import RESD_MAP_1TO3, RESD_NAMES_1C, restype_name_to_atom14_names
+from IgGM.protein.prot_constants import ATOM_NAMES_PER_RESD, RESD_MAP_1TO3, RESD_NAMES_1C
 
 
 @dataclass(frozen=True)
@@ -33,58 +31,64 @@ class BoltzResidueCode:
 class Atom14SeqSync:
     """Build atom14 supervision and decode CDR sequence from BoltzGen marker counts."""
 
-    # atom14(AF) indices
-    _N_IDX = 0
-    _CA_IDX = 1
-    _C_IDX = 2
-    _O_IDX = 3
-    _SIDECHAIN_IDXS = tuple(range(4, 14))
-
-    # BoltzGen Figure codebook (#N, #O) for 20 AA types.
     _BOLTZ_CODEBOOK: Dict[str, BoltzResidueCode] = {
-        "G": BoltzResidueCode(0, 10),
-        "A": BoltzResidueCode(0, 9),
-        "C": BoltzResidueCode(0, 8),
-        "S": BoltzResidueCode(8, 0),
-        "P": BoltzResidueCode(0, 7),
-        "T": BoltzResidueCode(3, 4),
-        "V": BoltzResidueCode(7, 0),
-        "I": BoltzResidueCode(0, 6),
-        "N": BoltzResidueCode(1, 5),
-        "D": BoltzResidueCode(2, 4),
-        "L": BoltzResidueCode(4, 2),
-        "M": BoltzResidueCode(6, 0),
-        "Q": BoltzResidueCode(0, 5),
-        "E": BoltzResidueCode(2, 3),
-        "K": BoltzResidueCode(5, 0),
-        "H": BoltzResidueCode(0, 4),
-        "F": BoltzResidueCode(0, 3),
-        "R": BoltzResidueCode(3, 0),
-        "Y": BoltzResidueCode(0, 2),
-        "W": BoltzResidueCode(0, 0),
+        "G": BoltzResidueCode(0, 10), "A": BoltzResidueCode(0, 9), "C": BoltzResidueCode(0, 8),
+        "S": BoltzResidueCode(8, 0),  "P": BoltzResidueCode(0, 7), "T": BoltzResidueCode(3, 4),
+        "V": BoltzResidueCode(7, 0),  "I": BoltzResidueCode(0, 6), "N": BoltzResidueCode(1, 5),
+        "D": BoltzResidueCode(2, 4),  "L": BoltzResidueCode(4, 2), "M": BoltzResidueCode(6, 0),
+        "Q": BoltzResidueCode(0, 5),  "E": BoltzResidueCode(2, 3), "K": BoltzResidueCode(5, 0),
+        "H": BoltzResidueCode(0, 4),  "F": BoltzResidueCode(0, 3), "R": BoltzResidueCode(3, 0),
+        "Y": BoltzResidueCode(0, 2),  "W": BoltzResidueCode(0, 0),
     }
 
     def __init__(self, decode_threshold: float = 0.5) -> None:
-        self.mapper = AtomMapper()
         self.decode_threshold = float(decode_threshold)
-        self._real_mask_af = self._build_real_atom_masks_af()
+        self._res_meta = self._build_residue_meta()
 
-        # sanity check: ensure marker-counts match canonical atom14 missing slots
+    @staticmethod
+    def _build_residue_meta() -> Dict[str, Dict[str, int]]:
+        """Build per-residue metadata in native n14-tf layout."""
+        out: Dict[str, Dict[str, int]] = {}
         for aa in RESD_NAMES_1C:
-            missing = int((~self._real_mask_af[aa]).sum().item())
-            expected = self._BOLTZ_CODEBOOK[aa].n_markers
+            res3 = RESD_MAP_1TO3[aa]
+            atom_names = list(ATOM_NAMES_PER_RESD[res3])
+            n_real = len(atom_names)
+            if n_real > 14:
+                raise ValueError(f"Unexpected >14 atoms for {aa}/{res3}")
+            if "N" not in atom_names or "O" not in atom_names:
+                raise ValueError(f"Backbone N/O missing for {aa}/{res3}")
+            n_idx = atom_names.index("N")
+            o_idx = atom_names.index("O")
+            missing = 14 - n_real
+            expected = Atom14SeqSync._BOLTZ_CODEBOOK[aa].n_markers
             if missing != expected:
                 raise ValueError(
                     f"Boltz codebook mismatch for {aa}: missing={missing}, codebook_markers={expected}"
                 )
+            out[aa] = {"n_idx": n_idx, "o_idx": o_idx, "n_real": n_real}
+        return out
 
     @staticmethod
-    def _build_real_atom_masks_af() -> Dict[str, torch.Tensor]:
-        out: Dict[str, torch.Tensor] = {}
-        for aa in RESD_NAMES_1C:
-            res3 = RESD_MAP_1TO3[aa]
-            out[aa] = torch.tensor([name != "" for name in restype_name_to_atom14_names[res3]], dtype=torch.bool)
-        return out
+    def _ensure_l14x3(t: torch.Tensor) -> torch.Tensor:
+        """Normalize coordinates to [L,14,3]."""
+        if t.ndim == 4:
+            if t.shape[0] != 1:
+                raise ValueError(f"Expected batch size 1 for coords, got {tuple(t.shape)}")
+            t = t[0]
+        if t.ndim != 3 or t.shape[1] != 14 or t.shape[2] != 3:
+            raise ValueError(f"Expected [L,14,3], got {tuple(t.shape)}")
+        return t
+
+    @staticmethod
+    def _ensure_l14(t: torch.Tensor) -> torch.Tensor:
+        """Normalize mask to [L,14]."""
+        if t.ndim == 3:
+            if t.shape[0] != 1:
+                raise ValueError(f"Expected batch size 1 for mask, got {tuple(t.shape)}")
+            t = t[0]
+        if t.ndim != 2 or t.shape[1] != 14:
+            raise ValueError(f"Expected [L,14], got {tuple(t.shape)}")
+        return t
 
     def build_supervision(
         self,
@@ -93,54 +97,49 @@ class Atom14SeqSync:
         cmsk_n14_tf: torch.Tensor,
         cdr_mask: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """Create atom14 target where CDR missing slots are markers superposed to N/O."""
+        """Create atom14 target where CDR padded slots are markers superposed to N/O."""
+        cord = self._ensure_l14x3(cord_n14_tf).clone()
+        cmsk = self._ensure_l14(cmsk_n14_tf).clone().to(torch.bool)
+        cdr_mask = cdr_mask.to(torch.bool).view(-1)
 
-        if cord_n14_tf.ndim != 3 or cord_n14_tf.shape[-2] != 14:
-            raise ValueError(f"Expected [L,14,3] coordinates, got {tuple(cord_n14_tf.shape)}")
-
-        cord_af = self.mapper.run(seq, cord_n14_tf, frmt_src="n14-tf", frmt_dst="n14-af")
-        cmsk_af = self.mapper.run(seq, cmsk_n14_tf, frmt_src="n14-tf", frmt_dst="n14-af")
-
-        target_af = cord_af.clone()
-        mask_af = cmsk_af.clone().to(torch.bool)
-        cdr_mask = cdr_mask.to(torch.bool)
+        if len(seq) != cord.shape[0]:
+            raise ValueError(f"Sequence/coord length mismatch: len(seq)={len(seq)} vs L={cord.shape[0]}")
 
         for ridx, aa in enumerate(seq):
-            if ridx >= cdr_mask.numel() or not bool(cdr_mask[ridx]) or aa not in self._BOLTZ_CODEBOOK:
+            if ridx >= cdr_mask.numel() or not bool(cdr_mask[ridx]) or aa not in self._res_meta:
                 continue
 
-            missing_slots = torch.nonzero(~self._real_mask_af[aa], as_tuple=False).view(-1)
-            if missing_slots.numel() == 0:
-                continue
-
+            meta = self._res_meta[aa]
+            n_idx, o_idx, n_real = meta["n_idx"], meta["o_idx"], meta["n_real"]
             code = self._BOLTZ_CODEBOOK[aa]
-            anchors = [self._N_IDX] * code.n_on_n + [self._O_IDX] * code.n_on_o
-            if len(anchors) != int(missing_slots.numel()):
-                raise RuntimeError(f"Marker count mismatch for residue {aa}")
+            missing_slots = list(range(n_real, 14))
+            anchors = [n_idx] * code.n_on_n + [o_idx] * code.n_on_o
 
-            for slot, anchor_idx in zip(missing_slots.tolist(), anchors):
-                target_af[ridx, slot] = target_af[ridx, anchor_idx]
-                mask_af[ridx, slot] = True
+            if len(missing_slots) != len(anchors):
+                raise RuntimeError(f"Marker count mismatch for residue {aa} at idx={ridx}")
 
-        target_tf = self.mapper.run(seq, target_af, frmt_src="n14-af", frmt_dst="n14-tf")
-        mask_tf = self.mapper.run(seq, mask_af.to(cmsk_n14_tf.dtype), frmt_src="n14-af", frmt_dst="n14-tf")
+            for slot, anchor_idx in zip(missing_slots, anchors):
+                cord[ridx, slot] = cord[ridx, anchor_idx]
+                cmsk[ridx, slot] = True
+
         return {
-            "cords_atom14": target_tf,
-            "cmsk_atom14": mask_tf.to(cmsk_n14_tf.dtype),
+            "cords_atom14": cord,
+            "cmsk_atom14": cmsk.to(dtype=cmsk_n14_tf.dtype),
         }
 
-    def _count_no_markers(self, residue_atoms_af: torch.Tensor, residue_mask_af: torch.Tensor) -> Tuple[int, int]:
-        """Count sidechain-slot atoms superposed within threshold to backbone N or O."""
+    def _count_no_markers(self, aa: str, residue_atoms: torch.Tensor, residue_mask: torch.Tensor) -> Tuple[int, int]:
+        """Count marker atoms in padded slots that are superposed within threshold to N or O."""
+        meta = self._res_meta[aa]
+        n_idx, o_idx, n_real = meta["n_idx"], meta["o_idx"], meta["n_real"]
 
-        n_pos = residue_atoms_af[self._N_IDX]
-        o_pos = residue_atoms_af[self._O_IDX]
+        n_pos = residue_atoms[n_idx]
+        o_pos = residue_atoms[o_idx]
+        n_count, o_count = 0, 0
 
-        n_count = 0
-        o_count = 0
-        for atom_idx in self._SIDECHAIN_IDXS:
-            if not bool(residue_mask_af[atom_idx]):
+        for atom_idx in range(n_real, 14):
+            if not bool(residue_mask[atom_idx]):
                 continue
-            atom = residue_atoms_af[atom_idx]
+            atom = residue_atoms[atom_idx]
             d_n = torch.norm(atom - n_pos)
             d_o = torch.norm(atom - o_pos)
             if float(min(d_n.item(), d_o.item())) > self.decode_threshold:
@@ -159,24 +158,27 @@ class Atom14SeqSync:
         cdr_mask: torch.Tensor,
     ) -> str:
         """Decode CDR residues by BoltzGen (#N,#O) marker counting; keep FR as native sequence."""
+        cord = self._ensure_l14x3(pred_cord_n14_tf)
+        cmsk = self._ensure_l14(pred_cmsk_n14_tf).to(torch.bool)
+        cdr_mask = cdr_mask.to(torch.bool).view(-1)
 
-        cord_af = self.mapper.run(seq_true, pred_cord_n14_tf, frmt_src="n14-tf", frmt_dst="n14-af")
-        cmsk_af = self.mapper.run(seq_true, pred_cmsk_n14_tf, frmt_src="n14-tf", frmt_dst="n14-af").to(torch.bool)
-        cdr_mask = cdr_mask.to(torch.bool)
+        if len(seq_true) != cord.shape[0]:
+            raise ValueError(f"Sequence/coord length mismatch: len(seq)={len(seq_true)} vs L={cord.shape[0]}")
 
         aa_list: List[str] = list(self._BOLTZ_CODEBOOK.keys())
         code_mat = torch.tensor(
             [[self._BOLTZ_CODEBOOK[aa].n_on_n, self._BOLTZ_CODEBOOK[aa].n_on_o] for aa in aa_list],
-            dtype=cord_af.dtype,
-            device=cord_af.device,
+            dtype=cord.dtype,
+            device=cord.device,
         )
 
         seq_chars = list(seq_true)
         for ridx in range(len(seq_chars)):
             if ridx >= cdr_mask.numel() or not bool(cdr_mask[ridx]):
                 continue
-            obs_n, obs_o = self._count_no_markers(cord_af[ridx], cmsk_af[ridx])
-            obs = torch.tensor([obs_n, obs_o], dtype=cord_af.dtype, device=cord_af.device)
+
+            obs_n, obs_o = self._count_no_markers(seq_true[ridx], cord[ridx], cmsk[ridx])
+            obs = torch.tensor([obs_n, obs_o], dtype=cord.dtype, device=cord.device)
             dist = torch.sum(torch.abs(code_mat - obs.view(1, 2)), dim=-1)
             seq_chars[ridx] = aa_list[int(torch.argmin(dist).item())]
 

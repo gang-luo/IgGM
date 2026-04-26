@@ -284,8 +284,8 @@ class IgGMLightningModule(pl.LightningModule):
             pred_seq = self.atom14_sync.decode_cdr_sequence(
                 seq_true=true_seq,
                 pred_cord_n14_tf=pred_cord,
-                pred_cmsk_n14_tf=inputs.get("cmsk_atom14", inputs["cmsk-p"])[0],
-                cdr_mask=inputs["cdr_mask"][0] if inputs["cdr_mask"].ndim == 2 else inputs["cdr_mask"],
+                pred_cmsk_n14_tf=inputs.get("cmsk_atom14", inputs["cmsk-p"]),
+                cdr_mask=inputs["cdr_mask"],
             )
             cdr_h3 = (payload.get("cdr_sequences") or {}).get("cdr_H3", [])
             metric_dict = self.metric_fn(
