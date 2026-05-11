@@ -304,8 +304,8 @@ def main() -> None:
         log_every_n_steps=args.log_every_n_steps,
         accumulate_grad_batches=max(1, args.accumulate_grad_batches),
         num_sanity_val_steps=max(0, args.num_sanity_val_steps),
-        check_val_every_n_epoch=50,
-        # detect_anomaly=True,
+        # check_val_every_n_epoch=10,
+        # # detect_anomaly=True,
     )
 
     last_ckpt = ckpt_dir / "last.ckpt"

@@ -385,7 +385,7 @@ class IgGMPaperLoss:
         # cdr loss
         total = (
             self.cfg.backbone_weight * loss_backbone
-            + weight_factor * loss_cdr
+            + weight_factor * (loss_cdr + loss_bond) 
             + self.cfg.smooth_lddt_weight * loss_smooth_lddt
         )
 
@@ -408,4 +408,5 @@ class IgGMPaperLoss:
             "loss_cdr": loss_cdr,
             "loss_smooth_lddt": loss_smooth_lddt,
             "loss_bond": loss_bond,
+            "weight_factor": weight_factor,
         }

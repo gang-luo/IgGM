@@ -273,6 +273,7 @@ class IgGMLightningModule(pl.LightningModule):
         self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=True, on_step=True, on_epoch=True)
         self.log(f"{stage}/loss_smooth_lddt", loss_dict["loss_smooth_lddt"], prog_bar=True, on_step=True, on_epoch=True)
         self.log(f"{stage}/loss_bond", loss_dict["loss_bond"], prog_bar=True, on_step=True, on_epoch=True)
+        self.log(f"{stage}/weight_factor", loss_dict["weight_factor"], prog_bar=True, on_step=True, on_epoch=True)
         
     # except Exception as exc:
     #     local_fail = True
