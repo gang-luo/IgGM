@@ -250,7 +250,8 @@ def write_processed_pdb(entry: Dict[str, object], pdb_dir: Path) -> Path:
         wrote_any = False
 
         for line in lines:
-            if not (line.startswith("ATOM") or line.startswith("HETATM")):
+            if not line.startswith("ATOM"):
+            # if not (line.startswith("ATOM") or line.startswith("HETATM")):
                 continue
             if len(line) < 27:
                 continue

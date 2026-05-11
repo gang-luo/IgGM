@@ -166,7 +166,6 @@ class Diffuser:
 
     def _sample_probabilities(self, aa_seq_orig, pmsk_vec, idxs_step, device):
         """Sample noisy residue-type distributions; shared by legacy and fr_cdr_sync modes."""
-
         trmat_ac = self.trmat_list_ac[idxs_step].to(device)
         prob_tns_orig = nn.functional.one_hot(
             torch.tensor([self.resd_names.index(x) for x in aa_seq_orig], dtype=torch.long, device=device),
@@ -214,7 +213,7 @@ class Diffuser:
         atom_mask_ab = cmsk_mat_orig[ab_mask].to(cord_tns_orig.dtype)  # [N_ab, A]
 
         ca_mask = atom_mask_ab[:, 1]
-        ca = coords_ab[:, 1]
+        ca = coords_ab[:, 1] # using the new 14-atom scheme where N=0, CA=1, C=2, O=3
         if ca_mask.sum() > 0:
             trsl_orig = (ca * ca_mask.unsqueeze(-1)).sum(dim=0) / ca_mask.sum().clamp_min(1.0)
         else:
@@ -247,8 +246,10 @@ class Diffuser:
         dtype = prot_data_orig["cord"].dtype
 
         aa_seq_orig = prot_data_orig["seq"]
-        cord_tns_orig = prot_data_orig["cord"]
-        cmsk_mat_orig = prot_data_orig["cmsk"]
+        cord_tns_orig = prot_data_orig["cords_atom14"]
+        cmsk_mat_orig = prot_data_orig["cmsk_atom14"]
+        # cord_tns_orig = prot_data_orig["cord"]
+        # cmsk_mat_orig = prot_data_orig["cmsk"]
         pmsk_vec = prot_data_orig["mask_design"]
         antibody_mask = prot_data_orig["mask_ab"].to(device=device, dtype=torch.bool)
 
@@ -263,8 +264,10 @@ class Diffuser:
         loop_occ_target = prot_data_orig["loop_occ_target"].to(device=device, dtype=torch.bool)
         loop_valid_res_mask = prot_data_orig["loop_valid_res_mask"].to(device=device, dtype=torch.bool)
         loop_atom_valid_mask = prot_data_orig["loop_atom_valid_mask"].to(device=device, dtype=torch.bool)
+        loop_atom_valid_mask = loop_valid_res_mask.unsqueeze(-1).expand_as(loop_atom_valid_mask) # replace for the atom14 mask for add noise to all loops atoms
         loop_global_res_indices = prot_data_orig["loop_global_res_indices"].to(device=device)
-
+        # 检查一下这个loops的mask是否正确
+        
         # 氨基酸序列扰动-仅在CDR区域进行扰动，以便于对齐后续的结构扰动结果
         _, _, aa_seqs_pert = self._sample_probabilities(aa_seq_orig, pmsk_vec, idxs_step, device)
 
@@ -318,13 +321,13 @@ class Diffuser:
             fr_mask,
             loop_atom_valid_mask,
         )
-        cmsk_tns_pert = cmsk_mat_orig.unsqueeze(0)  # 结构扰动不改变原子mask
 
         prot_data_pert = {
             "step": [idxs_step],
             "seq-o": aa_seq_orig,
             "cord-o": cord_tns_orig,
             "cmsk-o": cmsk_mat_orig,
+            "cmsk_realatom": prot_data_orig["cmsk"].detach().clone(),
             "cords_atom14": prot_data_orig.get("cords_atom14", cord_tns_orig).detach().clone(),
             "cmsk_atom14": prot_data_orig.get("cmsk_atom14", cmsk_mat_orig).detach().clone(),
             "pmsk": pmsk_vec,
@@ -332,7 +335,7 @@ class Diffuser:
 
             "seq-p": aa_seqs_pert,
             "cord-p": cord_tns_noisy.unsqueeze(0), # 
-            "cmsk-p": cmsk_tns_pert,
+            "cmsk-p": cmsk_mat_orig.unsqueeze(0),  # 结构扰动不改变原子mask
 
             "asym-id": prot_data_orig["asym_id"].detach().clone(),
             "a-cord": prot_data_orig["a-cord"].detach().clone(),
@@ -361,7 +364,12 @@ class Diffuser:
             "antibody_local_coords": ab_local_coords.detach().clone(),
             "antibody_mask": antibody_mask.detach().clone(),
             "occupancy_mode": self.occupancy_mode,
+            "sigama_t": {
+                'alpha_bar': alpha_bar_local.detach().clone(),
+                "cord_scale": self.cord_scale,
+            },
         }
+
         return prot_data_pert
 
     def __build_trmat_list(self):

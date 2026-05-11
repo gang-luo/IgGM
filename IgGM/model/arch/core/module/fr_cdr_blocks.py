@@ -193,7 +193,7 @@ class CDRFusionBlock(nn.Module):
             'pred_loop_global': pred_loop_global,
             'loop_frame_rota': loop_frame_rota,
             'loop_frame_trsl': loop_frame_trsl,
-            'loop_xt_new_local': cdr_pred['pred_x0_local'].detach(),
+            'loop_xt_new_local': cdr_pred['pred_x0_local'],
             'sfea_after_cdr': sfea_after_cdr,
             'merged_coords': merged_coords,
         }

@@ -124,8 +124,6 @@ class IgGMLightningModule(pl.LightningModule):
         self.atom14_sync = Atom14SeqSync()
         self._skip_optimizer_step_due_to_oom = False
 
-        self.idx_save=0
-
     @staticmethod
     def _ddp_any_true(flag: bool) -> bool:
         """Synchronize boolean failure flags across ranks for DDP-safe fallbacks."""
@@ -263,15 +261,19 @@ class IgGMLightningModule(pl.LightningModule):
         
         local_fail = False
         inputs = outputs = loss_dict = None
+
     # try:
         inputs = self._build_inputs_cm(prot_data_curr, idx_step)
         outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
         loss_dict = self._compute_loss(inputs, outputs)
 
         self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=True, on_epoch=True)
-        # self.log(f"{stage}/loss_backbone", loss_dict["loss_backbone"], prog_bar=False, on_step=True, on_epoch=True)
-        # self.log(f"{stage}/loss_cdr", loss_dict["loss_cdr"], prog_bar=False, on_step=True, on_epoch=True)
-        # self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=False, on_step=True, on_epoch=True)
+        self.log(f"{stage}/loss_backbone", loss_dict["loss_backbone"], prog_bar=True, on_step=True, on_epoch=True)
+        self.log(f"{stage}/loss_cdr", loss_dict["loss_cdr"], prog_bar=True, on_step=True, on_epoch=True)
+        self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=True, on_step=True, on_epoch=True)
+        self.log(f"{stage}/loss_smooth_lddt", loss_dict["loss_smooth_lddt"], prog_bar=True, on_step=True, on_epoch=True)
+        self.log(f"{stage}/loss_bond", loss_dict["loss_bond"], prog_bar=True, on_step=True, on_epoch=True)
+        
     # except Exception as exc:
     #     local_fail = True
 
@@ -300,15 +302,6 @@ class IgGMLightningModule(pl.LightningModule):
             )
             for k, v in metric_dict.items():
                 self.log(f"{stage}/{k}", v, prog_bar=(k == "tm_score"), on_step=False, on_epoch=True)
-            
-        
-            # torch.save({
-            #     'perturb': inputs['cord-p'],
-            #     'pre': outputs["3d"]["cord"][-1],
-            #     'clean': inputs["cord-o"]
-            # }, f'/root/private_data/luog/codex/IgGM/see/seefile/val_{self.idx_save}.pt')
-            self.idx_save += 1
-
 
         global_fail = self._ddp_any_true(local_fail)
         loss_flag = loss_dict["loss"] if loss_dict is not None else None

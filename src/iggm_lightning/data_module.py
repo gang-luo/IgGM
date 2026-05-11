@@ -444,6 +444,8 @@ class ProcessedSabdabDataModule(pl.LightningDataModule):
         self.val_ds: Optional[Dataset] = None
         self.test_ds: Optional[Dataset] = None
         self._train_sampler: Optional[Sampler[int]] = None
+        self.is_persistent = self.num_workers > 0
+
 
     def _resolve_samples_dir(self, meta: Dict[str, object]) -> Optional[Path]:
         if self.samples_dir is not None:
@@ -575,12 +577,20 @@ class ProcessedSabdabDataModule(pl.LightningDataModule):
 
     def train_dataloader(self):
         if self._train_sampler is not None:
-            return DataLoader(self.train_ds, batch_size=1, shuffle=False, sampler=self._train_sampler, num_workers=self.num_workers, collate_fn=_batch_one)
-        return DataLoader(self.train_ds, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, collate_fn=_batch_one)
+            return DataLoader(self.train_ds, batch_size=1, shuffle=False, 
+                              sampler=self._train_sampler, num_workers=self.num_workers, persistent_workers=self.is_persistent, 
+                              collate_fn=_batch_one)
+        return DataLoader(self.train_ds, batch_size=self.batch_size, shuffle=True, persistent_workers=self.is_persistent, 
+                          num_workers=self.num_workers, 
+                          collate_fn=_batch_one)
     
     def val_dataloader(self):
-        return DataLoader(self.val_ds, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, collate_fn=_batch_one)
+        return DataLoader(self.val_ds, batch_size=self.batch_size, shuffle=False, 
+                          num_workers=self.num_workers, persistent_workers=self.is_persistent, 
+                          collate_fn=_batch_one)
 
     def test_dataloader(self):
-        return DataLoader(self.test_ds,batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, collate_fn=_batch_one)
+        return DataLoader(self.test_ds, batch_size=self.batch_size, shuffle=False, 
+                          num_workers=self.num_workers, persistent_workers=self.is_persistent, 
+                          collate_fn=_batch_one)
 

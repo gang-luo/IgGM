@@ -71,6 +71,7 @@ def convert_entry_to_sample(
     heavy = load_chain_structure(pdb_path, str(heavy_id))
     light = load_chain_structure(pdb_path, str(light_id)) if light_id else None
     antigen = load_chain_structure(pdb_path, str(antigen_id))
+    # sequence info extrct, but may has error for cords.shape not match seq-length, we using try-except to drop the error samples durining training
 
     if max_antigen_length is not None and len(antigen["seq"]) > max_antigen_length:
         return None

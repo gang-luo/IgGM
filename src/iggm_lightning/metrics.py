@@ -268,8 +268,16 @@ class StructureMetrics:
 
         for loop_name in self.LOOP_NAMES:
             idxs = [i for i in loop_map.get(loop_name, []) if 0 <= i < pred_cord.shape[0] and i < tgt_cord.shape[0]]
+            # if not idxs:
+            #     loop_metrics[f"rmsd_{loop_name}"] = torch.tensor(float("nan"), dtype=torch.float32, device=pred_ca.device)
+            #     loop_metrics[f"aar_{loop_name}"] = torch.tensor(float("nan"), dtype=torch.float32, device=pred_ca.device)
+            #     continue
+
             if not idxs:
-                loop_metrics[f"rmsd_{loop_name}"] = torch.tensor(float("nan"), dtype=torch.float32, device=pred_ca.device)
+                if loop_name in ("L1", "L2", "L3"):
+                    loop_metrics[f"rmsd_{loop_name}"] = torch.tensor(0.0, dtype=torch.float32, device=pred_ca.device)
+                else:
+                    loop_metrics[f"rmsd_{loop_name}"] = torch.tensor(float("nan"), dtype=torch.float32, device=pred_ca.device)
                 loop_metrics[f"aar_{loop_name}"] = torch.tensor(float("nan"), dtype=torch.float32, device=pred_ca.device)
                 continue
 

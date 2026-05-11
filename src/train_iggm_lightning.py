@@ -93,6 +93,7 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     data = defaults.get("data", {})
     model = defaults.get("model", {})
     optim = defaults.get("optimizer", {})
+    scheduler = defaults.get("scheduler", {})
     loss_cfg = defaults.get("loss", {})
     metric_cfg = defaults.get("metrics", {})
     trainer = defaults.get("trainer", {})
@@ -100,6 +101,7 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     runtime = defaults.get("runtime", {})
     stage_training = defaults.get("stage_training", {})
     diffusion = defaults.get("diffusion", {})
+    
 
     p = argparse.ArgumentParser(description="Train IgGM with PyTorch Lightning")
     p.add_argument("--config", default=defaults.get("config_path", "config/train_lightning.yaml"))
@@ -120,6 +122,10 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--ppi_ckpt", default=model.get("ppi_ckpt", ""))
     p.add_argument("--design_ckpt", default=model.get("design_ckpt", ""))
     p.add_argument("--igso3_buffer", default=model.get("igso3_buffer", ""))
+
+    p.add_argument("--sched_name", default=scheduler.get("name", "common_lr"))
+    p.add_argument("--sched_t_max", type=int, default=int(scheduler.get("t_max", 10000)))
+    p.add_argument("--sched_eta_min", type=float, default=float(scheduler.get("eta_min", 1e-6)))
 
     p.add_argument("--lr", type=float, default=float(optim.get("lr", 1e-4)))
     p.add_argument("--weight_decay", type=float, default=float(optim.get("weight_decay", 1e-2)))
@@ -225,10 +231,20 @@ def main() -> None:
         occupancy_mode=args.occupancy_mode,
     )
 
+    if args.sched_name != "common_lr":
+        scheduler_cfg = {
+            "name": args.sched_name,
+            "t_max": args.sched_t_max,
+            "eta_min": args.sched_eta_min,
+        }
+    else:   
+        scheduler_cfg = None
+    
     lit_model = IgGMLightningModule(
         model=design_model,
         plm_featurizer=plm_featurizer,
         diffuser=diffuser,
+        scheduler_cfg = scheduler_cfg,
         optimizer_cfg=OptimizerConfig(lr=args.lr, weight_decay=args.weight_decay),
         grad_clip_val=args.grad_clip,
         loss_cfg=IgGMLossConfig(
@@ -288,6 +304,7 @@ def main() -> None:
         log_every_n_steps=args.log_every_n_steps,
         accumulate_grad_batches=max(1, args.accumulate_grad_batches),
         num_sanity_val_steps=max(0, args.num_sanity_val_steps),
+        check_val_every_n_epoch=50,
         # detect_anomaly=True,
     )
 

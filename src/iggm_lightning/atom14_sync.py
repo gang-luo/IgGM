@@ -42,8 +42,12 @@ class Atom14SeqSync:
     }
 
     def __init__(self, decode_threshold: float = 0.5) -> None:
-        self.decode_threshold = float(decode_threshold)
-        self._res_meta = self._build_residue_meta()
+            self.decode_threshold = float(decode_threshold)
+            # n_real
+            self._n_real_dict: Dict[str, int] = {
+                aa: len(ATOM_NAMES_PER_RESD[RESD_MAP_1TO3[aa]]) 
+                for aa in RESD_NAMES_1C
+            }
 
     @staticmethod
     def _build_residue_meta() -> Dict[str, Dict[str, int]]:
@@ -97,7 +101,7 @@ class Atom14SeqSync:
         cmsk_n14_tf: torch.Tensor,
         cdr_mask: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """Create atom14 target where CDR padded slots are markers superposed to N/O."""
+        """Create atom14 target where CDR padded slots are markers superposed to fixed N(0)/O(3)."""
         cord = self._ensure_l14x3(cord_n14_tf).clone()
         cmsk = self._ensure_l14(cmsk_n14_tf).clone().to(torch.bool)
         cdr_mask = cdr_mask.to(torch.bool).view(-1)
@@ -105,15 +109,16 @@ class Atom14SeqSync:
         if len(seq) != cord.shape[0]:
             raise ValueError(f"Sequence/coord length mismatch: len(seq)={len(seq)} vs L={cord.shape[0]}")
 
+        N_IDX, O_IDX = 0, 3
         for ridx, aa in enumerate(seq):
-            if ridx >= cdr_mask.numel() or not bool(cdr_mask[ridx]) or aa not in self._res_meta:
+            if ridx >= cdr_mask.numel() or not bool(cdr_mask[ridx]) or aa not in self._n_real_dict:
                 continue
 
-            meta = self._res_meta[aa]
-            n_idx, o_idx, n_real = meta["n_idx"], meta["o_idx"], meta["n_real"]
+            n_real = self._n_real_dict[aa]
             code = self._BOLTZ_CODEBOOK[aa]
+            
             missing_slots = list(range(n_real, 14))
-            anchors = [n_idx] * code.n_on_n + [o_idx] * code.n_on_o
+            anchors = [N_IDX] * code.n_on_n + [O_IDX] * code.n_on_o
 
             if len(missing_slots) != len(anchors):
                 raise RuntimeError(f"Marker count mismatch for residue {aa} at idx={ridx}")
@@ -127,35 +132,43 @@ class Atom14SeqSync:
             "cmsk_atom14": cmsk.to(dtype=cmsk_n14_tf.dtype),
         }
 
-    def _count_no_markers(self, aa: str, residue_atoms: torch.Tensor, residue_mask: torch.Tensor) -> Tuple[int, int]:
-        """Count marker atoms in padded slots that are superposed within threshold to N or O."""
-        meta = self._res_meta[aa]
-        n_idx, o_idx, n_real = meta["n_idx"], meta["o_idx"], meta["n_real"]
-
+    def _count_no_markers(self, residue_atoms: torch.Tensor, residue_mask: torch.Tensor) -> Tuple[int, int]:
+        """
+        Count marker atoms within 0.5A threshold to fixed N (idx 0) or O (idx 3).
+        Relies on fixed layout where N is always at index 0 and O is always at index 3.
+        """
+        n_idx, o_idx = 0, 3
         n_pos = residue_atoms[n_idx]
         o_pos = residue_atoms[o_idx]
         n_count, o_count = 0, 0
 
-        for atom_idx in range(n_real, 14):
-            if not bool(residue_mask[atom_idx]):
+        # Scan all 14 slots
+        for atom_idx in range(14):
+            # Skip real N and O anchors, and unmasked padded slots
+            if atom_idx in (n_idx, o_idx) or not bool(residue_mask[atom_idx]):
                 continue
+            
             atom = residue_atoms[atom_idx]
             d_n = torch.norm(atom - n_pos)
             d_o = torch.norm(atom - o_pos)
+            
+            # Physical atoms are > 1.0A away; < 0.5A means it's a virtual marker
             if float(min(d_n.item(), d_o.item())) > self.decode_threshold:
                 continue
+                
             if d_n <= d_o:
                 n_count += 1
             else:
                 o_count += 1
+                
         return n_count, o_count
 
     def decode_cdr_sequence(
-        self,
-        seq_true: str,
-        pred_cord_n14_tf: torch.Tensor,
-        pred_cmsk_n14_tf: torch.Tensor,
-        cdr_mask: torch.Tensor,
+            self,
+            seq_true: str,
+            pred_cord_n14_tf: torch.Tensor,
+            pred_cmsk_n14_tf: torch.Tensor,
+            cdr_mask: torch.Tensor,
     ) -> str:
         """Decode CDR residues by BoltzGen (#N,#O) marker counting; keep FR as native sequence."""
         cord = self._ensure_l14x3(pred_cord_n14_tf)
@@ -171,13 +184,15 @@ class Atom14SeqSync:
             dtype=cord.dtype,
             device=cord.device,
         )
-
+        # Initialize with ground truth sequence to perfectly preserve FR regions
         seq_chars = list(seq_true)
         for ridx in range(len(seq_chars)):
+            # Skip non-CDR residues (keep native FR sequence)
             if ridx >= cdr_mask.numel() or not bool(cdr_mask[ridx]):
                 continue
 
-            obs_n, obs_o = self._count_no_markers(seq_true[ridx], cord[ridx], cmsk[ridx])
+            # Calculate N/O markers directly from coords without relying on seq_true[ridx]
+            obs_n, obs_o = self._count_no_markers(cord[ridx], cmsk[ridx])
             obs = torch.tensor([obs_n, obs_o], dtype=cord.dtype, device=cord.device)
             dist = torch.sum(torch.abs(code_mat - obs.view(1, 2)), dim=-1)
             seq_chars[ridx] = aa_list[int(torch.argmin(dist).item())]

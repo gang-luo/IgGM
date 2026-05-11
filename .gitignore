@@ -7,5 +7,7 @@ zz_trash
 *.gz
 outputs/
 data/sabdab
-data/sabdab_2603
+data/sabdab*
+
 openfold/*
+.ipynb_checkpoints

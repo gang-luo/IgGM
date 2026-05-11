@@ -12,9 +12,11 @@
             "console": "integratedTerminal",
             "python": "python",
             "args": [
-                "--config", "config/test_debug.yaml"
+                "--config",
+                "config/test_debug.yaml"
             ]
-        },{
+        },
+        {
             "name": "inference",
             "type": "debugpy",
             "request": "launch",
@@ -22,10 +24,11 @@
             "console": "integratedTerminal",
             "python": "python",
             "args": [
-                "--fasta", "examples/fasta.files.design/8hpu_M_N_A/8hpu_M_N_A_CDR_All.fasta",
-                "--antigen", "examples/pdb.files.native/8hpu_M_N_A.pdb"
+                "--fasta",
+                "examples/fasta.files.design/8hpu_M_N_A/8hpu_M_N_A_CDR_All.fasta",
+                "--antigen",
+                "examples/pdb.files.native/8hpu_M_N_A.pdb"
             ]
         }
     ]
 }
-

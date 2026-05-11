@@ -144,6 +144,75 @@ class IgGMPaperLoss:
 
         return loss_rota + loss_trsl
     
+
+    def _cdr_all_atom_mse(
+        self,
+        pred_aligned: torch.Tensor,
+        tgt_atom14: torch.Tensor,
+        atom14_mask: torch.Tensor,
+        cdr_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        valid = cdr_mask.unsqueeze(-1) & atom14_mask
+        diff = pred_aligned - tgt_atom14
+        denom = valid.to(diff.dtype).sum().clamp_min(1.0)
+        return ((diff ** 2) * valid.unsqueeze(-1).to(diff.dtype)).sum() / denom
+    
+    # def _cdr_all_atom_mse(
+    #     self,
+    #     pred_coords: torch.Tensor,    # 传入未对齐的原始预测输出 outputs["3d"]["cord"][-1]
+    #     tgt_atom14: torch.Tensor,
+    #     atom14_mask: torch.Tensor,
+    #     cdr_mask: torch.Tensor,
+    # ) -> torch.Tensor:
+    #     """
+    #     计算独立对齐后的 CDR 全原子形状 MSE。
+    #     """
+    #     bsz = pred_coords.shape[0]
+    #     loss_val = torch.tensor(0.0, device=pred_coords.device)
+    #     valid_batch_count = 0
+
+    #     for b in range(bsz):
+    #         # 获取当前 batch 有效的 CDR 原子 mask
+    #         mask_b = cdr_mask[b].unsqueeze(-1) & atom14_mask[b] # [L, 14]
+    #         if not mask_b.any():
+    #             continue
+
+    #         # 提取 CDR 区域有效的真实和预测坐标，展平为 [N_valid_atoms, 3]
+    #         pred_cdr_points = pred_coords[b][mask_b]
+    #         tgt_cdr_points = tgt_atom14[b][mask_b]
+
+    #         if pred_cdr_points.shape[0] < 3:
+    #             continue
+
+    #         # [关键步骤]：使用 Kabsch 算法将 Target 对齐到 Pred 上
+    #         # 这等价于只评估 CDR 的"内部形状(Shape)"，忽略外部连接角度
+    #         pred_mean = pred_cdr_points.mean(dim=0, keepdim=True)
+    #         tgt_mean = tgt_cdr_points.mean(dim=0, keepdim=True)
+            
+    #         pred_centered = pred_cdr_points - pred_mean
+    #         tgt_centered = tgt_cdr_points - tgt_mean
+
+    #         cov = tgt_centered.transpose(0, 1) @ pred_centered
+    #         u, _, vh = torch.linalg.svd(cov.float())
+    #         rot = vh.transpose(-1, -2) @ u.transpose(-1, -2)
+    #         if torch.det(rot.float()) < 0:
+    #             vh[-1] *= -1
+    #             rot = vh.transpose(-1, -2) @ u.transpose(-1, -2)
+    #         rot = rot.to(dtype=pred_coords.dtype)
+
+    #         # 旋转 Target 使其最佳拟合 Pred 的形状
+    #         tgt_aligned = (tgt_centered @ rot.transpose(-1, -2)) + pred_mean
+
+    #         # 计算局部形状的 MSE
+    #         diff = pred_cdr_points - tgt_aligned
+    #         loss_val += (diff ** 2).mean()
+    #         valid_batch_count += 1
+
+    #     if valid_batch_count > 0:
+    #         return loss_val / valid_batch_count
+    #     else:
+    #         return torch.tensor(0.0, device=pred_coords.device)
+
     def _seq_to_aatype(self, seq_obj, bsz: int, seq_len: int, device: torch.device) -> torch.Tensor:
         aa_to_idx = {aa: i for i, aa in enumerate(RESD_NAMES_1C)}
         if isinstance(seq_obj, str):
@@ -318,7 +387,7 @@ class IgGMPaperLoss:
 
         return loss_intra + loss_inter
 
-    def _cdr_all_atom_mse(
+    def _cdr_local_all_atom_mse2(
         self,
         pred_loop_local: torch.Tensor,       # [B, N_loop, L_max, 14, 3] 来自 outputs["3d"]["loop_cords"][-1]
         clean_loop_local: torch.Tensor,      # [B, N_loop, L_max, 14, 3] 来自 inputs["clean_loop_local_coords"]
@@ -355,40 +424,83 @@ class IgGMPaperLoss:
         
         atom14_tgt = self._ensure_batched(inputs.get("cords_atom14", inputs["cord-o"]), ndim_no_batch=3).to(device=pred.device, dtype=pred.dtype)
         atom14_mask = self._ensure_batched(inputs.get("cmsk_atom14", inputs["cmsk-p"]), ndim_no_batch=2).to(device=pred.device).to(torch.bool)
-        cmsk_realatom = self._ensure_batched(inputs.get("cmsk_realatom", inputs["cmsk-p"]), ndim_no_batch=2).to(device=pred.device).to(torch.bool)
         bsz, seq_len = pred.shape[:2]
 
         ab_mask = self._normalize_res_mask(inputs["pmsk-ligand"], batch_size=bsz, seq_len=seq_len).to(pred.device)
         cdr_mask = self._normalize_res_mask(inputs["cdr_mask"], batch_size=bsz, seq_len=seq_len).to(pred.device)
 
-        loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, atom14_mask, cdr_mask)
-        loss_bond = self._compute_bond_loss(pred, atom14_tgt, atom14_mask, cdr_mask)
+        # fr_mask = ab_mask & (~cdr_mask)
+        # pred_aligned = self._align_pred_to_target( # 把pred对齐到tgt上，避免造成额外的平移和旋转结果。
+        #     pred=pred, 
+        #     tgt=tgt,
+        #     atom_mask=atom_mask,
+        #     align_res_mask=fr_mask,
+        #     align_atom_idx=[1,2],  # CA, C ; using the new 14-atom scheme where N=0, CA=1, C=2, O=3
+        #     asym_id = inputs["asym-id"],
+        #     align_mode = "antibody",
+        # )
+
+        loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, atom14_mask, cdr_mask) # (传入未对齐的 pred 即可)
         loss_backbone = self._backbone_mse(inputs, outputs) 
+        loss_bond = self._compute_bond_loss(pred, atom14_tgt, atom14_mask, cdr_mask)
+        # loss_cdr = self._cdr_all_atom_mse(pred_aligned, atom14_tgt, atom14_mask, cdr_mask) # using the atom14_mask for the cdr_all_atom_loss to teach the model to predict the virtual atoms in the atom14 scheme, which can provide more detailed supervision for the CDR regions.
 
         loops_pred,pi_logits,loops_local_label,loop_atom_valid_mask = outputs["3d"]["loop_cords"][-1],outputs["3d"]["pi_logits"],inputs["clean_loop_local_coords"],inputs["loop_atom_valid_mask"]
-        loss_cdr = self._cdr_all_atom_mse(
+        loss_cdr = self._cdr_local_all_atom_mse2(
             loops_pred, 
             loops_local_label, 
             loop_atom_valid_mask
         )
 
         loss_vio = torch.zeros_like(loss_backbone)
+        # loss_cdr = self._cdr_all_atom_mse(pred, atom14_tgt, atom14_mask, cdr_mask)
         # # loss_vio = self._openfold_violation_loss(pred, atom_mask.to(pred.dtype), inputs["seq-o"], asym_id=inputs.get("asym-id", None)) 
         # using the original atom_mask(different of atom14-mask), aviod the extra loss between with the virtual atoms and reality atom in the atom-14 scheme 
         # Structural violation terms are rigid-transform invariant, so aligned coords are safe here.
 
+        # BoltzGen (EDM) wt； gma_data 是干净抗体坐标的固有方差，对于埃(Angstrom)级别的大分子， Karras/AF3/BoltzGen 经验上通常设为 2.0 到 5.0 之间
+        # w(t) = (t^2 + sigma_data^2) / (t^2 * sigma_data^2)
         t = inputs["sigama_t"]["cord_scale"] * torch.sqrt(1.0 - inputs["sigama_t"]["alpha_bar"])
         sigma_data = 2.0 
         w_t = (t**2 + sigma_data**2) / ((t * sigma_data)**2 + 1e-8)
-        weight_factor = torch.clamp(w_t, max=10.0).mean()
+        weight_factor = w_t.mean()
         
+        
+        # loss_cdr_gmm = self._gmm_nll_diffusion_loss(
+        #     pi_logits=pi_logits,
+        #     pred_real_coords=loops_pred,
+        #     clean_loop_local=loops_local_label,
+        #     sigma_t=t,
+        #     valid_mask=loop_atom_valid_mask
+        # )
+
+        # total = (
+        #     self.cfg.backbone_weight * loss_backbone
+        #     + weight_factor * (
+        #         loss_cdr + loss_bond
+        #         # self.cfg.cdr_all_atom_weight * loss_cdr
+        #         # + self.cfg.bond_weight * loss_bond
+        #     )
+        #     + self.cfg.smooth_lddt_weight * loss_smooth_lddt  # add lddt
+        #     + self.cfg.vio_weight * loss_vio
+        # )
+
         # cdr loss
         total = (
             self.cfg.backbone_weight * loss_backbone
-            + weight_factor * loss_cdr
+            + 1.0 * loss_cdr
+            # + weight_factor * loss_cdr
             + self.cfg.smooth_lddt_weight * loss_smooth_lddt
+            + self.cfg.vio_weight * loss_vio
         )
 
+        # total = (
+        #     self.cfg.backbone_weight * loss_backbone
+        #     +  loss_cdr_gmm
+        #     + self.cfg.smooth_lddt_weight * loss_smooth_lddt
+        #     + self.cfg.vio_weight * loss_vio
+        # )
+        
         
         if self.idx_save % 50 == 0:
             import time
@@ -397,7 +509,7 @@ class IgGMPaperLoss:
                 'perturb': inputs['cord-p'],
                 'pre': pred,
                 'clean': atom14_tgt
-            }, f'/root/private_data/luog/codex/IgGM/see/seefile/valB5_{ts}.pt')
+            }, f'/root/private_data/luog/codex/IgGM/see/seefile/valB3_{ts}.pt')
         self.idx_save+=1
             
 

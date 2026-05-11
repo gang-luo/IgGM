@@ -389,35 +389,70 @@ def intp_rota_tns(rota_tns_init, rota_tns_curr, alpha_bar_prev, alpha_bar_curr, 
 
     return rota_tns_prev
 
+# def log_rmat(r_mat: torch.Tensor) -> torch.Tensor:
+#     skew_mat = (r_mat - r_mat.transpose(-1, -2))
+#     sk_vec = skew2vec(skew_mat)
+#     s_angle = (sk_vec).norm(p=2, dim=-1) / 2
+#     c_angle = (torch.einsum('...ii', r_mat) - 1) / 2
+#     angle = torch.atan2(s_angle, c_angle)
+#     scale = (angle / (2 * s_angle))
+#     # if s_angle = 0, i.e. rotation by 0 or pi (180), we get NaNs
+#     # by definition, scale values are 0 if rotating by 0.
+#     # This also breaks down if rotating by pi, fix further down
+#     scale[angle == 0.0] = 0.0
+#     log_r_mat = scale[..., None, None] * skew_mat
+
+#     # Check for NaNs caused by 180deg rotations.
+#     nanlocs = log_r_mat[...,0,0].isnan()
+#     nanmats = r_mat[nanlocs]
+#     # We need to use an alternative way of finding the logarithm for nanmats,
+#     # Use eigendecomposition to discover axis of rotation.
+#     # By definition, these are symmetric, so use eigh.
+#     # NOTE: linalg.eig() isn't in torch 1.8,
+#     #       and torch.eig() doesn't do batched matrices
+#     eigval, eigvec = torch.linalg.eigh(nanmats)
+#     # Final eigenvalue == 1, might be slightly off because floats, but other two are -ve.
+#     # this *should* just be the last column if the docs for eigh are true.
+#     nan_axes = eigvec[...,-1,:]
+#     nan_angle = angle[nanlocs]
+#     nan_skew = vec2skew(nan_angle[...,None] * nan_axes)
+#     log_r_mat[nanlocs] = nan_skew
+#     return log_r_mat
+
 def log_rmat(r_mat: torch.Tensor) -> torch.Tensor:
+    orig_dtype = r_mat.dtype
+    
+    # ✅ 整个函数在 float32 下计算，避免 bf16 精度问题
+    r_mat = r_mat.to(torch.float32)
+    
     skew_mat = (r_mat - r_mat.transpose(-1, -2))
     sk_vec = skew2vec(skew_mat)
-    s_angle = (sk_vec).norm(p=2, dim=-1) / 2
+    s_angle = sk_vec.norm(p=2, dim=-1) / 2
     c_angle = (torch.einsum('...ii', r_mat) - 1) / 2
     angle = torch.atan2(s_angle, c_angle)
-    scale = (angle / (2 * s_angle))
-    # if s_angle = 0, i.e. rotation by 0 or pi (180), we get NaNs
-    # by definition, scale values are 0 if rotating by 0.
-    # This also breaks down if rotating by pi, fix further down
-    scale[angle == 0.0] = 0.0
+    
+    # ✅ 用阈值而非精确零点，避免小值除法爆炸
+    safe_s_angle = s_angle.clone()
+    near_zero = s_angle < 1e-6
+    safe_s_angle[near_zero] = 1.0  # 临时填充，防止除零
+    
+    scale = angle / (2 * safe_s_angle)
+    scale[near_zero] = 0.0  # 旋转角≈0时 scale 定义为 0
+    
     log_r_mat = scale[..., None, None] * skew_mat
 
-    # Check for NaNs caused by 180deg rotations.
-    nanlocs = log_r_mat[...,0,0].isnan()
-    nanmats = r_mat[nanlocs]
-    # We need to use an alternative way of finding the logarithm for nanmats,
-    # Use eigendecomposition to discover axis of rotation.
-    # By definition, these are symmetric, so use eigh.
-    # NOTE: linalg.eig() isn't in torch 1.8,
-    #       and torch.eig() doesn't do batched matrices
-    eigval, eigvec = torch.linalg.eigh(nanmats)
-    # Final eigenvalue == 1, might be slightly off because floats, but other two are -ve.
-    # this *should* just be the last column if the docs for eigh are true.
-    nan_axes = eigvec[...,-1,:]
-    nan_angle = angle[nanlocs]
-    nan_skew = vec2skew(nan_angle[...,None] * nan_axes)
-    log_r_mat[nanlocs] = nan_skew
-    return log_r_mat
+    # 处理 180° 旋转导致的 NaN（此时 s_angle 不小，但 log 无法由 skew 唯一确定）
+    nanlocs = log_r_mat[..., 0, 0].isnan()
+    if nanlocs.any():
+        nanmats = r_mat[nanlocs]  # 已经是 float32
+        eigval, eigvec = torch.linalg.eigh(nanmats)
+        nan_axes = eigvec[..., -1, :]
+        nan_angle = angle[nanlocs]
+        nan_skew = vec2skew(nan_angle[..., None] * nan_axes)
+        log_r_mat[nanlocs] = nan_skew
+
+    # ✅ 转回原始 dtype
+    return log_r_mat.to(orig_dtype)
 
 def so3_scale(rmat, scalars):
     '''Scale the magnitude of a rotation matrix,

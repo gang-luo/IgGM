@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import torch
-from torch import nn
+from torch import dtype, nn
 
 
 class CDRLoopHead(nn.Module):
@@ -62,6 +62,14 @@ class CDRLoopHead(nn.Module):
         self.coord_head = nn.Linear(c_atom, n_atom * 3)
         self.occ_head = nn.Linear(c_token, 1)
 
+        self.spatial_negotiator = nn.MultiheadAttention(c_token, num_heads=8, batch_first=True)
+        self.norm_negotiator = nn.LayerNorm(c_token)
+
+        self.topology_head = nn.Sequential(
+            nn.LayerNorm(c_atom),
+            nn.Linear(c_atom, self.n_atom * 3)
+        )
+
     def forward(
         self,
         loop_sfea: torch.Tensor,            # [B, N_loop, L_max, C_s]
@@ -103,11 +111,23 @@ class CDRLoopHead(nn.Module):
         # atom -> token aggregation (simple residual-style fusion)
         token_from_atom = atom_feat * loop_valid_res_mask.unsqueeze(-1).to(dtype)
         token_feat = self.token_trunk(torch.cat([token_cond, token_from_atom], dim=-1))
+
+        # add attention
+        bsz, n_loop, lmax, c_dim = token_feat.shape
+        token_flat = token_feat.view(bsz * n_loop, lmax, c_dim)
+        attn_out, _ = self.spatial_negotiator(token_flat, token_flat, token_flat)
+        token_flat = self.norm_negotiator(token_flat + attn_out)
+        token_feat = token_flat.view(bsz, n_loop, lmax, c_dim) # 恢复形状
+
+        # origin
         token_feat = token_feat * loop_valid_res_mask.unsqueeze(-1).to(dtype)
 
         # token -> atom decoding
         atom_decoder_in = torch.cat([atom_feat, token_feat, xt], dim=-1)
         atom_hidden = self.atom_decoder(atom_decoder_in)
+
+        # add luog
+        pi_logits = self.topology_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
 
         # coordinate update in local frame
         r_update = self.coord_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
@@ -125,4 +145,5 @@ class CDRLoopHead(nn.Module):
             'pred_x0_local': pred_x0_local,
             'pred_occupancy_logits': occ_logits,
             'loop_update_feat': token_feat * loop_valid_res_mask.unsqueeze(-1).to(token_feat.dtype),
+            'pi_logits': pi_logits,
         }
