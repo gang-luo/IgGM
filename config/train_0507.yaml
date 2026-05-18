@@ -39,12 +39,12 @@ metrics:
   dockq_threshold: 0.23
 
 trainer:
-  max_epochs: 100
+  max_epochs: 50
   precision: bf16 # bf16-mixed
   accelerator: gpu
   devices: [0] 
   log_every_n_steps: 5
-  accumulate_grad_batches: 4
+  accumulate_grad_batches: 2
   num_sanity_val_steps: 0
   strategy: ddp
   ddp_static_graph: false

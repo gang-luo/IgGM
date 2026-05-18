@@ -9,7 +9,7 @@ python src/train_iggm_lightning.py --config config/train_0507.yaml
 
 
 
-
+nohup python src/train_iggm_lightning.py --config config/train_0507.yaml > log_runout/train_0507.log 2>&1 &
 
 # # 环境
 # conda env update -f envirs.yaml
