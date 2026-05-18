@@ -246,10 +246,13 @@ class Diffuser:
         dtype = prot_data_orig["cord"].dtype
 
         aa_seq_orig = prot_data_orig["seq"]
-        cord_tns_orig = prot_data_orig["cords_atom14"]
-        cmsk_mat_orig = prot_data_orig["cmsk_atom14"]
         # cord_tns_orig = prot_data_orig["cord"]
         # cmsk_mat_orig = prot_data_orig["cmsk"]
+
+        cord_tns_orig = prot_data_orig["cords_atom14"]
+        cmsk_mat_orig = prot_data_orig["cmsk"]
+        cmsk_mat_orig14 = prot_data_orig["cmsk_atom14"]
+
         pmsk_vec = prot_data_orig["mask_design"]
         antibody_mask = prot_data_orig["mask_ab"].to(device=device, dtype=torch.bool)
 
@@ -274,14 +277,14 @@ class Diffuser:
         # stage-1 forward perturbation: antibody-level rigid params q0 -> qt
         rota_orig, trsl_orig, ab_local_coords = self._build_antibody_rigid_params(
             cord_tns_orig,
-            cmsk_mat_orig,
+            cmsk_mat_orig14,
             antibody_mask,
         )
         _, _ , rota_xt, trsl_xt = self._sample_fr_rigid_transform(rota_orig, trsl_orig, idxs_step, device, dtype)
 
         noisy_ab_cord_tns = cord_tns_orig.clone()
         noisy_ab_cord_tns[antibody_mask] = local_to_global_coords(ab_local_coords, rota_xt, trsl_xt)
-        noisy_ab_cord_tns = noisy_ab_cord_tns * cmsk_mat_orig.unsqueeze(-1).to(noisy_ab_cord_tns.dtype)
+        noisy_ab_cord_tns = noisy_ab_cord_tns * cmsk_mat_orig14.unsqueeze(-1).to(noisy_ab_cord_tns.dtype)
         
         # stage-2 forward perturbation: loop-anchor local all-atom Gaussian perturbation
         clean_loop_local_coords, clean_anchor_rots, clean_anchor_trans = extract_per_loop_clean_local_coords(
@@ -290,7 +293,7 @@ class Diffuser:
             loop_true_len,
             loop_left_anchor_idx,
             loop_right_anchor_idx,
-            loop_atom_valid_mask,
+            loop_atom_valid_mask, # atom14 all open?
         )
         # # define the noise scale and sample noise for constrcut loop local coordinates
         alpha_bar_local = self.trsl_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
@@ -327,9 +330,7 @@ class Diffuser:
             "seq-o": aa_seq_orig,
             "cord-o": cord_tns_orig,
             "cmsk-o": cmsk_mat_orig,
-            "cmsk_realatom": prot_data_orig["cmsk"].detach().clone(),
-            "cords_atom14": prot_data_orig.get("cords_atom14", cord_tns_orig).detach().clone(),
-            "cmsk_atom14": prot_data_orig.get("cmsk_atom14", cmsk_mat_orig).detach().clone(),
+            "cmsk_atom14": cmsk_mat_orig14,
             "pmsk": pmsk_vec,
             "pmsk-ligand": prot_data_orig["mask_ab"],
 
