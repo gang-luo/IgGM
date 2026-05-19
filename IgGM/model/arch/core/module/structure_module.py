@@ -92,7 +92,9 @@ class StructureModule(nn.Module):
         loop_xt_local = region_metadata['noisy_loop_local_coords'].to(device=device, dtype=dtype)
         if loop_xt_local.ndim == 4:
             loop_xt_local = loop_xt_local.unsqueeze(0).expand(n_smpls, -1, -1, -1, -1).clone()
-        
+
+        sigma_t = torch.as_tensor(region_metadata["sigama_t"]["cdr_sigma"], device=device, dtype=dtype).view(1).expand(n_smpls)
+
         cdr_mask = self._expand_batch_mask(region_metadata['cdr_mask'].to(device=device, dtype=torch.bool), n_smpls)
         antigen_mask = ~antibody_mask
 
@@ -134,6 +136,7 @@ class StructureModule(nn.Module):
                 loop_atom_valid_mask=loop_valid_res_mask.unsqueeze(-1).expand_as(loop_atom_valid_mask), # 由于为全原子，所以直接开放有效残基的全部原子用于感知和移动。 原loop_atom_valid_mask，直接根据有效res替换； 
                 loop_left_anchor_idx=loop_left_anchor_idx,
                 loop_right_anchor_idx=loop_right_anchor_idx,
+                sigma_t=sigma_t,
             )
             
             curr_coords, sfea_tns, loop_xt_local = cdr_out['merged_coords'], cdr_out['sfea_after_cdr'],cdr_out['loop_xt_new_local']

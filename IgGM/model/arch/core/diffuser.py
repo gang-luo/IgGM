@@ -98,72 +98,6 @@ class Diffuser:
             return prot_data_pert, idxs_step
         return prot_data_pert
 
-        # # initialization
-        # n_resds = len(prot_data_orig['seq'])
-        # device = prot_data_orig['cord'].device
-
-        # # obtain the original sequence & structure
-        # aa_seq_orig = prot_data_orig['seq']
-        # cord_tns_orig = prot_data_orig['cord']
-        # cmsk_mat_orig = prot_data_orig['cmsk']
-        # pmsk_vec = prot_data_orig['mask_design']
-        # pmsk_vec_ligand = prot_data_orig['mask_ab']
-
-
-        # # convert the original sequence & structure into Prob-Trsl-Rota parameters
-        # prob_tns_orig, trsl_tns_orig, rota_tns_orig, fmsk_mat_orig = \
-        #     ss2ptr([aa_seq_orig], cord_tns_orig, cmsk_mat_orig)
-
-        # # perturb probabilistic distributions
-        # trmat_ac = self.trmat_list_ac[idxs_step].to(device)
-        # prob_tns_pert = torch.matmul(prob_tns_orig, trmat_ac)
-        # prob_tns_pert = nn.functional.normalize(prob_tns_pert, p=1.0, dim=2)
-        # prob_tns_pert = torch.where(
-        #     pmsk_vec.view(-1 ,n_resds, 1).to(torch.bool), prob_tns_pert, prob_tns_orig)
-
-        # # perturb translation vectors
-        # alpha_bar = self.trsl_schedule.alphas_bar[idxs_step].to(device)
-        # trsl_tns_nois = torch.randn_like(trsl_tns_orig[0])
-        # trsl_tns_pert = torch.sqrt(alpha_bar) * trsl_tns_orig[0] + \
-        #                           self.cord_scale * torch.sqrt(1.0 - alpha_bar) * trsl_tns_nois
-        # trsl_tns_pert = torch.where(
-        #     pmsk_vec_ligand.view(n_resds, 1).to(torch.bool), trsl_tns_pert, trsl_tns_orig)
-
-        # # perturb rotation matrices
-        # alpha_bar = self.rota_schedule.alphas_bar[idxs_step].to(device)
-        # rota_buf = self.rota_buf_list_fwd[idxs_step].to(device)
-        # idxs_buf = random.choices(range(self.rota_buf_size), k=n_resds)
-        # rota_tns_nois = rota_buf[idxs_buf]
-        # rota_tns_pert= torch.bmm(
-        #     so3_scale(rota_tns_orig[0], torch.sqrt(alpha_bar)), rota_tns_nois)
-        # rota_tns_pert = torch.where(
-        #     pmsk_vec_ligand.view(n_resds, 1, 1).to(torch.bool), rota_tns_pert, rota_tns_orig)
-
-        # # convert Prob-Trsl-Rota parameters into amino-acid sequences & per-atom 3D coordinates
-        # aa_seqs_pert, cord_tns_pert, cmsk_tns_pert = \
-        #     ptr2ss(prob_tns_pert, trsl_tns_pert, rota_tns_pert, fmsk_mat_orig, stoc_seq=True)
-
-        # # pack perturbed amino-acid sequences & backbone structures into a dict
-        # prot_data_pert = {
-        #     'step': [idxs_step],
-        #     'seq-o': aa_seq_orig,
-        #     'cord-o': cord_tns_orig,  # L x M x 3
-        #     'cmsk-o': cmsk_mat_orig,  # L x M
-        #     'pmsk': pmsk_vec,  # L
-        #     'pmsk-ligand': pmsk_vec_ligand,  # L
-        #     'seq-p': aa_seqs_pert,
-        #     'cord-p': cord_tns_pert,  # N x L x M x 3
-        #     'cmsk-p': cmsk_tns_pert,  # N x L x M
-
-        #     'asym-id': prot_data_orig['asym_id'].detach().clone(),
-        #     'a-cord': prot_data_orig['a-cord'].detach().clone(),
-        #     'a-cmsk': prot_data_orig['a-cmsk'].detach().clone(),
-        # }
-
-        # if return_time_steps:
-        #     return prot_data_pert, idxs_step
-        # return prot_data_pert
-
     def _sample_probabilities(self, aa_seq_orig, pmsk_vec, idxs_step, device):
         """Sample noisy residue-type distributions; shared by legacy and fr_cdr_sync modes."""
         trmat_ac = self.trmat_list_ac[idxs_step].to(device)
@@ -181,27 +115,59 @@ class Diffuser:
         aa_seqs_pert = prob2seq(prob_tns_pert, stoc_seq=True)
         return prob_tns_orig, prob_tns_pert, aa_seqs_pert
 
+    # def _sample_fr_rigid_transform(self, rota_orig, trsl_orig, idxs_step, device, dtype):
+    #     """Sample one rigid transform noise for the antibody-level rigid params at timestep t."""
+
+    #     alpha_bar_trsl = self.trsl_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
+    #     alpha_bar_rota = self.rota_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
+    #     fr_translation = (
+    #         self.fr_noise_scale_trsl
+    #         * self.cord_scale
+    #         * torch.sqrt(1.0 - alpha_bar_trsl)
+    #         * torch.randn(3, device=device, dtype=dtype)
+    #     )
+    #     rota_buf = self.rota_buf_list_fwd[idxs_step].to(device=device, dtype=dtype)
+    #     fr_noise = rota_buf[random.randrange(self.rota_buf_size)].unsqueeze(0)
+    #     fr_rotation = so3_scale(fr_noise, torch.sqrt(1.0 - alpha_bar_rota) * self.fr_noise_scale_rota)[0]
+
+    #     rota_xt = torch.bmm(
+    #         so3_scale(rota_orig.unsqueeze(0), torch.sqrt(alpha_bar_rota)),
+    #         fr_rotation.unsqueeze(0),
+    #     )[0]
+    #     trsl_xt = torch.sqrt(alpha_bar_trsl) * trsl_orig + fr_translation
+
+    #     return fr_rotation, fr_translation, rota_xt, trsl_xt
+
+
     def _sample_fr_rigid_transform(self, rota_orig, trsl_orig, idxs_step, device, dtype):
-        """Sample one rigid transform noise for the antibody-level rigid params at timestep t."""
+        """Sample one SE(3) perturbation for antibody-level FR rigid frame."""
 
         alpha_bar_trsl = self.trsl_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
         alpha_bar_rota = self.rota_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
-        fr_translation = (
+
+        sigma_trsl = (
             self.fr_noise_scale_trsl
             * self.cord_scale
             * torch.sqrt(1.0 - alpha_bar_trsl)
-            * torch.randn(3, device=device, dtype=dtype)
         )
+
+        sigma_rota = (
+            self.fr_noise_scale_rota
+            * torch.sqrt(1.0 - alpha_bar_rota)
+        )
+
+        # Translation relative perturbation
+        fr_translation = sigma_trsl * torch.randn(3, device=device, dtype=dtype)
+
+        # Rotation relative perturbation
         rota_buf = self.rota_buf_list_fwd[idxs_step].to(device=device, dtype=dtype)
-        fr_noise = rota_buf[random.randrange(self.rota_buf_size)].unsqueeze(0)
-        fr_rotation = so3_scale(fr_noise, torch.sqrt(1.0 - alpha_bar_rota) * self.fr_noise_scale_rota)[0]
+        fr_noise = rota_buf[random.randrange(self.rota_buf_size)]
 
-        rota_xt = torch.bmm(
-            so3_scale(rota_orig.unsqueeze(0), torch.sqrt(alpha_bar_rota)),
-            fr_rotation.unsqueeze(0),
-        )[0]
-        trsl_xt = torch.sqrt(alpha_bar_trsl) * trsl_orig + fr_translation
+        fr_rotation = so3_scale(fr_noise, sigma_rota)
 
+        # 注意：左乘/右乘需要和你的 local/global convention 对齐
+        rota_xt = torch.matmul(fr_rotation, rota_orig)
+        trsl_xt = trsl_orig + fr_translation
         return fr_rotation, fr_translation, rota_xt, trsl_xt
 
     @staticmethod
@@ -302,6 +268,7 @@ class Diffuser:
             * self.cord_scale
             * torch.sqrt(torch.tensor(1.0, device=device, dtype=dtype) - alpha_bar_local)
         )
+        sigma_cdr = local_noise_scale
         local_noise = local_noise_scale * torch.randn_like(clean_loop_local_coords)
         noisy_loop_local_coords = clean_loop_local_coords + local_noise * loop_atom_valid_mask.unsqueeze(-1).to(dtype)
         noisy_loop_local_coords = noisy_loop_local_coords * loop_atom_valid_mask.unsqueeze(-1).to(dtype)
@@ -361,13 +328,17 @@ class Diffuser:
             "anchor_frame_meta": {
                 "rota_orig": rota_orig.detach().clone(),
                 "trsl_orig": trsl_orig.detach().clone(),
+                "rota_xt": rota_xt.detach().clone(),
+                "trsl_xt": trsl_xt.detach().clone(),
             },
             "antibody_local_coords": ab_local_coords.detach().clone(),
             "antibody_mask": antibody_mask.detach().clone(),
             "occupancy_mode": self.occupancy_mode,
             "sigama_t": {
-                'alpha_bar': alpha_bar_local.detach().clone(),
-                "cord_scale": self.cord_scale,
+                "alpha_bar": alpha_bar_local.detach().clone(),
+                "cord_scale": torch.as_tensor(self.cord_scale, device=device, dtype=dtype),
+                "cdr_local_noise_scale": torch.as_tensor(self.cdr_local_noise_scale, device=device, dtype=dtype),
+                "cdr_sigma": local_noise_scale.detach().clone(),
             },
         }
 

@@ -28,9 +28,19 @@ class FRRigidHead(nn.Module):
             nn.Linear(c_hidden, c_hidden),
             nn.ReLU(),
         )
+
         self.linear_q = nn.Linear(c_hidden, 4)
         self.linear_t = nn.Linear(c_hidden, 3)
-        self.delta_feat = nn.Linear(c_hidden, c_s) 
+        self.delta_feat = nn.Linear(c_hidden, c_s)
+
+        nn.init.zeros_(self.linear_q.weight)
+        nn.init.zeros_(self.linear_q.bias)
+
+        with torch.no_grad():
+            self.linear_q.bias[0] = 1.0
+
+        nn.init.zeros_(self.linear_t.weight)
+        nn.init.zeros_(self.linear_t.bias)
 
     @staticmethod
     def _quaternion_to_rotation(quat: torch.Tensor) -> torch.Tensor:

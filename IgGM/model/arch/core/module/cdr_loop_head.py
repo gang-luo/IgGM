@@ -69,6 +69,15 @@ class CDRLoopHead(nn.Module):
             nn.LayerNorm(c_atom),
             nn.Linear(c_atom, self.n_atom * 3)
         )
+        self.noise_embed = nn.Sequential(
+            nn.Linear(1, 32),
+            nn.SiLU(),
+            nn.Linear(32, 32),
+        )
+        self.noise_to_token = nn.Linear(32, c_token)
+        self.sigma_data = 4.0
+        
+
 
     def forward(
         self,
@@ -79,6 +88,7 @@ class CDRLoopHead(nn.Module):
         local_position_ids: torch.Tensor,   # [L_max]
         loop_valid_res_mask: torch.Tensor,  # [B, N_loop, L_max]
         loop_atom_valid_mask: torch.Tensor, # [B, N_loop, L_max, N_atom]
+        sigma_t: torch.Tensor,  # [B]
     ) -> dict:
         bsz, n_loop, lmax = loop_xt_local.shape[:3]
 
@@ -94,17 +104,36 @@ class CDRLoopHead(nn.Module):
         # local position embedding
         pos_feat = self.local_pos(local_position_ids.to(device)).view(1, 1, lmax, -1).expand(bsz, n_loop, -1, -1)
 
+        # EDM-style preconditional
+        sigma = sigma_t.to(device=device, dtype=dtype).view(bsz).clamp_min(1e-8)
+
+        sigma2 = sigma.square()
+        sigma_data = sigma.new_tensor(self.sigma_data)
+        sigma_data2 = sigma_data.square()
+
+        denom = torch.sqrt(sigma2 + sigma_data2)
+
+        c_skip = (sigma_data2 / (sigma2 + sigma_data2)).view(bsz, 1, 1, 1, 1)
+        c_out = ((sigma * sigma_data) / denom).view(bsz, 1, 1, 1, 1)
+        c_in = (1.0 / denom).view(bsz, 1, 1, 1, 1)
+
+        c_noise = 0.25 * torch.log(sigma / sigma_data)
+        noise_feat = self.noise_embed(c_noise.unsqueeze(-1))  # [B, 32]
+        noise_feat = noise_feat.view(bsz, 1, 1, -1).expand(-1, n_loop, lmax, -1)
+
         # token-level conditioning
-        token_cond = self.single_cond(torch.cat([loop_sfea, loop_encd, type_feat, pos_feat], dim=-1))
+        token_cond = self.single_cond(
+            torch.cat([loop_sfea, loop_encd, type_feat, pos_feat], dim=-1)
+        )
+        token_cond = token_cond + self.noise_to_token(noise_feat)
         token_cond = token_cond * loop_valid_res_mask.unsqueeze(-1).to(dtype)
 
         # current noisy local atom coordinates
-        xt = loop_xt_local.reshape(bsz, n_loop, lmax, -1)  # [B, N_loop, L_max, N_atom*3]
-
+        xt_in = (loop_xt_local * c_in).reshape(bsz, n_loop, lmax, -1)  # [B, N_loop, L_max, N_atom*3]
         atom_mask = loop_atom_valid_mask.to(dtype)         # [B, N_loop, L_max, N_atom]
 
         # atom encoder input: current local coords + token condition + atom-valid mask
-        atom_encoder_in = torch.cat([xt, token_cond, atom_mask], dim=-1)
+        atom_encoder_in = torch.cat([xt_in, token_cond, atom_mask], dim=-1)
         atom_feat = self.atom_encoder(atom_encoder_in)
         atom_feat = atom_feat * loop_valid_res_mask.unsqueeze(-1).to(dtype)
 
@@ -123,17 +152,18 @@ class CDRLoopHead(nn.Module):
         token_feat = token_feat * loop_valid_res_mask.unsqueeze(-1).to(dtype)
 
         # token -> atom decoding
-        atom_decoder_in = torch.cat([atom_feat, token_feat, xt], dim=-1)
+        atom_decoder_in = torch.cat([atom_feat, token_feat, xt_in], dim=-1)
         atom_hidden = self.atom_decoder(atom_decoder_in)
 
         # add luog
         pi_logits = self.topology_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
 
         # coordinate update in local frame
+
         r_update = self.coord_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
         r_update = r_update * loop_atom_valid_mask.unsqueeze(-1).to(r_update.dtype)
 
-        pred_x0_local = loop_xt_local + r_update
+        pred_x0_local = c_skip * loop_xt_local + c_out * r_update
         pred_x0_local = pred_x0_local * loop_atom_valid_mask.unsqueeze(-1).to(pred_x0_local.dtype)
 
         # occupancy logits
@@ -147,3 +177,81 @@ class CDRLoopHead(nn.Module):
             'loop_update_feat': token_feat * loop_valid_res_mask.unsqueeze(-1).to(token_feat.dtype),
             'pi_logits': pi_logits,
         }
+    
+    # def forward(
+    #     self,
+    #     loop_sfea: torch.Tensor,            # [B, N_loop, L_max, C_s]
+    #     loop_encd: torch.Tensor,            # [B, N_loop, L_max, C_e]
+    #     loop_xt_local: torch.Tensor,        # [B, N_loop, L_max, N_atom, 3]
+    #     loop_type_ids: torch.Tensor,        # [B, N_loop]
+    #     local_position_ids: torch.Tensor,   # [L_max]
+    #     loop_valid_res_mask: torch.Tensor,  # [B, N_loop, L_max]
+    #     loop_atom_valid_mask: torch.Tensor, # [B, N_loop, L_max, N_atom]
+    # ) -> dict:
+    #     bsz, n_loop, lmax = loop_xt_local.shape[:3]
+
+    #     if lmax > self.max_positions:
+    #         raise ValueError(f'loop length {lmax} exceeds max_positions={self.max_positions}')
+
+    #     device = loop_sfea.device
+    #     dtype = loop_sfea.dtype
+
+    #     # loop type embedding
+    #     type_feat = self.loop_type(loop_type_ids.to(device)).view(bsz, n_loop, 1, -1).expand(-1, -1, lmax, -1)
+
+    #     # local position embedding
+    #     pos_feat = self.local_pos(local_position_ids.to(device)).view(1, 1, lmax, -1).expand(bsz, n_loop, -1, -1)
+
+    #     # token-level conditioning
+    #     token_cond = self.single_cond(torch.cat([loop_sfea, loop_encd, type_feat, pos_feat], dim=-1))
+    #     token_cond = token_cond * loop_valid_res_mask.unsqueeze(-1).to(dtype)
+
+    #     # current noisy local atom coordinates
+    #     xt = loop_xt_local.reshape(bsz, n_loop, lmax, -1)  # [B, N_loop, L_max, N_atom*3]
+
+    #     atom_mask = loop_atom_valid_mask.to(dtype)         # [B, N_loop, L_max, N_atom]
+
+    #     # atom encoder input: current local coords + token condition + atom-valid mask
+    #     atom_encoder_in = torch.cat([xt, token_cond, atom_mask], dim=-1)
+    #     atom_feat = self.atom_encoder(atom_encoder_in)
+    #     atom_feat = atom_feat * loop_valid_res_mask.unsqueeze(-1).to(dtype)
+
+    #     # atom -> token aggregation (simple residual-style fusion)
+    #     token_from_atom = atom_feat * loop_valid_res_mask.unsqueeze(-1).to(dtype)
+    #     token_feat = self.token_trunk(torch.cat([token_cond, token_from_atom], dim=-1))
+
+    #     # add attention
+    #     bsz, n_loop, lmax, c_dim = token_feat.shape
+    #     token_flat = token_feat.view(bsz * n_loop, lmax, c_dim)
+    #     attn_out, _ = self.spatial_negotiator(token_flat, token_flat, token_flat)
+    #     token_flat = self.norm_negotiator(token_flat + attn_out)
+    #     token_feat = token_flat.view(bsz, n_loop, lmax, c_dim) # 恢复形状
+
+    #     # origin
+    #     token_feat = token_feat * loop_valid_res_mask.unsqueeze(-1).to(dtype)
+
+    #     # token -> atom decoding
+    #     atom_decoder_in = torch.cat([atom_feat, token_feat, xt], dim=-1)
+    #     atom_hidden = self.atom_decoder(atom_decoder_in)
+
+    #     # add luog
+    #     pi_logits = self.topology_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
+
+    #     # coordinate update in local frame
+    #     r_update = self.coord_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
+    #     r_update = r_update * loop_atom_valid_mask.unsqueeze(-1).to(r_update.dtype)
+
+    #     pred_x0_local = loop_xt_local + r_update
+    #     pred_x0_local = pred_x0_local * loop_atom_valid_mask.unsqueeze(-1).to(pred_x0_local.dtype)
+
+    #     # occupancy logits
+    #     occ_raw = self.occ_head(token_feat).squeeze(-1)  # [B, N_loop, L_max]
+    #     occ_logits = torch.flip(torch.cumsum(torch.flip(occ_raw, dims=[-1]), dim=-1), dims=[-1])
+    #     occ_logits = occ_logits.masked_fill(~loop_valid_res_mask, -20.0)
+
+    #     return {
+    #         'pred_x0_local': pred_x0_local,
+    #         'pred_occupancy_logits': occ_logits,
+    #         'loop_update_feat': token_feat * loop_valid_res_mask.unsqueeze(-1).to(token_feat.dtype),
+    #         'pi_logits': pi_logits,
+    #     }

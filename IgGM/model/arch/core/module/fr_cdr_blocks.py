@@ -25,8 +25,8 @@ class FRBranch(nn.Module):
         noise_info: dict,
 
     ) -> dict:
-        xt_rota = noise_info['anchor_frame_meta']['rota_orig']
-        xt_trsl = noise_info['anchor_frame_meta']['trsl_orig']
+        xt_rota = noise_info['anchor_frame_meta']['rota_xt']
+        xt_trsl = noise_info['anchor_frame_meta']['trsl_xt']
         ab_local_coords = noise_info['antibody_local_coords']
 
         fr_pred = self.fr_rigid(
@@ -147,6 +147,7 @@ class CDRFusionBlock(nn.Module):
         loop_atom_valid_mask,
         loop_left_anchor_idx,
         loop_right_anchor_idx,
+        sigma_t=None,
     ):
         local_pos = torch.arange(loop_global_res_indices.shape[-1], device=sfea_tns.device, dtype=torch.long)
         loop_frame_rota, loop_frame_trsl = self._build_loop_frames(
@@ -166,6 +167,7 @@ class CDRFusionBlock(nn.Module):
             local_position_ids=local_pos, # cdrs的序列idx用于定义local坐标
             loop_valid_res_mask=loop_valid_res_mask,
             loop_atom_valid_mask=loop_atom_valid_mask,
+            sigma_t=sigma_t,
         )
 
         pred_loop_global = self._local_to_global_loop_coords(

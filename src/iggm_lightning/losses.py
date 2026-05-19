@@ -361,8 +361,8 @@ class IgGMPaperLoss:
         ab_mask = self._normalize_res_mask(inputs["pmsk-ligand"], batch_size=bsz, seq_len=seq_len).to(pred.device)
         cdr_mask = self._normalize_res_mask(inputs["cdr_mask"], batch_size=bsz, seq_len=seq_len).to(pred.device)
 
-        loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, atom14_mask, cdr_mask)
-        loss_bond = self._compute_bond_loss(pred, atom14_tgt, atom14_mask, cdr_mask)
+        loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, cmsk_realatom, cdr_mask)
+        loss_bond = self._compute_bond_loss(pred, atom14_tgt, cmsk_realatom, cdr_mask)
         loss_backbone = self._backbone_mse(inputs, outputs) 
 
         loops_pred,pi_logits,loops_local_label,loop_atom_valid_mask = outputs["3d"]["loop_cords"][-1],outputs["3d"]["pi_logits"],inputs["clean_loop_local_coords"],inputs["loop_atom_valid_mask"]
@@ -377,18 +377,29 @@ class IgGMPaperLoss:
         # using the original atom_mask(different of atom14-mask), aviod the extra loss between with the virtual atoms and reality atom in the atom-14 scheme 
         # Structural violation terms are rigid-transform invariant, so aligned coords are safe here.
 
-        t = inputs["sigama_t"]["cord_scale"] * torch.sqrt(1.0 - inputs["sigama_t"]["alpha_bar"])
-        sigma_data = 2.0 
-        w_t = (t**2 + sigma_data**2) / ((t * sigma_data)**2 + 1e-8)
+        # t = inputs["sigama_t"]["cord_scale"] * torch.sqrt(1.0 - inputs["sigama_t"]["alpha_bar"])
+        # sigma_data = 2.0 
+        # w_t = (t**2 + sigma_data**2) / ((t * sigma_data)**2 + 1e-8)
+        # weight_factor = torch.clamp(w_t, max=10.0).mean()
+
+        
+        sigma = inputs["sigama_t"]["cdr_sigma"].to(device=pred.device, dtype=pred.dtype)
+        sigma = sigma.view(-1).clamp_min(1e-6)
+
+        sigma_data = torch.as_tensor(4.0, device=pred.device, dtype=pred.dtype)
+        w_t = (sigma.square() + sigma_data.square()) / (
+            (sigma * sigma_data).square() + 1e-8
+        )
         weight_factor = torch.clamp(w_t, max=10.0).mean()
+
         
         # cdr loss
         total = (
             self.cfg.backbone_weight * loss_backbone
-            + weight_factor * (loss_cdr + loss_bond) 
+            + weight_factor * loss_cdr
+            + self.cfg.bond_weight * loss_bond
             + self.cfg.smooth_lddt_weight * loss_smooth_lddt
         )
-
         
         if self.idx_save % 50 == 0:
             import time

@@ -278,7 +278,7 @@ class StructureMetrics:
                     loop_metrics[f"rmsd_{loop_name}"] = torch.tensor(0.0, dtype=torch.float32, device=pred_ca.device)
                 else:
                     loop_metrics[f"rmsd_{loop_name}"] = torch.tensor(float("nan"), dtype=torch.float32, device=pred_ca.device)
-                loop_metrics[f"aar_{loop_name}"] = torch.tensor(float(1.0), dtype=torch.float32, device=pred_ca.device) # "nan"
+                loop_metrics[f"aar_{loop_name}"] = torch.tensor(float(0.0), dtype=torch.float32, device=pred_ca.device) # "nan"
                 continue
 
             idx = torch.tensor(idxs, device=pred_cord.device, dtype=torch.long)
