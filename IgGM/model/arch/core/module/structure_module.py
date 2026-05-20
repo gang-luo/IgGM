@@ -85,6 +85,9 @@ class StructureModule(nn.Module):
         loop_left_anchor_idx = self._expand_batch_mask(region_metadata['loop_left_anchor_idx'].to(device=device), n_smpls)
         loop_right_anchor_idx = self._expand_batch_mask(region_metadata['loop_right_anchor_idx'].to(device=device), n_smpls)
 
+        rota_xt = region_metadata['anchor_frame_meta']['rota_xt'] # "rota_xt":,  rota_orig
+        trsl_xt = region_metadata['anchor_frame_meta']['trsl_xt'] # "trsl_xt":,  trsl_orig
+
         antibody_local_coords = region_metadata['antibody_local_coords'].to(device=device, dtype=dtype)
         if antibody_local_coords.ndim == 3:
             antibody_local_coords = antibody_local_coords.unsqueeze(0).expand(n_smpls, -1, -1, -1).clone()
@@ -117,12 +120,11 @@ class StructureModule(nn.Module):
                 encd_tns=encd_tns,
                 antibody_mask=antibody_mask,
                 curr_coords=curr_coords,
-                noise_info={
-                    **region_metadata,
-                    'antibody_local_coords': antibody_local_coords,
-                },
+                rota_xt = rota_xt,
+                trsl_xt = trsl_xt,
+                antibody_local_coords = antibody_local_coords,
             )
-            fr_coords, sfea_tns, _, trsl, rota = fr_out['fr_coords'],fr_out['sfea_tns'],fr_out['fr_pred'],fr_out['trsl'],fr_out['rota']
+            fr_coords, sfea_tns, trsl, rota = fr_out['fr_coords'],fr_out['sfea_tns'],fr_out['trsl'],fr_out['rota']
 
             # 3.cdr全原子坐标去噪
             cdr_out = self.net['cdr_fusion_block'](
