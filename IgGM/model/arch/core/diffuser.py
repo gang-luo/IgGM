@@ -168,7 +168,7 @@ class Diffuser:
         # 注意：左乘/右乘需要和你的 local/global convention 对齐
         rota_xt = torch.matmul(fr_rotation, rota_orig)
         trsl_xt = trsl_orig + fr_translation
-        return fr_rotation, fr_translation, rota_xt, trsl_xt
+        return sigma_rota, sigma_trsl, rota_xt, trsl_xt
 
     @staticmethod
     def _build_antibody_rigid_params(cord_tns_orig, cmsk_mat_orig, antibody_mask):
@@ -246,7 +246,7 @@ class Diffuser:
             cmsk_mat_orig14,
             antibody_mask,
         )
-        _, _ , rota_xt, trsl_xt = self._sample_fr_rigid_transform(rota_orig, trsl_orig, idxs_step, device, dtype)
+        sigma_rota, sigma_trsl , rota_xt, trsl_xt = self._sample_fr_rigid_transform(rota_orig, trsl_orig, idxs_step, device, dtype)
 
         noisy_ab_cord_tns = cord_tns_orig.clone()
         noisy_ab_cord_tns[antibody_mask] = local_to_global_coords(ab_local_coords, rota_xt, trsl_xt)
@@ -330,6 +330,8 @@ class Diffuser:
                 "trsl_orig": trsl_orig.detach().clone(),
                 "rota_xt": rota_xt.detach().clone(),
                 "trsl_xt": trsl_xt.detach().clone(),
+                "fr_sigma_trsl": sigma_trsl.detach().clone(),
+                "fr_sigma_rota": sigma_rota.detach().clone(),
             },
             "antibody_local_coords": ab_local_coords.detach().clone(),
             "antibody_mask": antibody_mask.detach().clone(),

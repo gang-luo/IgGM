@@ -125,6 +125,8 @@ class IgGMPaperLoss:
 
         tgt_rota = inputs['anchor_frame_meta']['rota_orig']
         tgt_trsl = inputs['anchor_frame_meta']['trsl_orig']
+        sigma_rota = inputs['anchor_frame_meta']['fr_sigma_rota']
+        sigma_trsl = inputs['anchor_frame_meta']['fr_sigma_trsl']
 
         pre_rota = outputs['3d']['rota'][-1]
         pre_trsl = outputs["3d"]["trsl"][-1]
@@ -142,7 +144,10 @@ class IgGMPaperLoss:
         tgt_trsl = tgt_trsl.to(device=pre_trsl.device, dtype=pre_trsl.dtype)
         loss_trsl = F.mse_loss(pre_trsl, tgt_trsl, reduction='mean')
 
-        return loss_rota + loss_trsl
+        # add
+        loss_backbone = loss_rota + loss_trsl / (sigma_trsl.square() + 1e-6)
+
+        return loss_backbone,loss_rota, loss_trsl
     
     def _seq_to_aatype(self, seq_obj, bsz: int, seq_len: int, device: torch.device) -> torch.Tensor:
         aa_to_idx = {aa: i for i, aa in enumerate(RESD_NAMES_1C)}
@@ -344,7 +349,7 @@ class IgGMPaperLoss:
 
         # 计算平均 MSE
         denom = valid_mask.sum().clamp_min(1.0)
-        loss_val = sq_diff.sum() / denom
+        loss_val = sq_diff.sum() / (3.0 * denom) # xyz三个坐标
 
         return loss_val
     
@@ -363,7 +368,8 @@ class IgGMPaperLoss:
 
         loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, cmsk_realatom, cdr_mask)
         loss_bond = self._compute_bond_loss(pred, atom14_tgt, cmsk_realatom, cdr_mask)
-        loss_backbone = self._backbone_mse(inputs, outputs) 
+        # loss_backbone = self._backbone_mse(inputs, outputs) 
+        loss_backbone,loss_rota, loss_trsl = self._backbone_mse(inputs, outputs) 
 
         loops_pred,pi_logits,loops_local_label,loop_atom_valid_mask = outputs["3d"]["loop_cords"][-1],outputs["3d"]["pi_logits"],inputs["clean_loop_local_coords"],inputs["loop_atom_valid_mask"]
         loss_cdr = self._cdr_all_atom_mse(
@@ -420,4 +426,6 @@ class IgGMPaperLoss:
             "loss_smooth_lddt": loss_smooth_lddt,
             "loss_bond": loss_bond,
             "weight_factor": weight_factor,
+            "loss_trsl": loss_trsl,
+            "loss_rota": loss_rota,
         }

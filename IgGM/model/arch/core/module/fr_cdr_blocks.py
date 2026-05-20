@@ -25,8 +25,10 @@ class FRBranch(nn.Module):
         noise_info: dict,
 
     ) -> dict:
-        xt_rota = noise_info['anchor_frame_meta']['rota_xt']
-        xt_trsl = noise_info['anchor_frame_meta']['trsl_xt']
+        xt_rota = noise_info['anchor_frame_meta']['rota_orig']
+        xt_trsl = noise_info['anchor_frame_meta']['trsl_orig']
+        # "rota_xt":,  rota_orig
+        # "trsl_xt":,  trsl_orig
         ab_local_coords = noise_info['antibody_local_coords']
 
         fr_pred = self.fr_rigid(

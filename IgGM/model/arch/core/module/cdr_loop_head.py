@@ -76,6 +76,8 @@ class CDRLoopHead(nn.Module):
         )
         self.noise_to_token = nn.Linear(32, c_token)
         self.sigma_data = 4.0
+        nn.init.zeros_(self.coord_head.weight) # 新加
+        nn.init.zeros_(self.coord_head.bias) # 新加
         
 
 

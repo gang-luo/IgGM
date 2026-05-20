@@ -1,0 +1,62 @@
+nohup: ignoring input
+[2026-05-19 23:30:22,572] [INFO] [real_accelerator.py:219:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+WARNING:root:using DS4Sci_EvoformerAttention
+Seed set to 56
+Using bfloat16 Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+You are using a CUDA device ('BW') that has Tensor Cores. To properly utilize them, you should set `torch.set_float32_matmul_precision('medium' | 'high')` which will trade-off precision for performance. For more details, read https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html#torch.set_float32_matmul_precision
+Initializing distributed: GLOBAL_RANK: 0, MEMBER: 1/1
+WARNING: Logging before InitGoogleLogging() is written to STDERR
+I0519 23:31:21.688922 79757 ProcessGroupNCCL.cpp:934] [PG ID 0 PG GUID 0 Rank 0] ProcessGroupNCCL initialization options: size: 1, global rank: 0, TIMEOUT(ms): 1800000, USE_HIGH_PRIORITY_STREAM: 0, SPLIT_FROM: 0, SPLIT_COLOR: 0, PG Name: 0
+I0519 23:31:21.688952 79757 ProcessGroupNCCL.cpp:943] [PG ID 0 PG GUID 0 Rank 0] ProcessGroupNCCL environments: NCCL version: 2.22.3, TORCH_NCCL_ASYNC_ERROR_HANDLING: 3, TORCH_NCCL_DUMP_ON_TIMEOUT: 0, TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC: 60000, TORCH_NCCL_DESYNC_DEBUG: 0, TORCH_NCCL_ENABLE_TIMING: 0, TORCH_NCCL_BLOCKING_WAIT: 0, TORCH_DISTRIBUTED_DEBUG: OFF, TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK: 0, TORCH_NCCL_ENABLE_MONITORING: 1, TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: 480, TORCH_NCCL_TRACE_BUFFER_SIZE: 0, TORCH_NCCL_COORD_CHECK_MILSEC: 1000, TORCH_NCCL_NAN_CHECK: 0, TORCH_NCCL_CUDA_EVENT_CACHE: 0, TORCH_NCCL_LOG_CPP_STACK_ON_UNCLEAN_SHUTDOWN: 1
+I0519 23:31:21.689034 79757 ProcessGroupNCCL.cpp:1018] [PG ID 0 PG GUID 0 Rank 0] Eagerly connecting nccl backend with device cuda:1
+I0519 23:31:21.690660 79757 ProcessGroupNCCL.cpp:2291] [PG ID 0 PG GUID 0(default_pg) Rank 0] ProcessGroupNCCL broadcast unique ID through store took 0.02071 ms
+I0519 23:31:21.857071 79757 ProcessGroupNCCL.cpp:2330] [PG ID 0 PG GUID 0(default_pg) Rank 0] ProcessGroupNCCL created ncclComm_ 0x55d731714600 on CUDA device: 
+I0519 23:31:21.857127 79757 ProcessGroupNCCL.cpp:2335] [PG ID 0 PG GUID 0(default_pg) Rank 0] NCCL_DEBUG: N/A
+----------------------------------------------------------------------------------------------------
+distributed_backend=nccl
+All distributed processes registered. Starting with 1 processes
+----------------------------------------------------------------------------------------------------
+
+wandb: WARNING The anonymous setting has no effect and will be removed in a future version.
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+wandb: Currently logged in as: luog to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run 2tq8dwis
+wandb: Tracking run with wandb version 0.27.0
+wandb: Run data is saved locally in outputs/lightning_stage_test_nobackbone_loss/wandb/run-20260519_233124-2tq8dwis
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run iggm-stage_test_nobackbone_loss
+wandb: ⭐️ View project at https://wandb.ai/mllm-csu/IgGM
+wandb: 🚀 View run at https://wandb.ai/mllm-csu/IgGM/runs/2tq8dwis
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0,1]
+┏━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name           ┃ Type        ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model          │ DesignModel │ 15.4 M │ train │     0 │
+│ 1 │ plm_featurizer │ PPIModel    │  651 M │ eval  │     0 │
+└───┴────────────────┴─────────────┴────────┴───────┴───────┘
+Trainable params: 15.4 M                                                        
+Non-trainable params: 651 M                                                     
+Total params: 666 M                                                             
+Total estimated model params size (MB): 2.7 K                                   
+Modules in train mode: 710                                                      
+Modules in eval mode: 410                                                       
+Total FLOPs: 0                                                                  
+[2026-05-19 23:31:34,941] [INFO] [real_accelerator.py:219:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+[2026-05-19 23:31:35,122] [INFO] [real_accelerator.py:219:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+[2026-05-19 23:31:35,141] [INFO] [real_accelerator.py:219:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+[2026-05-19 23:31:35,320] [INFO] [real_accelerator.py:219:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+WARNING:root:using DS4Sci_EvoformerAttention
+WARNING:root:using DS4Sci_EvoformerAttention
+WARNING:root:using DS4Sci_EvoformerAttention
+WARNING:root:using DS4Sci_EvoformerAttention
+[2026-05-19 23:44:46,444] [INFO] [real_accelerator.py:219:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+[2026-05-19 23:44:46,505] [INFO] [real_accelerator.py:219:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+[2026-05-19 23:44:46,506] [INFO] [real_accelerator.py:219:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+[2026-05-19 23:44:46,662] [INFO] [real_accelerator.py:219:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+WARNING:root:using DS4Sci_EvoformerAttention
+WARNING:root:using DS4Sci_EvoformerAttention
+WARNING:root:using DS4Sci_EvoformerAttention
+WARNING:root:using DS4Sci_EvoformerAttention
