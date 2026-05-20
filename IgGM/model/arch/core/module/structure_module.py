@@ -85,8 +85,14 @@ class StructureModule(nn.Module):
         loop_left_anchor_idx = self._expand_batch_mask(region_metadata['loop_left_anchor_idx'].to(device=device), n_smpls)
         loop_right_anchor_idx = self._expand_batch_mask(region_metadata['loop_right_anchor_idx'].to(device=device), n_smpls)
 
-        rota_xt = region_metadata['anchor_frame_meta']['rota_xt'] # "rota_xt":,  rota_orig
-        trsl_xt = region_metadata['anchor_frame_meta']['trsl_xt'] # "trsl_xt":,  trsl_orig
+        rota_xt = region_metadata['anchor_frame_meta']['rota_xt']
+        trsl_xt = region_metadata['anchor_frame_meta']['trsl_xt']
+        if rota_xt.ndim == 2:
+            rota_xt = rota_xt.unsqueeze(0).expand(n_smpls, -1, -1).clone()
+        if trsl_xt.ndim == 1:
+            trsl_xt = trsl_xt.unsqueeze(0).expand(n_smpls, -1).clone()
+        rota_xt = rota_xt.to(device=device, dtype=dtype)
+        trsl_xt = trsl_xt.to(device=device, dtype=dtype)
 
         antibody_local_coords = region_metadata['antibody_local_coords'].to(device=device, dtype=dtype)
         if antibody_local_coords.ndim == 3:
@@ -96,7 +102,13 @@ class StructureModule(nn.Module):
         if loop_xt_local.ndim == 4:
             loop_xt_local = loop_xt_local.unsqueeze(0).expand(n_smpls, -1, -1, -1, -1).clone()
 
-        sigma_t = torch.as_tensor(region_metadata["sigama_t"]["cdr_sigma"], device=device, dtype=dtype).view(1).expand(n_smpls)
+        sigma_raw = torch.as_tensor(region_metadata["sigama_t"]["cdr_sigma"], device=device, dtype=dtype).view(-1)
+        if sigma_raw.numel() == 1:
+            sigma_t = sigma_raw.expand(n_smpls)
+        elif sigma_raw.numel() == n_smpls:
+            sigma_t = sigma_raw
+        else:
+            sigma_t = sigma_raw[:1].expand(n_smpls)
 
         cdr_mask = self._expand_batch_mask(region_metadata['cdr_mask'].to(device=device, dtype=torch.bool), n_smpls)
         antigen_mask = ~antibody_mask
@@ -142,6 +154,11 @@ class StructureModule(nn.Module):
             )
             
             curr_coords, sfea_tns, loop_xt_local = cdr_out['merged_coords'], cdr_out['sfea_after_cdr'],cdr_out['loop_xt_new_local']
+
+            # iterative refinement: next block should denoise from the current estimate,
+            # instead of repeatedly predicting from the initial x_t rigid state.
+            rota_xt = rota
+            trsl_xt = trsl
             
 
             # plddt预测

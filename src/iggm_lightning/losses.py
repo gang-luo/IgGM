@@ -134,18 +134,31 @@ class IgGMPaperLoss:
         tgt_rota_f32 = tgt_rota.to(device=pre_rota.device, dtype=torch.float32)
         pre_rota_f32 = pre_rota.to(device=pre_rota.device, dtype=torch.float32)
 
-        # # Correct SO(3) tangent-vector error:
+        # geodesic SO(3) error in tangent space
         r_err_f32 = torch.matmul(tgt_rota_f32, pre_rota_f32.transpose(-1, -2))
         eps_rota_f32 = skew2vec(log_rmat(r_err_f32))
-        loss_rota = (eps_rota_f32 ** 2).mean().to(pre_rota.dtype)
-        # ---------------------------------------------------------
+        sq_rota = (eps_rota_f32 ** 2).sum(dim=-1)
+
+        sigma_rota = torch.as_tensor(sigma_rota, device=pre_rota.device, dtype=pre_rota.dtype).view(-1)
+        sigma_rota = sigma_rota.clamp_min(5e-2)
+        if sigma_rota.numel() == 1:
+            sigma_rota = sigma_rota.expand_as(sq_rota)
+        else:
+            sigma_rota = sigma_rota[: sq_rota.numel()]
+        loss_rota = (sq_rota / (sigma_rota.square() + 1e-6)).mean().to(pre_rota.dtype)
 
         # Translation, only valid if both are absolute global translations
         tgt_trsl = tgt_trsl.to(device=pre_trsl.device, dtype=pre_trsl.dtype)
-        loss_trsl = F.mse_loss(pre_trsl, tgt_trsl, reduction='mean')
+        sq_trsl = ((pre_trsl - tgt_trsl) ** 2).sum(dim=-1)
+        sigma_trsl = torch.as_tensor(sigma_trsl, device=pre_trsl.device, dtype=pre_trsl.dtype).view(-1)
+        sigma_trsl = sigma_trsl.clamp_min(5e-2)
+        if sigma_trsl.numel() == 1:
+            sigma_trsl = sigma_trsl.expand_as(sq_trsl)
+        else:
+            sigma_trsl = sigma_trsl[: sq_trsl.numel()]
+        loss_trsl = (sq_trsl / (sigma_trsl.square() + 1e-6)).mean()
 
-        # add
-        loss_backbone = loss_rota + loss_trsl / (sigma_trsl.square() + 1e-6)
+        loss_backbone = loss_rota + loss_trsl
 
         return loss_backbone,loss_rota, loss_trsl
     
@@ -313,13 +326,15 @@ class IgGMPaperLoss:
         # inter mask
         mask_inter = cdr_mask[:, :-1] & cdr_mask[:, 1:] & atom14_mask[:, :-1, 2] & atom14_mask[:, 1:, 0] # [B, L-1]
 
-        # MSE 损失计算
-        loss_intra = F.mse_loss(pred_bonds_intra[mask_intra], true_bonds_intra[mask_intra], reduction='mean')
+        if mask_intra.any():
+            loss_intra = F.mse_loss(pred_bonds_intra[mask_intra], true_bonds_intra[mask_intra], reduction='mean')
+        else:
+            loss_intra = pred_coords.new_tensor(0.0)
         
         if mask_inter.any():
             loss_inter = F.mse_loss(pred_bonds_inter[mask_inter], true_bonds_inter[mask_inter], reduction='mean')
         else:
-            loss_inter = 0.0
+            loss_inter = pred_coords.new_tensor(0.0)
 
         return loss_intra + loss_inter
 
@@ -407,15 +422,7 @@ class IgGMPaperLoss:
             + self.cfg.smooth_lddt_weight * loss_smooth_lddt
         )
         
-        if self.idx_save % 50 == 0:
-            import time
-            ts = int(time.time())
-            torch.save({
-                'perturb': inputs['cord-p'],
-                'pre': pred,
-                'clean': atom14_tgt
-            }, f'/root/private_data/luog/codex/IgGM/see/seefile/valB5_{ts}.pt')
-        self.idx_save+=1
+        self.idx_save += 1
             
 
         return {
