@@ -152,7 +152,7 @@ class IgGMPaperLoss:
         w_trsl = torch.clamp(w_trsl, max=25.0)
         pre_trsl = pre_trsl_ref
         tgt_trsl_use = tgt_trsl.to(device=pre_trsl.device, dtype=pre_trsl.dtype)
-        sq_trsl = F.huber_loss(pre_trsl, tgt_trsl_use, reduction='none', delta=2.0).sum(dim=-1)
+        sq_trsl = ((pre_trsl - tgt_trsl_use) ** 2).sum(dim=-1)
         w_use = w_trsl.expand_as(sq_trsl) if w_trsl.numel() == 1 else w_trsl[: sq_trsl.numel()]
         loss_trsl = (sq_trsl * w_use).mean()
 
@@ -323,7 +323,7 @@ class IgGMPaperLoss:
             diff = pred_loop_local - clean_loop_local
 
             # 仅对有效的原子求平方误差
-            sq_diff = F.huber_loss(pred_loop_local, clean_loop_local, reduction='none', delta=2.0) * valid_mask
+            sq_diff = (diff ** 2) * valid_mask
 
             # 先在特征空间 (dim 1,2,3,4) 求和并平均
             denom = valid_mask.sum(dim=(1, 2, 3, 4)).clamp_min(1.0)
@@ -375,15 +375,6 @@ class IgGMPaperLoss:
             + self.cfg.smooth_lddt_weight * loss_smooth_lddt
         )
         
-        # if self.idx_save % 50 == 0:
-        import time
-        ts = int(time.time())
-        torch.save({
-            'perturb': inputs['cord-p'],
-            'pre': pred,
-            'clean': atom14_tgt
-        }, f'/root/private_data/luog/codex/IgGM/see/seefile/val22_{ts}.pt')
-            
         self.idx_save += 1
             
         return {
