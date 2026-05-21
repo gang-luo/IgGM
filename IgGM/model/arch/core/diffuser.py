@@ -156,7 +156,7 @@ class Diffuser:
             * torch.sqrt(1.0 - alpha_bar_rota)
         )
 
-        # Translation relative perturbation
+        # Translation perturbation under VP-style schedule: x_t = sqrt(alpha_bar) * x_0 + sigma * eps
         fr_translation = sigma_trsl * torch.randn(3, device=device, dtype=dtype)
 
         # Rotation relative perturbation
@@ -165,9 +165,9 @@ class Diffuser:
 
         fr_rotation = so3_scale(fr_noise, sigma_rota)
 
-        # 注意：左乘/右乘需要和你的 local/global convention 对齐
+        # NOTE: keep rigid convention consistent with training targets.
         rota_xt = torch.matmul(fr_rotation, rota_orig)
-        trsl_xt = trsl_orig + fr_translation
+        trsl_xt = torch.sqrt(alpha_bar_trsl) * trsl_orig + fr_translation
         return sigma_rota, sigma_trsl, rota_xt, trsl_xt
 
     @staticmethod
@@ -233,7 +233,8 @@ class Diffuser:
         loop_occ_target = prot_data_orig["loop_occ_target"].to(device=device, dtype=torch.bool)
         loop_valid_res_mask = prot_data_orig["loop_valid_res_mask"].to(device=device, dtype=torch.bool)
         loop_atom_valid_mask = prot_data_orig["loop_atom_valid_mask"].to(device=device, dtype=torch.bool)
-        loop_atom_valid_mask = loop_valid_res_mask.unsqueeze(-1).expand_as(loop_atom_valid_mask) # replace for the atom14 mask for add noise to all loops atoms
+        # supervision/update mask for atom14 denoising branch (include virtual atoms for residue-typing signal)
+        loop_atom_supervise_mask = loop_valid_res_mask.unsqueeze(-1).expand_as(loop_atom_valid_mask)
         loop_global_res_indices = prot_data_orig["loop_global_res_indices"].to(device=device)
         # 检查一下这个loops的mask是否正确
         
@@ -259,7 +260,7 @@ class Diffuser:
             loop_true_len,
             loop_left_anchor_idx,
             loop_right_anchor_idx,
-            loop_atom_valid_mask, # atom14 all open?
+            loop_atom_supervise_mask,
         )
         # # define the noise scale and sample noise for constrcut loop local coordinates
         alpha_bar_local = self.trsl_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
@@ -270,8 +271,8 @@ class Diffuser:
         )
         sigma_cdr = local_noise_scale
         local_noise = local_noise_scale * torch.randn_like(clean_loop_local_coords)
-        noisy_loop_local_coords = clean_loop_local_coords + local_noise * loop_atom_valid_mask.unsqueeze(-1).to(dtype)
-        noisy_loop_local_coords = noisy_loop_local_coords * loop_atom_valid_mask.unsqueeze(-1).to(dtype)
+        noisy_loop_local_coords = clean_loop_local_coords + local_noise * loop_atom_supervise_mask.unsqueeze(-1).to(dtype)
+        noisy_loop_local_coords = noisy_loop_local_coords * loop_atom_supervise_mask.unsqueeze(-1).to(dtype)
 
         noisy_loop_global_coords, noisy_anchor_rots, noisy_anchor_trans = rebuild_loops_from_local_coords(
             noisy_loop_local_coords,
@@ -280,7 +281,7 @@ class Diffuser:
             loop_true_len,
             loop_left_anchor_idx,
             loop_right_anchor_idx,
-            loop_atom_valid_mask,
+            loop_atom_supervise_mask,
         )
         cord_tns_noisy = merge_noisy_fr_and_loops(
             cord_tns_orig,
@@ -289,7 +290,7 @@ class Diffuser:
             loop_global_res_indices,
             loop_true_len,
             fr_mask,
-            loop_atom_valid_mask,
+            loop_atom_supervise_mask,
         )
 
         prot_data_pert = {
@@ -321,6 +322,7 @@ class Diffuser:
             "loop_occ_target": loop_occ_target.detach().clone(),
             "loop_valid_res_mask": loop_valid_res_mask.detach().clone(),
             "loop_atom_valid_mask": loop_atom_valid_mask.detach().clone(),
+            "loop_atom_supervise_mask": loop_atom_supervise_mask.detach().clone(),
             "loop_global_res_indices": loop_global_res_indices.detach().clone(),
             "clean_loop_local_coords": clean_loop_local_coords.detach().clone(),
             "noisy_loop_local_coords": noisy_loop_local_coords.detach().clone(),
