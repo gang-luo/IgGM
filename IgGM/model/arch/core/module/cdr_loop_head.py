@@ -83,45 +83,47 @@ class CDRLoopHead(nn.Module):
 
     def forward(
             self,
-            loop_sfea: torch.Tensor,            # [B, N_loop, L_max, C_s]
-            loop_encd: torch.Tensor,            # [B, N_loop, L_max, C_e]
-            loop_xt_local: torch.Tensor,        # [B, N_loop, L_max, N_atom, 3]
-            loop_type_ids: torch.Tensor,        # [B, N_loop]
-            local_position_ids: torch.Tensor,   # [L_max]
-            loop_valid_res_mask: torch.Tensor,  # [B, N_loop, L_max]
-            loop_atom_valid_mask: torch.Tensor, # [B, N_loop, L_max, N_atom]
-            sigma_t: torch.Tensor,  # [B]
+            loop_sfea: torch.Tensor,
+            loop_encd: torch.Tensor,
+            loop_xt_local: torch.Tensor,
+            loop_type_ids: torch.Tensor,
+            local_position_ids: torch.Tensor,
+            loop_valid_res_mask: torch.Tensor,
+            loop_atom_valid_mask: torch.Tensor,
+            sigma_t: torch.Tensor,
         ) -> dict:
             bsz, n_loop, lmax = loop_xt_local.shape[:3]
+            device, dtype = loop_sfea.device, loop_sfea.dtype
 
-            if lmax > self.max_positions:
-                raise ValueError(f'loop length {lmax} exceeds max_positions={self.max_positions}')
-
-            device = loop_sfea.device
-            dtype = loop_sfea.dtype
-
-            # loop type embedding
             type_feat = self.loop_type(loop_type_ids.to(device)).view(bsz, n_loop, 1, -1).expand(-1, -1, lmax, -1)
-
-            # local position embedding
             pos_feat = self.local_pos(local_position_ids.to(device)).view(1, 1, lmax, -1).expand(bsz, n_loop, -1, -1)
 
-            # --- 修改点 1: 移除 EDM 缩放，直接生成连续时间步的 noise embedding ---
+            # ========== 黄金 EDM 预处理 (Preconditioning) ==========
             sigma = sigma_t.to(device=device, dtype=dtype).view(bsz).clamp_min(1e-8)
-            c_noise = 0.25 * torch.log(sigma)  # 纯 VP 方案下的标准噪声编码
-            noise_feat = self.noise_embed(c_noise.unsqueeze(-1))  # [B, 32]
-            noise_feat = noise_feat.view(bsz, 1, 1, -1).expand(-1, n_loop, lmax, -1)
+            sigma2 = sigma.square()
+            sigma_data = sigma.new_tensor(4.0) # 经验值：真实蛋白内部坐标的经验标准差大约为 4.0A
+            sigma_data2 = sigma_data.square()
+            denom = torch.sqrt(sigma2 + sigma_data2)
 
-            # token-level conditioning
+            c_skip = (sigma_data2 / (sigma2 + sigma_data2)).view(bsz, 1, 1, 1, 1)
+            c_out = ((sigma * sigma_data) / denom).view(bsz, 1, 1, 1, 1)
+            c_in = (1.0 / denom).view(bsz, 1, 1, 1, 1)
+            
+            # Noise embedding (Karras formulation)
+            c_noise = 0.25 * torch.log(sigma)
+            noise_feat = self.noise_embed(c_noise.unsqueeze(-1))
+            noise_feat = noise_feat.view(bsz, 1, 1, -1).expand(-1, n_loop, lmax, -1)
+            # ========================================================
+
             token_cond = self.single_cond(
                 torch.cat([loop_sfea, loop_encd, type_feat, pos_feat], dim=-1)
             )
-            token_cond = token_cond + self.noise_to_token(noise_feat)
-            token_cond = token_cond * loop_valid_res_mask.unsqueeze(-1).to(dtype)
+            token_cond = (token_cond + self.noise_to_token(noise_feat)) * loop_valid_res_mask.unsqueeze(-1).to(dtype)
 
-            # --- 修改点 2: 直接使用 xt_in，不做 c_in 的缩放 ---
-            xt_in = loop_xt_local.reshape(bsz, n_loop, lmax, -1)  # [B, N_loop, L_max, N_atom*3]
-            atom_mask = loop_atom_valid_mask.to(dtype)            # [B, N_loop, L_max, N_atom]
+            # 【重点】对输入坐标应用 c_in 缩放，保证送入网络的数据方差始终是 O(1)
+            xt_in = (loop_xt_local * c_in).reshape(bsz, n_loop, lmax, -1)
+            atom_mask = loop_atom_valid_mask.to(dtype)
+
 
             # atom encoder input: current local coords + token condition + atom-valid mask
             atom_encoder_in = torch.cat([xt_in, token_cond, atom_mask], dim=-1)
@@ -145,17 +147,17 @@ class CDRLoopHead(nn.Module):
             # token -> atom decoding
             atom_decoder_in = torch.cat([atom_feat, token_feat, xt_in], dim=-1)
             atom_hidden = self.atom_decoder(atom_decoder_in)
-
-            # add luog
-            pi_logits = self.topology_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
-
-            # --- 修改点 3: 直接以残差形式预测 x0，去除 c_skip 和 c_out ---
+        
+            # --- EDM 的残差与跳跃连接输出 ---
             r_update = self.coord_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
             r_update = r_update * loop_atom_valid_mask.unsqueeze(-1).to(r_update.dtype)
 
-            # VP style: x_0 = x_t + \Delta x (预测残差能让网络更容易优化)
-            pred_x0_local = loop_xt_local + r_update
+            # 【重点】结合跳跃连接重构 x0
+            pred_x0_local = c_skip * loop_xt_local + c_out * r_update
             pred_x0_local = pred_x0_local * loop_atom_valid_mask.unsqueeze(-1).to(pred_x0_local.dtype)
+
+            # add luog
+            pi_logits = self.topology_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
 
             # occupancy logits
             occ_raw = self.occ_head(token_feat).squeeze(-1)  # [B, N_loop, L_max]

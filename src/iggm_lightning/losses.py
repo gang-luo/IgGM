@@ -359,15 +359,19 @@ class IgGMPaperLoss:
 
         loss_vio = torch.zeros_like(loss_backbone)
         
-        # --- 修改点 5: 采用统一且稳定的 VP SNR 截断权重 ---
-        sigma = inputs["sigama_t"]["cdr_sigma"].to(device=pred.device, dtype=pred.dtype)
-        sigma = sigma.view(-1).clamp_min(1e-6)
+        sigma_raw = inputs["sigama_t"]["sigma_raw"].to(device=pred.device, dtype=pred.dtype).view(-1)
+        sigma = sigma_raw.clamp_min(1e-6)
+        
+        # ========== EDM 黄金损失权重 ==========
+        sigma_data = 4.0
+        # 这是 Karras 等人证明过的最优 SNR 权重方案：
+        w_t = (sigma.square() + sigma_data**2) / ((sigma * sigma_data).square() + 1e-8)
+        
+        # 截断最高权重，防止极早期的小 sigma 引发梯度爆炸
+        weight_factor = torch.clamp(w_t, max=5.0).mean()
+        # ======================================
 
-        # 计算 SNR = 1 / sigma^2，限制最大值防止 t 趋近 0 时梯度爆炸
-        w_t = 1.0 / (sigma.square() + 1e-6)
-        weight_factor = torch.clamp(w_t, max=20.0).mean()
-
-        # cdr loss
+        # CDR loss
         total = (
             self.cfg.backbone_weight * loss_backbone
             + weight_factor * loss_cdr
