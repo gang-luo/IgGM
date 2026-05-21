@@ -115,30 +115,6 @@ class Diffuser:
         aa_seqs_pert = prob2seq(prob_tns_pert, stoc_seq=True)
         return prob_tns_orig, prob_tns_pert, aa_seqs_pert
 
-    # def _sample_fr_rigid_transform(self, rota_orig, trsl_orig, idxs_step, device, dtype):
-    #     """Sample one rigid transform noise for the antibody-level rigid params at timestep t."""
-
-    #     alpha_bar_trsl = self.trsl_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
-    #     alpha_bar_rota = self.rota_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
-    #     fr_translation = (
-    #         self.fr_noise_scale_trsl
-    #         * self.cord_scale
-    #         * torch.sqrt(1.0 - alpha_bar_trsl)
-    #         * torch.randn(3, device=device, dtype=dtype)
-    #     )
-    #     rota_buf = self.rota_buf_list_fwd[idxs_step].to(device=device, dtype=dtype)
-    #     fr_noise = rota_buf[random.randrange(self.rota_buf_size)].unsqueeze(0)
-    #     fr_rotation = so3_scale(fr_noise, torch.sqrt(1.0 - alpha_bar_rota) * self.fr_noise_scale_rota)[0]
-
-    #     rota_xt = torch.bmm(
-    #         so3_scale(rota_orig.unsqueeze(0), torch.sqrt(alpha_bar_rota)),
-    #         fr_rotation.unsqueeze(0),
-    #     )[0]
-    #     trsl_xt = torch.sqrt(alpha_bar_trsl) * trsl_orig + fr_translation
-
-    #     return fr_rotation, fr_translation, rota_xt, trsl_xt
-
-
     def _sample_fr_rigid_transform(self, rota_orig, trsl_orig, idxs_step, device, dtype):
         """Sample one SE(3) perturbation for antibody-level FR rigid frame."""
 
@@ -212,9 +188,6 @@ class Diffuser:
         dtype = prot_data_orig["cord"].dtype
 
         aa_seq_orig = prot_data_orig["seq"]
-        # cord_tns_orig = prot_data_orig["cord"]
-        # cmsk_mat_orig = prot_data_orig["cmsk"]
-
         cord_tns_orig = prot_data_orig["cords_atom14"]
         cmsk_mat_orig = prot_data_orig["cmsk"]
         cmsk_mat_orig14 = prot_data_orig["cmsk_atom14"]
@@ -236,9 +209,7 @@ class Diffuser:
         # supervision/update mask for atom14 denoising branch (include virtual atoms for residue-typing signal)
         loop_atom_supervise_mask = loop_valid_res_mask.unsqueeze(-1).expand_as(loop_atom_valid_mask)
         loop_global_res_indices = prot_data_orig["loop_global_res_indices"].to(device=device)
-        # 检查一下这个loops的mask是否正确
         
-        # 氨基酸序列扰动-仅在CDR区域进行扰动，以便于对齐后续的结构扰动结果
         _, _, aa_seqs_pert = self._sample_probabilities(aa_seq_orig, pmsk_vec, idxs_step, device)
 
         # stage-1 forward perturbation: antibody-level rigid params q0 -> qt
@@ -262,17 +233,33 @@ class Diffuser:
             loop_right_anchor_idx,
             loop_atom_supervise_mask,
         )
-        # # define the noise scale and sample noise for constrcut loop local coordinates
+
+        # ====== 修正为标准的 VP 方案 ======
         alpha_bar_local = self.trsl_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
+        
+        # 1. 计算 VP 方案的均值衰减系数: sqrt(alpha_bar)
+        mu_scale_local = torch.sqrt(alpha_bar_local)
+        
+        # 2. 计算 VP 方案的噪声系数: sqrt(1 - alpha_bar)
         local_noise_scale = (
             self.cdr_local_noise_scale
             * self.cord_scale
             * torch.sqrt(torch.tensor(1.0, device=device, dtype=dtype) - alpha_bar_local)
         )
         sigma_cdr = local_noise_scale
+        
+        # 3. 采样标准正态噪声并放大
         local_noise = local_noise_scale * torch.randn_like(clean_loop_local_coords)
-        noisy_loop_local_coords = clean_loop_local_coords + local_noise * loop_atom_supervise_mask.unsqueeze(-1).to(dtype)
+        
+        # 4. 执行 VP 加噪：x_t = sqrt(alpha_bar) * x_0 + 噪声
+        noisy_loop_local_coords = (
+            mu_scale_local.view(-1, 1, 1) * clean_loop_local_coords + 
+            local_noise * loop_atom_supervise_mask.unsqueeze(-1).to(dtype)
+        )
+        
+        # 5. 过滤掉无效原子
         noisy_loop_local_coords = noisy_loop_local_coords * loop_atom_supervise_mask.unsqueeze(-1).to(dtype)
+        # ==================================
 
         noisy_loop_global_coords, noisy_anchor_rots, noisy_anchor_trans = rebuild_loops_from_local_coords(
             noisy_loop_local_coords,
