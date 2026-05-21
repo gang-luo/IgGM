@@ -82,6 +82,7 @@ class StructureModule(nn.Module):
         loop_global_res_indices = self._expand_batch_mask(region_metadata['loop_global_res_indices'].to(device=device), n_smpls)
         loop_valid_res_mask = self._expand_batch_mask(region_metadata['loop_valid_res_mask'].to(device=device, dtype=torch.bool), n_smpls)
         loop_atom_valid_mask = self._expand_batch_mask(region_metadata['loop_atom_valid_mask'].to(device=device, dtype=torch.bool), n_smpls)
+        loop_atom_supervise_mask = self._expand_batch_mask(region_metadata.get('loop_atom_supervise_mask', region_metadata['loop_atom_valid_mask']).to(device=device, dtype=torch.bool), n_smpls)
         loop_left_anchor_idx = self._expand_batch_mask(region_metadata['loop_left_anchor_idx'].to(device=device), n_smpls)
         loop_right_anchor_idx = self._expand_batch_mask(region_metadata['loop_right_anchor_idx'].to(device=device), n_smpls)
 
@@ -147,7 +148,7 @@ class StructureModule(nn.Module):
                 loop_type_ids=loop_type_ids,
                 loop_global_res_indices=loop_global_res_indices,
                 loop_valid_res_mask=loop_valid_res_mask,
-                loop_atom_valid_mask=loop_valid_res_mask.unsqueeze(-1).expand_as(loop_atom_valid_mask), # 由于为全原子，所以直接开放有效残基的全部原子用于感知和移动。 原loop_atom_valid_mask，直接根据有效res替换； 
+                loop_atom_valid_mask=loop_atom_supervise_mask,
                 loop_left_anchor_idx=loop_left_anchor_idx,
                 loop_right_anchor_idx=loop_right_anchor_idx,
                 sigma_t=sigma_t,
