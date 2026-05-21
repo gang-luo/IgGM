@@ -145,7 +145,9 @@ class IgGMPaperLoss:
             sigma_rota = sigma_rota.expand_as(sq_rota)
         else:
             sigma_rota = sigma_rota[: sq_rota.numel()]
-        loss_rota = (sq_rota / (sigma_rota.square() + 1e-6)).mean().to(pre_rota.dtype)
+        w_rota = 1.0 / (sigma_rota.square() + 1e-6)
+        w_rota = torch.clamp(w_rota, max=64.0)
+        loss_rota = (sq_rota * w_rota).mean().to(pre_rota.dtype)
 
         # Translation, only valid if both are absolute global translations
         tgt_trsl = tgt_trsl.to(device=pre_trsl.device, dtype=pre_trsl.dtype)
@@ -156,7 +158,9 @@ class IgGMPaperLoss:
             sigma_trsl = sigma_trsl.expand_as(sq_trsl)
         else:
             sigma_trsl = sigma_trsl[: sq_trsl.numel()]
-        loss_trsl = (sq_trsl / (sigma_trsl.square() + 1e-6)).mean()
+        w_trsl = 1.0 / (sigma_trsl.square() + 1e-6)
+        w_trsl = torch.clamp(w_trsl, max=25.0)
+        loss_trsl = (sq_trsl * w_trsl).mean()
 
         loss_backbone = loss_rota + loss_trsl
 
