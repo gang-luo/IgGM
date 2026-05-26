@@ -2,18 +2,70 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
-from IgGM.utils.fr_cdr_diffusion_utils import build_anchor_frame_from_full_coords
 from .fr_rigid_head import FRRigidHead
 from .cdr_loop_head import CDRLoopHead
+from IgGM.utils.fr_cdr_diffusion_utils import build_anchor_frame_from_full_coords,local_to_global_coords
 
 
 class FRBranch(nn.Module):
-    """FR rigid denoise branch wrapper."""
+    """Predict FR rigid transform from full frame-state context and apply it internally."""
 
-    def __init__(self, c_s: int = 384):
+    def __init__(self, c_s: int = 384, c_e: int = 64, c_hidden: int = 384) -> None:
         super().__init__()
-        self.fr_rigid = FRRigidHead(c_s=c_s)
+        self.res_proj = nn.Sequential(
+            nn.LayerNorm(c_s * 2 + c_e),
+            nn.Linear(c_s * 2 + c_e , c_hidden),
+            nn.ReLU(),
+            nn.Linear(c_hidden, c_hidden),
+            nn.ReLU(),
+        )
+        self.pool_proj = nn.Sequential(
+            nn.LayerNorm(c_hidden),
+            nn.Linear(c_hidden, c_hidden),
+            nn.ReLU(),
+        )
+
+        self.linear_q = nn.Linear(c_hidden, 4)
+        self.linear_t = nn.Linear(c_hidden, 3)
+        self.delta_feat = nn.Linear(c_hidden, c_s)
+
+        nn.init.zeros_(self.linear_q.weight)
+        nn.init.zeros_(self.linear_q.bias)
+
+        with torch.no_grad():
+            self.linear_q.bias[0] = 1.0
+
+        nn.init.zeros_(self.linear_t.weight)
+        nn.init.zeros_(self.linear_t.bias)
+
+    @staticmethod
+    def _quaternion_to_rotation(quat: torch.Tensor) -> torch.Tensor:
+        quat = F.normalize(quat, dim=-1)
+        w, x, y, z = quat.unbind(dim=-1)
+        ww, xx, yy, zz = w * w, x * x, y * y, z * z
+        wx, wy, wz = w * x, w * y, w * z
+        xy, xz, yz = x * y, x * z, y * z
+        rot = torch.stack(
+            [
+                ww + xx - yy - zz,
+                2.0 * (xy - wz),
+                2.0 * (xz + wy),
+                2.0 * (xy + wz),
+                ww - xx + yy - zz,
+                2.0 * (yz - wx),
+                2.0 * (xz - wy),
+                2.0 * (yz + wx),
+                ww - xx - yy + zz,
+            ],
+            dim=-1,
+        )
+        return rot.view(*quat.shape[:-1], 3, 3)
+
+    @staticmethod
+    def _apply_rigid(coords: torch.Tensor, rot: torch.Tensor, trsl: torch.Tensor) -> torch.Tensor:
+        return torch.matmul(coords, rot.transpose(-1, -2)) + trsl.view(1, 1, 3)
 
     def forward(
         self,
@@ -21,34 +73,57 @@ class FRBranch(nn.Module):
         sfea_tns_init: torch.Tensor,
         encd_tns: torch.Tensor,
         antibody_mask: torch.Tensor,
-        curr_coords: torch.Tensor,
-        noise_info: dict,
-
+        curr_coords: torch.Tensor,  # 当前带噪坐标 (供其他损失使用)
+        rota_xt: torch.Tensor,                # 当前时间步的抗体刚体旋转参数 (x_t)
+        trsl_xt: torch.Tensor,                # 当前时间步的抗体刚体平移参数 (x_t)
+        antibody_local_coords: torch.Tensor,  # clean local coordinates in antibody rigid frame
     ) -> dict:
-        xt_rota = noise_info['anchor_frame_meta']['rota_orig']
-        xt_trsl = noise_info['anchor_frame_meta']['trsl_orig']
-        # "rota_xt":,  rota_orig
-        # "trsl_xt":,  trsl_orig
-        ab_local_coords = noise_info['antibody_local_coords']
+        if rota_xt.ndim == 2:
+            rota_xt = rota_xt.unsqueeze(0)
+        if trsl_xt.ndim == 1:
+            trsl_xt = trsl_xt.unsqueeze(0)
+        if antibody_local_coords.ndim == 3:
+            antibody_local_coords = antibody_local_coords.unsqueeze(0)
 
-        fr_pred = self.fr_rigid(
-            sfea_tns=sfea_tns,
-            sfea_tns_init=sfea_tns_init,
-            encd_tns=encd_tns,
-            antibody_mask=antibody_mask,
-            fr_base_coords_global=curr_coords,
-            xt_rota=xt_rota,
-            xt_trsl=xt_trsl,
-            antibody_local_coords=ab_local_coords,
-        )
+        if antibody_mask.ndim == 1:
+            antibody_mask = antibody_mask.unsqueeze(0)
+        ab_mask_bool = antibody_mask.to(torch.bool)
+        
+        # 1. 特征提取 (保持不变)
+        res_in = torch.cat([sfea_tns, sfea_tns_init, encd_tns], dim=-1)
+        res_hidden = self.res_proj(res_in)
+        mask_f = ab_mask_bool.unsqueeze(-1).to(res_hidden.dtype)
+        denom = mask_f.sum(dim=1).clamp_min(1.0)
+        pooled = (res_hidden * mask_f).sum(dim=1) / denom # 做了个平均池化，得到一个全局特征向量？如果只是抗体的话，是不太够的，需要考虑抗原interface-aware attention pooling(直接把表位encd-tns cat进去？)
+        pooled = self.pool_proj(pooled)
 
+        # 2. 刚体预测
+        delta_trsl_local = self.linear_t(pooled)
+        delta_trsl_global = delta_trsl_local @ rota_xt.transpose(-1, -2)
+        updated_trsl = trsl_xt + delta_trsl_global
+
+        quat = F.normalize(self.linear_q(pooled), dim=-1)
+        delta_rota = self._quaternion_to_rotation(quat)
+        # updated_rota = torch.bmm(delta_rota, rota_xt)   # 或 torch.bmm(rota_xt, delta_rota)
+        # # 【核心修正】：右乘！因为 delta_rota 是从局部特征 pooled 预测出来的！
+        updated_rota = torch.bmm(rota_xt, delta_rota)
+
+        updated = curr_coords.clone()
+        for b in range(updated.shape[0]):
+            if ab_mask_bool[b].any():
+                moved = local_to_global_coords(antibody_local_coords[b], updated_rota[b], updated_trsl[b])
+                updated[b, ab_mask_bool[b]] = moved.to(dtype=updated.dtype)
+
+        global_delta_feat = self.delta_feat(pooled).unsqueeze(1) * mask_f
         return {
-            'fr_pred': fr_pred,
-            'fr_coords': fr_pred['updated_coords'],
-            'sfea_tns': sfea_tns + fr_pred['delta_sfea'],
-            'trsl': fr_pred['updated_trsl'],
-            'rota': fr_pred['updated_rota'],
-        }
+            'fr_coords': updated,
+            'sfea_tns': sfea_tns + global_delta_feat,
+            'trsl': updated_trsl,
+            'rota': updated_rota,
+            'mask': (denom.squeeze(-1) > 0).to(torch.bool),
+            "delta_trsl_local": delta_trsl_local,
+            "delta_trsl": delta_trsl_global,
+            }
 
 
 class CDRFusionBlock(nn.Module):
@@ -201,50 +276,3 @@ class CDRFusionBlock(nn.Module):
             'sfea_after_cdr': sfea_after_cdr,
             'merged_coords': merged_coords,
         }
-
-    # def build_outputs(
-    #     self,
-    #     *,
-    #     fr_pred,
-    #     cdr_pred,
-    #     merged_coords,
-    #     fr_coords,
-    #     curr_cmsk,
-    #     fr_mask_batch,
-    #     region_metadata,
-    # ):
-    #     clean_fr_ref = region_metadata['clean_fr_reference']
-    #     if clean_fr_ref.ndim == 3:
-    #         clean_fr_ref = clean_fr_ref.unsqueeze(0).expand(merged_coords.shape[0], -1, -1, -1)
-    #     clean_local = region_metadata['clean_loop_local_coords']
-    #     if clean_local.ndim == 4:
-    #         clean_local = clean_local.unsqueeze(0).expand(merged_coords.shape[0], -1, -1, -1, -1)
-
-    #     return {
-    #         'fr': {
-    #             'pred_quat': fr_pred['quat'],
-    #             'pred_trsl': fr_pred['trsl'],
-    #             'pred_rota': fr_pred['rota'],
-    #             'pred_coords': fr_coords,
-    #             'target_coords': clean_fr_ref,
-    #             'mask': fr_mask_batch,
-    #         },
-    #         'cdr': {
-    #             'loop_xt_local': cdr_pred['loop_xt_local'],
-    #             'pred_local_coords': cdr_pred['pred_x0_local'],
-    #             'pred_occupancy_logits': cdr_pred['pred_occupancy_logits'],
-    #             'pred_loop_global': cdr_pred['pred_loop_global'],
-    #             'loop_frame_rota': cdr_pred['loop_frame_rota'],
-    #             'loop_frame_trsl': cdr_pred['loop_frame_trsl'],
-    #             'target_local_coords': clean_local,
-    #             'target_occupancy': region_metadata['loop_occ_target'].to(merged_coords.device).unsqueeze(0).expand(merged_coords.shape[0], -1, -1),
-    #             'loop_valid_res_mask': region_metadata['loop_valid_res_mask'].to(merged_coords.device).unsqueeze(0).expand(merged_coords.shape[0], -1, -1),
-    #             'loop_atom_valid_mask': region_metadata['loop_atom_valid_mask'].to(merged_coords.device).unsqueeze(0).expand(merged_coords.shape[0], -1, -1, -1),
-    #             'loop_global_res_indices': region_metadata['loop_global_res_indices'].to(merged_coords.device).unsqueeze(0).expand(merged_coords.shape[0], -1, -1),
-    #             'loop_true_len': region_metadata['loop_true_len'].to(merged_coords.device).unsqueeze(0).expand(merged_coords.shape[0], -1),
-    #         },
-    #         'merged': {
-    #             'coords': merged_coords,
-    #             'mask': curr_cmsk,
-    #         },
-    #     }

@@ -200,7 +200,8 @@ class _ProteinSampleDataset(Dataset):
             "sequence_lengths": seq_lengths,
             "antibody_region": region_metadata,
         }
-        payload = self._center_complex_payload(payload)
+        # payload = self._center_complex_payload(payload)
+        payload = self._center_antigen_payload(payload)
         self._cache_put(cache_key, payload)
         return payload
 
@@ -329,6 +330,40 @@ class _ProteinSampleDataset(Dataset):
             for chain in chains:
                 if isinstance(chain, dict) and torch.is_tensor(chain.get("cord")):
                     chain["cord"] = chain["cord"] - center.view(1, 1, 3)
+        return payload
+
+    @staticmethod
+    def _center_antigen_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """【核心修改】将整个复合物平移，使得【抗原的质心】严格对齐到全局原点 [0, 0, 0]"""
+        prot = payload.get("prot_data_curr")
+        if prot is None:
+            return payload
+
+        cord = prot.get("cord")
+        cmsk = prot.get("cmsk")
+        mask_ab = prot.get("mask_ab")
+
+        # 提取抗原 mask (mask_ab == 0 表示抗原)
+        # 为了严谨，结合 cmsk 确保原子是有效的 (通常取 CA 原子, 即 index 1)
+        ag_mask = (mask_ab == 0).unsqueeze(-1) & cmsk[:, 1:2].to(torch.bool)
+        ag_mask_float = ag_mask.to(dtype=cord.dtype)
+
+        denom = ag_mask_float.sum().clamp(min=1.0)
+        # 仅计算【抗原】的质心
+        ag_center = (cord[:, 1:2, :] * ag_mask_float.unsqueeze(-1)).sum(dim=(0, 1)) / denom
+
+        # 将抗原质心作为中心点，整体平移复合物的所有坐标
+        prot["cord"] = cord - ag_center.view(1, 1, 3)
+        if "cords_atom14" in prot and torch.is_tensor(prot["cords_atom14"]):
+            prot["cords_atom14"] = prot["cords_atom14"] - ag_center.view(1, 1, 3)
+
+        # Shift antigen coordinates if present
+        if "a-cord" in prot and torch.is_tensor(prot["a-cord"]):
+            prot["a-cord"] = prot["a-cord"] - ag_center.view(1, 1, 3)
+
+        # Shift clean CDR loop local coords back to absolute frame for correct supervision
+        # (这步通常在下游做，但全局平移保证了所有基准都是抗原)
+        
         return payload
     
     def __getitem__(self, index):

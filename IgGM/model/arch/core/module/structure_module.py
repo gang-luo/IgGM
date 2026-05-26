@@ -82,8 +82,18 @@ class StructureModule(nn.Module):
         loop_global_res_indices = self._expand_batch_mask(region_metadata['loop_global_res_indices'].to(device=device), n_smpls)
         loop_valid_res_mask = self._expand_batch_mask(region_metadata['loop_valid_res_mask'].to(device=device, dtype=torch.bool), n_smpls)
         loop_atom_valid_mask = self._expand_batch_mask(region_metadata['loop_atom_valid_mask'].to(device=device, dtype=torch.bool), n_smpls)
+        loop_atom_supervise_mask = self._expand_batch_mask(region_metadata.get('loop_atom_supervise_mask', region_metadata['loop_atom_valid_mask']).to(device=device, dtype=torch.bool), n_smpls)
         loop_left_anchor_idx = self._expand_batch_mask(region_metadata['loop_left_anchor_idx'].to(device=device), n_smpls)
         loop_right_anchor_idx = self._expand_batch_mask(region_metadata['loop_right_anchor_idx'].to(device=device), n_smpls)
+
+        rota_xt = region_metadata['anchor_frame_meta']['rota_xt'].detach().clone()
+        trsl_xt = region_metadata['anchor_frame_meta']['trsl_xt'].detach().clone()
+        if rota_xt.ndim == 2:
+            rota_xt = rota_xt.unsqueeze(0).expand(n_smpls, -1, -1)
+        if trsl_xt.ndim == 1:
+            trsl_xt = trsl_xt.unsqueeze(0).expand(n_smpls, -1)
+        rota_xt = rota_xt.to(device=device, dtype=dtype)
+        trsl_xt = trsl_xt.to(device=device, dtype=dtype)
 
         antibody_local_coords = region_metadata['antibody_local_coords'].to(device=device, dtype=dtype)
         if antibody_local_coords.ndim == 3:
@@ -93,13 +103,21 @@ class StructureModule(nn.Module):
         if loop_xt_local.ndim == 4:
             loop_xt_local = loop_xt_local.unsqueeze(0).expand(n_smpls, -1, -1, -1, -1).clone()
 
-        sigma_t = torch.as_tensor(region_metadata["sigama_t"]["cdr_sigma"], device=device, dtype=dtype).view(1).expand(n_smpls)
-
         cdr_mask = self._expand_batch_mask(region_metadata['cdr_mask'].to(device=device, dtype=torch.bool), n_smpls)
         antigen_mask = ~antibody_mask
 
+        # 极简获取 sigma
+        sigma_raw = region_metadata["sigama_t"]["sigma_raw"].to(device=device, dtype=dtype).view(-1)
+        sigma_t = sigma_raw.expand(n_smpls) if sigma_raw.numel() == 1 else sigma_raw
+
         for _ in range(n_lyrs):
-            # 1. xt结构感知
+            # 1. 彻底切断几何计算图跨层传播
+            rota_xt = rota_xt.detach()
+            trsl_xt = trsl_xt.detach()
+            curr_coords = curr_coords.detach()
+            loop_xt_local = loop_xt_local.detach()
+
+            # 2. xt结构感知
             if self.activation_checkpoint:
                 sfea_tns = self.activation_checkpoint_fn(
                     self.net['percpt_xt'],sfea_tns,pfea_tns,curr_coords,curr_cmsk,cdr_mask,
@@ -110,21 +128,24 @@ class StructureModule(nn.Module):
                     antibody_mask=antibody_mask,antigen_mask=antigen_mask, chunk_size=chunk_size,
                 )
 
-            # 2、抗体fr旋转平移预测
+            # 3. 抗体fr旋转平移预测
             fr_out = self.net['fr_branch'](
                 sfea_tns=sfea_tns,
                 sfea_tns_init=sfea_tns_init,
                 encd_tns=encd_tns,
                 antibody_mask=antibody_mask,
                 curr_coords=curr_coords,
-                noise_info={
-                    **region_metadata,
-                    'antibody_local_coords': antibody_local_coords,
-                },
+                rota_xt=rota_xt,
+                trsl_xt=trsl_xt,
+                antibody_local_coords=antibody_local_coords,
             )
-            fr_coords, sfea_tns, _, trsl, rota = fr_out['fr_coords'],fr_out['sfea_tns'],fr_out['fr_pred'],fr_out['trsl'],fr_out['rota']
+            
+            fr_coords = fr_out['fr_coords']
+            sfea_tns = fr_out['sfea_tns']
+            trsl_xt = fr_out['trsl']
+            rota_xt = fr_out['rota']
 
-            # 3.cdr全原子坐标去噪
+            # 4. cdr全原子坐标去噪
             cdr_out = self.net['cdr_fusion_block'](
                 sfea_tns=sfea_tns,
                 encd_tns=encd_tns,
@@ -133,27 +154,28 @@ class StructureModule(nn.Module):
                 loop_type_ids=loop_type_ids,
                 loop_global_res_indices=loop_global_res_indices,
                 loop_valid_res_mask=loop_valid_res_mask,
-                loop_atom_valid_mask=loop_valid_res_mask.unsqueeze(-1).expand_as(loop_atom_valid_mask), # 由于为全原子，所以直接开放有效残基的全部原子用于感知和移动。 原loop_atom_valid_mask，直接根据有效res替换； 
+                loop_atom_valid_mask=loop_atom_supervise_mask,
                 loop_left_anchor_idx=loop_left_anchor_idx,
                 loop_right_anchor_idx=loop_right_anchor_idx,
                 sigma_t=sigma_t,
             )
             
-            curr_coords, sfea_tns, loop_xt_local = cdr_out['merged_coords'], cdr_out['sfea_after_cdr'],cdr_out['loop_xt_new_local']
-            
+            curr_coords = cdr_out['merged_coords']
+            sfea_tns = cdr_out['sfea_after_cdr']
+            loop_xt_local = cdr_out['loop_xt_new_local']
 
-            # plddt预测
+            # 5. plddt预测
             plddt_dict = self.net['plddt'](sfea_tns.detach())
 
-            # save for loss compute
+            # 6. 保存用于计算 Loss 的张量（强烈建议加上 clone 以防后续代码做 inplace 操作）
             cord_list.append(curr_coords.clone())
+            trsl_list.append(trsl_xt.clone())
+            rota_list.append(rota_xt.clone())
+            loop_cords.append(loop_xt_local.clone())
             plddt_list.append(plddt_dict)
-            trsl_list.append(trsl)
-            rota_list.append(rota)
-            loop_cords.append(loop_xt_local)
             
         pi_logits = cdr_out['cdr_pred']['pi_logits']
-        return sfea_tns, cord_list, plddt_list, trsl_list, rota_list,loop_cords,pi_logits
+        return sfea_tns, cord_list, plddt_list, trsl_list, rota_list, loop_cords, pi_logits
 
     @staticmethod
     def _expand_batch_mask(mask, n_smpls):

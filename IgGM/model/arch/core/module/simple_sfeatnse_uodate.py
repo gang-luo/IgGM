@@ -130,8 +130,8 @@ class LiteXtStructAttention(nn.Module):
 
         # Optional antigen-distance residue feature.
         self.ag_dist_proj = nn.Sequential(
-            nn.LayerNorm(rbf_bins),
-            nn.Linear(rbf_bins, c_s),
+            nn.LayerNorm(rbf_bins+3),
+            nn.Linear(rbf_bins+3 , c_s),
             nn.SiLU(),
             nn.Linear(c_s, c_s),
         )
@@ -181,7 +181,7 @@ class LiteXtStructAttention(nn.Module):
             ca_dist,
             num_bins=self.rbf_bins,
             d_min=0.0,
-            d_max=30.0,
+            d_max=100.0, # 原始为30，改为100以覆盖更远的距离
         )
 
         bias_pair = self.pair_bias_proj(pfea_tns)       # [B, L, L, H]
@@ -190,49 +190,122 @@ class LiteXtStructAttention(nn.Module):
         pair_bias = bias_pair + bias_dist
         return pair_bias.permute(0, 3, 1, 2).contiguous()
 
+    # def _backbone_context(
+    #         self,
+    #         curr_coords: torch.Tensor,
+    #         atom_mask: torch.Tensor,
+    #         antigen_mask: torch.Tensor | None,
+    #     ) -> tuple[torch.Tensor, torch.Tensor]:
+    #     """
+    #     curr_coords: [B, L, 14, 3]
+    #     atom_mask: [B, L, 14]
+
+    #     return:
+    #         bb_context: [B, L, c_s]
+    #         R: [B, L, 3, 3] 局部坐标系旋转矩阵
+    #     """
+    #     B, L, _, _ = curr_coords.shape
+
+    #     # 1. 优先提取骨架原子构建局部坐标系
+    #     N, CA, C  = curr_coords[:, :, 0, :] ,curr_coords[:, :, 1, :], curr_coords[:, :, 2, :]
+    #     v1 = N - CA
+    #     v2 = C - CA
+
+    #     # Gram-Schmidt 正交化构建局部坐标系的三个轴 (e1, e2, e3)
+    #     e1 = F.normalize(v1, dim=-1)
+    #     u2 = v2 - e1 * (torch.sum(e1 * v2, dim=-1, keepdim=True))
+    #     e2 = F.normalize(u2, dim=-1)
+    #     e3 = torch.cross(e1, e2, dim=-1)
+
+    #     # 构建旋转矩阵 R (shape: [B, L, 3, 3])
+    #     R = torch.stack([e1, e2, e3], dim=-1)
+
+    #     # 2. 计算并投影 Backbone Offset (使其也具备旋转不变性)
+    #     bb = curr_coords[:, :, [0, 1, 2], :]      # [B, L, 3, 3]
+    #     global_bb_offset = bb - CA.unsqueeze(2)   # [B, L, 3, 3]
+        
+    #     # [关键修复]: 使用 R 投影 bb_offset 到局部坐标系
+    #     # b=batch, l=length, i=global_dim, j=local_dim, a=atom(3个骨架原子)
+    #     local_bb_offset = torch.einsum('blij,blai->blaj', R, global_bb_offset)
+        
+    #     # 展平后通过 MLP
+    #     bb_offset_flat = local_bb_offset.reshape(B, L, 9)
+    #     bb_context = self.bb_local_proj(bb_offset_flat)
+
+    #     # Add lightweight residue-to-antigen distance AND VECTOR feature.
+    #     if antigen_mask is not None:
+    #         antigen_mask = antigen_mask.to(torch.bool)
+    #         # 现在我们需要 c_s 的维度来容纳 RBF + 局部向量信息
+    #         ag_context = torch.zeros_like(bb_context)
+
+    #         for b in range(B):
+    #             ag_idx = torch.nonzero(antigen_mask[b], as_tuple=False).squeeze(-1)
+    #             if ag_idx.numel() == 0:
+    #                 continue
+
+    #             ag_ca = CA[b, ag_idx]  # [L_ag, 3]
+                
+    #             # 1. 距离特征 (原有的标量信息)
+    #             dist_to_ag = torch.cdist(
+    #                 CA[b:b + 1],
+    #                 ag_ca.unsqueeze(0),
+    #             ).min(dim=-1).values.squeeze(0)  # [L]
+
+    #             dist_rbf = rbf_encode(dist_to_ag, num_bins=self.rbf_bins, d_min=0.0, d_max=30.0)
+
+    #             # ==================== 核心架构升级 ====================
+    #             # 2. 向量特征 (打破方向对称性)
+    #             # 计算从抗原中心指向当前抗体残基的全局向量
+    #             ag_com = ag_ca.mean(dim=0) # [3]
+    #             vec_to_ag_global = ag_com.unsqueeze(0) - CA[b] # [L, 3]
+                
+    #             # [关键数学]：将全局向量投影到当前残基的局部坐标系 R 中
+    #             # 这样 vec_to_ag_local 就是一个严格的 SE(3) 不变特征！
+    #             # R 的 shape: [L, 3, 3], vec 的 shape: [L, 3]
+    #             vec_to_ag_local = torch.einsum('lij,li->lj', R[b], vec_to_ag_global)
+                
+    #             # 为了防止特征过大，对其进行归一化或缩放
+    #             vec_to_ag_local = F.normalize(vec_to_ag_local, dim=-1) * torch.log1p(torch.norm(vec_to_ag_global, dim=-1, keepdim=True))
+    #             # ======================================================
+
+    #             # 将距离 RBF 和 投影向量 拼接起来，一起通过感知层
+    #             combined_ag_feat = torch.cat([dist_rbf, vec_to_ag_local], dim=-1)
+                
+    #             # 注意：你需要在 __init__ 中修改 ag_dist_proj 的输入维度
+    #             # self.ag_dist_proj = nn.Sequential(..., nn.Linear(rbf_bins + 3, c_s), ...)
+    #             ag_context[b] = self.ag_dist_proj(combined_ag_feat)
+
+    #         bb_context = bb_context + ag_context
+
+    #     return bb_context, R
+
+
     def _backbone_context(
             self,
             curr_coords: torch.Tensor,
             atom_mask: torch.Tensor,
             antigen_mask: torch.Tensor | None,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        curr_coords: [B, L, 14, 3]
-        atom_mask: [B, L, 14]
-
-        return:
-            bb_context: [B, L, c_s]
-            R: [B, L, 3, 3] 局部坐标系旋转矩阵
-        """
+        
         B, L, _, _ = curr_coords.shape
-
-        # 1. 优先提取骨架原子构建局部坐标系
         N, CA, C  = curr_coords[:, :, 0, :] ,curr_coords[:, :, 1, :], curr_coords[:, :, 2, :]
         v1 = N - CA
         v2 = C - CA
 
-        # Gram-Schmidt 正交化构建局部坐标系的三个轴 (e1, e2, e3)
         e1 = F.normalize(v1, dim=-1)
         u2 = v2 - e1 * (torch.sum(e1 * v2, dim=-1, keepdim=True))
         e2 = F.normalize(u2, dim=-1)
         e3 = torch.cross(e1, e2, dim=-1)
 
-        # 构建旋转矩阵 R (shape: [B, L, 3, 3])
         R = torch.stack([e1, e2, e3], dim=-1)
 
-        # 2. 计算并投影 Backbone Offset (使其也具备旋转不变性)
-        bb = curr_coords[:, :, [0, 1, 2], :]      # [B, L, 3, 3]
-        global_bb_offset = bb - CA.unsqueeze(2)   # [B, L, 3, 3]
+        bb = curr_coords[:, :, [0, 1, 2], :]      
+        global_bb_offset = bb - CA.unsqueeze(2)   
         
-        # [关键修复]: 使用 R 投影 bb_offset 到局部坐标系
-        # b=batch, l=length, i=global_dim, j=local_dim, a=atom(3个骨架原子)
         local_bb_offset = torch.einsum('blij,blai->blaj', R, global_bb_offset)
-        
-        # 展平后通过 MLP
         bb_offset_flat = local_bb_offset.reshape(B, L, 9)
         bb_context = self.bb_local_proj(bb_offset_flat)
 
-        # Add lightweight residue-to-antigen distance feature.
         if antigen_mask is not None:
             antigen_mask = antigen_mask.to(torch.bool)
             ag_context = torch.zeros_like(bb_context)
@@ -243,18 +316,31 @@ class LiteXtStructAttention(nn.Module):
                     continue
 
                 ag_ca = CA[b, ag_idx]  # [L_ag, 3]
+                
+                # 1. 提取标量距离特征 (RBF)
                 dist_to_ag = torch.cdist(
                     CA[b:b + 1],
                     ag_ca.unsqueeze(0),
                 ).min(dim=-1).values.squeeze(0)  # [L]
+                dist_rbf = rbf_encode(dist_to_ag, num_bins=self.rbf_bins, d_min=0.0, d_max=30.0)
 
-                dist_rbf = rbf_encode(
-                    dist_to_ag,
-                    num_bins=self.rbf_bins,
-                    d_min=0.0,
-                    d_max=30.0,
-                )
-                ag_context[b] = self.ag_dist_proj(dist_rbf)
+                # ================== 【核心新增：向量特征】 ==================
+                # 计算从【当前抗体残基】指向【抗原中心】的全局向量
+                ag_com = ag_ca.mean(dim=0) # [3]
+                vec_to_ag_global = ag_com.unsqueeze(0) - CA[b] # [L, 3]
+                
+                # 将全局方向投影到当前残基的局部坐标系 R 中 (绝对的 SE(3) 不变性)
+                vec_to_ag_local = torch.einsum('lij,li->lj', R[b], vec_to_ag_global)
+                
+                # 归一化方向，并用 log 距离作为缩放系数防止数值爆炸
+                vec_to_ag_local = F.normalize(vec_to_ag_local, dim=-1) * torch.log1p(torch.norm(vec_to_ag_global, dim=-1, keepdim=True))
+                # ==========================================================
+
+                # 拼接：RBF 标量特征 (32维) + 局部向量特征 (3维)
+                combined_ag_feat = torch.cat([dist_rbf, vec_to_ag_local], dim=-1)
+                
+                # 注意你在 init 里 self.ag_dist_proj 第一层应该是 (rbf_bins + 3)
+                ag_context[b] = self.ag_dist_proj(combined_ag_feat)
 
             bb_context = bb_context + ag_context
 

@@ -116,7 +116,6 @@ class IgGMPaperLoss:
             aligned[b] = torch.matmul(pred[b], rot.transpose(-1, -2)) + tr.view(1, 1, 3)
         return aligned
 
-
     def _backbone_mse(
         self,
         inputs: Dict[str, torch.Tensor],
@@ -128,24 +127,36 @@ class IgGMPaperLoss:
         sigma_rota = inputs['anchor_frame_meta']['fr_sigma_rota']
         sigma_trsl = inputs['anchor_frame_meta']['fr_sigma_trsl']
 
-        pre_rota = outputs['3d']['rota'][-1]
-        pre_trsl = outputs["3d"]["trsl"][-1]
+        rota_preds = outputs['3d']['rota']
+        trsl_preds = outputs["3d"]["trsl"]
+        pre_rota_ref = rota_preds[-1] if isinstance(rota_preds, (list, tuple)) else rota_preds
+        pre_trsl_ref = trsl_preds[-1] if isinstance(trsl_preds, (list, tuple)) else trsl_preds
 
+        sigma_rota = torch.as_tensor(sigma_rota, device=pre_rota_ref.device, dtype=pre_rota_ref.dtype).view(-1)
+        sigma_rota = sigma_rota.clamp_min(5e-2)
+        w_rota = 1.0 / (sigma_rota.square() + 1e-6)
+        w_rota = torch.clamp(w_rota, max=10.0)
+        pre_rota = pre_rota_ref
         tgt_rota_f32 = tgt_rota.to(device=pre_rota.device, dtype=torch.float32)
         pre_rota_f32 = pre_rota.to(device=pre_rota.device, dtype=torch.float32)
-
-        # # Correct SO(3) tangent-vector error:
         r_err_f32 = torch.matmul(tgt_rota_f32, pre_rota_f32.transpose(-1, -2))
         eps_rota_f32 = skew2vec(log_rmat(r_err_f32))
-        loss_rota = (eps_rota_f32 ** 2).mean().to(pre_rota.dtype)
-        # ---------------------------------------------------------
+        sq_rota = (eps_rota_f32 ** 2).sum(dim=-1)
+        w_use = w_rota.expand_as(sq_rota) if w_rota.numel() == 1 else w_rota[: sq_rota.numel()]
+        loss_rota = (sq_rota * w_use).mean().to(pre_rota.dtype)
 
         # Translation, only valid if both are absolute global translations
-        tgt_trsl = tgt_trsl.to(device=pre_trsl.device, dtype=pre_trsl.dtype)
-        loss_trsl = F.mse_loss(pre_trsl, tgt_trsl, reduction='mean')
+        sigma_trsl = torch.as_tensor(sigma_trsl, device=pre_trsl_ref.device, dtype=pre_trsl_ref.dtype).view(-1)
+        sigma_trsl = sigma_trsl.clamp_min(5e-2)
+        w_trsl = 1.0 / (sigma_trsl.square() + 1e-6)
+        w_trsl = torch.clamp(w_trsl, max=10.0)
+        pre_trsl = pre_trsl_ref
+        tgt_trsl_use = tgt_trsl.to(device=pre_trsl.device, dtype=pre_trsl.dtype)
+        sq_trsl = F.huber_loss(pre_trsl, tgt_trsl_use, reduction='none', delta=2.0).sum(dim=-1)
+        w_use = w_trsl.expand_as(sq_trsl) if w_trsl.numel() == 1 else w_trsl[: sq_trsl.numel()]
+        loss_trsl = (sq_trsl * w_use).mean()
 
-        # add
-        loss_backbone = loss_rota + loss_trsl / (sigma_trsl.square() + 1e-6)
+        loss_backbone = loss_rota + loss_trsl
 
         return loss_backbone,loss_rota, loss_trsl
     
@@ -170,45 +181,6 @@ class IgGMPaperLoss:
             if n > 0:
                 out[b, :n] = torch.tensor([aa_to_idx.get(ch, 20) for ch in seq[:n]], device=device, dtype=torch.long)
         return out
-
-    def _openfold_violation_loss(self, pred: torch.Tensor, atom_exists: torch.Tensor, seq_o, asym_id: torch.Tensor = None) -> torch.Tensor:
-
-        bsz, seq_len = pred.shape[:2]
-        batch = {
-            "aatype": self._seq_to_aatype(seq_o, bsz, seq_len, pred.device),
-            "residue_index": torch.arange(seq_len, device=pred.device).view(1, -1).expand(bsz, -1),
-            "atom14_atom_exists": atom_exists.to(dtype=pred.dtype),
-            "asym_id": asym_id.to(device=pred.device),
-            "residx_atom14_to_atom37": torch.tensor(restype_atom14_to_atom37, device=pred.device),
-        }
-
-        try:
-            violations = find_structural_violations(
-                batch=batch,
-                atom14_pred_positions=pred.float(),
-                violation_tolerance_factor=12.0,
-                clash_overlap_tolerance=1.5,
-            )
-        except TypeError:
-            violations = find_structural_violations(batch, pred.float(), 12.0, 1.5)
-
-        for call in (
-            lambda: violation_loss(violations, batch["atom14_atom_exists"]),
-            lambda: violation_loss(batch, violations),
-            lambda: violation_loss(violations),
-        ):
-            try:
-                out = call()
-                if torch.is_tensor(out):
-                    return out.to(dtype=pred.dtype, device=pred.device)
-                if isinstance(out, dict):
-                    for key in ("loss", "violations", "violation_loss"):
-                        val = out.get(key)
-                        if torch.is_tensor(val):
-                            return val.to(dtype=pred.dtype, device=pred.device)
-            except TypeError:
-                continue
-        raise RuntimeError("Unable to evaluate OpenFold violation_loss due to incompatible API signature.")
 
     def _cdr_smooth_lddt_loss(
             self, 
@@ -273,7 +245,6 @@ class IgGMPaperLoss:
             # average over batch & multiplicity
             return 1.0 - torch.stack(lddt, dim=0).mean(dim=0)
 
-
     def _compute_bond_loss(self, 
                            pred_coords: torch.Tensor, 
                            true_coords: torch.Tensor, 
@@ -313,65 +284,73 @@ class IgGMPaperLoss:
         # inter mask
         mask_inter = cdr_mask[:, :-1] & cdr_mask[:, 1:] & atom14_mask[:, :-1, 2] & atom14_mask[:, 1:, 0] # [B, L-1]
 
-        # MSE 损失计算
-        loss_intra = F.mse_loss(pred_bonds_intra[mask_intra], true_bonds_intra[mask_intra], reduction='mean')
+        if mask_intra.any():
+            loss_intra = F.mse_loss(pred_bonds_intra[mask_intra], true_bonds_intra[mask_intra], reduction='mean')
+        else:
+            loss_intra = pred_coords.new_tensor(0.0)
         
         if mask_inter.any():
             loss_inter = F.mse_loss(pred_bonds_inter[mask_inter], true_bonds_inter[mask_inter], reduction='mean')
         else:
-            loss_inter = 0.0
+            loss_inter = pred_coords.new_tensor(0.0)
 
         return loss_intra + loss_inter
 
     def _cdr_all_atom_mse(
-        self,
-        pred_loop_local: torch.Tensor,       # [B, N_loop, L_max, 14, 3] 来自 outputs["3d"]["loop_cords"][-1]
-        clean_loop_local: torch.Tensor,      # [B, N_loop, L_max, 14, 3] 来自 inputs["clean_loop_local_coords"]
-        loop_atom_valid_mask: torch.Tensor,  # [B, N_loop, L_max, 14] 来自 inputs["loop_atom_valid_mask"]
-    ) -> torch.Tensor:
-        """
-        在锚点局部坐标系下，直接计算 CDR 环全原子的 MSE 损失。
-        彻底消除了 FR 朝向带来的杠杆效应。
-        """
-        # 确保数据类型和设备一致
-        clean_loop_local = clean_loop_local.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
-        loop_atom_valid_mask = loop_atom_valid_mask.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
+            self,
+            pred_loop_local: torch.Tensor,       # [B, N_loop, L_max, 14, 3] 
+            clean_loop_local: torch.Tensor,      # [B, N_loop, L_max, 14, 3] 或 [N_loop, L_max, 14, 3]
+            loop_atom_valid_mask: torch.Tensor,  # [B, N_loop, L_max, 14] 或 [N_loop, L_max, 14]
+        ) -> torch.Tensor:
+            """
+            在锚点局部坐标系下，直接计算 CDR 环全原子的 MSE 损失。
+            彻底消除了 FR 朝向带来的杠杆效应。
+            """
+            # --- 补齐缺少的 Batch 维度 ---
+            if clean_loop_local.ndim == 4:  # [N_loop, L_max, 14, 3] -> [1, N_loop, L_max, 14, 3]
+                clean_loop_local = clean_loop_local.unsqueeze(0)
+            if loop_atom_valid_mask.ndim == 3:  # [N_loop, L_max, 14] -> [1, N_loop, L_max, 14]
+                loop_atom_valid_mask = loop_atom_valid_mask.unsqueeze(0)
 
-        # 扩展 mask 维度以匹配坐标
-        # mask shape: [B, N_loop, L_max, 14, 1]
-        valid_mask = loop_atom_valid_mask.unsqueeze(-1)
+            # 确保数据类型和设备一致
+            clean_loop_local = clean_loop_local.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
+            loop_atom_valid_mask = loop_atom_valid_mask.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
 
-        # 计算残差（局部偏移误差）
-        diff = pred_loop_local - clean_loop_local
+            # mask shape 变为严格的: [B, N_loop, L_max, 14, 1]
+            valid_mask = loop_atom_valid_mask.unsqueeze(-1)
 
-        # 仅对有效的原子求平方误差
-        sq_diff = (diff ** 2) * valid_mask
+            # 计算残差（局部偏移误差）
+            diff = pred_loop_local - clean_loop_local
 
-        # 计算平均 MSE
-        denom = valid_mask.sum().clamp_min(1.0)
-        loss_val = sq_diff.sum() / (3.0 * denom) # xyz三个坐标
+            # 仅对有效的原子求平方误差
+            sq_diff = F.huber_loss(pred_loop_local, clean_loop_local, reduction='none', delta=2.0) * valid_mask
 
-        return loss_val
+            # 先在特征空间 (dim 1,2,3,4) 求和并平均
+            denom = valid_mask.sum(dim=(1, 2, 3, 4)).clamp_min(1.0)
+            loss_per_batch = sq_diff.sum(dim=(1, 2, 3, 4)) / (3.0 * denom)
+            
+            # 最后对 Batch 维度求均值
+            loss_val = loss_per_batch.mean()
+
+            return loss_val
     
     def _aligned_backbone_cdr_vio_loss(self, inputs: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        pred = outputs["3d"]["cord"][-1]
-        tgt = self._ensure_batched(inputs["cord-o"], ndim_no_batch=3).to(device=pred.device, dtype=pred.dtype)
-        atom_mask = inputs["cmsk-p"].to(device=pred.device).to(torch.bool)
         
+        pred = outputs["3d"]["cord"][-1]
         atom14_tgt = self._ensure_batched(inputs.get("cords_atom14", inputs["cord-o"]), ndim_no_batch=3).to(device=pred.device, dtype=pred.dtype)
-        atom14_mask = self._ensure_batched(inputs.get("cmsk_atom14", inputs["cmsk-p"]), ndim_no_batch=2).to(device=pred.device).to(torch.bool)
-        cmsk_realatom = self._ensure_batched(inputs.get("cmsk_realatom", inputs["cmsk-p"]), ndim_no_batch=2).to(device=pred.device).to(torch.bool)
+        cmsk = self._ensure_batched(inputs.get("cmsk-p", inputs["cmsk-p"]), ndim_no_batch=2).to(device=pred.device).to(torch.bool)
+
         bsz, seq_len = pred.shape[:2]
 
         ab_mask = self._normalize_res_mask(inputs["pmsk-ligand"], batch_size=bsz, seq_len=seq_len).to(pred.device)
         cdr_mask = self._normalize_res_mask(inputs["cdr_mask"], batch_size=bsz, seq_len=seq_len).to(pred.device)
 
-        loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, cmsk_realatom, cdr_mask)
-        loss_bond = self._compute_bond_loss(pred, atom14_tgt, cmsk_realatom, cdr_mask)
-        # loss_backbone = self._backbone_mse(inputs, outputs) 
+        loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, cmsk, cdr_mask)
+        loss_bond = self._compute_bond_loss(pred, atom14_tgt, cmsk, cdr_mask)
         loss_backbone,loss_rota, loss_trsl = self._backbone_mse(inputs, outputs) 
 
-        loops_pred,pi_logits,loops_local_label,loop_atom_valid_mask = outputs["3d"]["loop_cords"][-1],outputs["3d"]["pi_logits"],inputs["clean_loop_local_coords"],inputs["loop_atom_valid_mask"]
+        loops_pred,pi_logits,loops_local_label,loop_atom_valid_mask = outputs["3d"]["loop_cords"][-1],outputs["3d"]["pi_logits"],inputs["clean_loop_local_coords"],inputs.get("loop_atom_supervise_mask", inputs["loop_atom_valid_mask"])
+        
         loss_cdr = self._cdr_all_atom_mse(
             loops_pred, 
             loops_local_label, 
@@ -379,27 +358,20 @@ class IgGMPaperLoss:
         )
 
         loss_vio = torch.zeros_like(loss_backbone)
-        # # loss_vio = self._openfold_violation_loss(pred, atom_mask.to(pred.dtype), inputs["seq-o"], asym_id=inputs.get("asym-id", None)) 
-        # using the original atom_mask(different of atom14-mask), aviod the extra loss between with the virtual atoms and reality atom in the atom-14 scheme 
-        # Structural violation terms are rigid-transform invariant, so aligned coords are safe here.
-
-        # t = inputs["sigama_t"]["cord_scale"] * torch.sqrt(1.0 - inputs["sigama_t"]["alpha_bar"])
-        # sigma_data = 2.0 
-        # w_t = (t**2 + sigma_data**2) / ((t * sigma_data)**2 + 1e-8)
-        # weight_factor = torch.clamp(w_t, max=10.0).mean()
-
         
-        sigma = inputs["sigama_t"]["cdr_sigma"].to(device=pred.device, dtype=pred.dtype)
-        sigma = sigma.view(-1).clamp_min(1e-6)
-
-        sigma_data = torch.as_tensor(4.0, device=pred.device, dtype=pred.dtype)
-        w_t = (sigma.square() + sigma_data.square()) / (
-            (sigma * sigma_data).square() + 1e-8
-        )
-        weight_factor = torch.clamp(w_t, max=10.0).mean()
-
+        sigma_raw = inputs["sigama_t"]["sigma_raw"].to(device=pred.device, dtype=pred.dtype).view(-1)
+        sigma = sigma_raw.clamp_min(1e-6)
         
-        # cdr loss
+        # ========== EDM 黄金损失权重 ==========
+        sigma_data = 4.0
+        # 这是 Karras 等人证明过的最优 SNR 权重方案：
+        w_t = (sigma.square() + sigma_data**2) / ((sigma * sigma_data).square() + 1e-8)
+        
+        # 截断最高权重，防止极早期的小 sigma 引发梯度爆炸
+        weight_factor = torch.clamp(w_t, max=5.0).mean()
+        # ======================================
+
+        # CDR loss
         total = (
             self.cfg.backbone_weight * loss_backbone
             + weight_factor * loss_cdr
@@ -414,10 +386,10 @@ class IgGMPaperLoss:
                 'perturb': inputs['cord-p'],
                 'pre': pred,
                 'clean': atom14_tgt
-            }, f'/root/private_data/luog/codex/IgGM/see/seefile/valB5_{ts}.pt')
-        self.idx_save+=1
+            }, f'/root/private_data/luog/codex/IgGM/see/seefile/S26_{ts}.pt')
             
-
+        self.idx_save += 1
+            
         return {
             "loss": total,
             "loss_viol": loss_vio,
@@ -429,3 +401,43 @@ class IgGMPaperLoss:
             "loss_trsl": loss_trsl,
             "loss_rota": loss_rota,
         }
+        
+    def _openfold_violation_loss(self, pred: torch.Tensor, atom_exists: torch.Tensor, seq_o, asym_id: torch.Tensor = None) -> torch.Tensor:
+
+        bsz, seq_len = pred.shape[:2]
+        batch = {
+            "aatype": self._seq_to_aatype(seq_o, bsz, seq_len, pred.device),
+            "residue_index": torch.arange(seq_len, device=pred.device).view(1, -1).expand(bsz, -1),
+            "atom14_atom_exists": atom_exists.to(dtype=pred.dtype),
+            "asym_id": asym_id.to(device=pred.device),
+            "residx_atom14_to_atom37": torch.tensor(restype_atom14_to_atom37, device=pred.device),
+        }
+
+        try:
+            violations = find_structural_violations(
+                batch=batch,
+                atom14_pred_positions=pred.float(),
+                violation_tolerance_factor=12.0,
+                clash_overlap_tolerance=1.5,
+            )
+        except TypeError:
+            violations = find_structural_violations(batch, pred.float(), 12.0, 1.5)
+
+        for call in (
+            lambda: violation_loss(violations, batch["atom14_atom_exists"]),
+            lambda: violation_loss(batch, violations),
+            lambda: violation_loss(violations),
+        ):
+            try:
+                out = call()
+                if torch.is_tensor(out):
+                    return out.to(dtype=pred.dtype, device=pred.device)
+                if isinstance(out, dict):
+                    for key in ("loss", "violations", "violation_loss"):
+                        val = out.get(key)
+                        if torch.is_tensor(val):
+                            return val.to(dtype=pred.dtype, device=pred.device)
+            except TypeError:
+                continue
+        raise RuntimeError("Unable to evaluate OpenFold violation_loss due to incompatible API signature.")
+

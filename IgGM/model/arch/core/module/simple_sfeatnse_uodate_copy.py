@@ -191,32 +191,48 @@ class LiteXtStructAttention(nn.Module):
         return pair_bias.permute(0, 3, 1, 2).contiguous()
 
     def _backbone_context(
-        self,
-        curr_coords: torch.Tensor,
-        atom_mask: torch.Tensor,
-        antigen_mask: torch.Tensor | None,
-    ) -> torch.Tensor:
+            self,
+            curr_coords: torch.Tensor,
+            atom_mask: torch.Tensor,
+            antigen_mask: torch.Tensor | None,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         curr_coords: [B, L, 14, 3]
         atom_mask: [B, L, 14]
 
         return:
             bb_context: [B, L, c_s]
+            R: [B, L, 3, 3] 局部坐标系旋转矩阵
         """
         B, L, _, _ = curr_coords.shape
 
-        # N, CA, C
+        # 1. 优先提取骨架原子构建局部坐标系
+        N, CA, C  = curr_coords[:, :, 0, :] ,curr_coords[:, :, 1, :], curr_coords[:, :, 2, :]
+        v1 = N - CA
+        v2 = C - CA
+
+        # Gram-Schmidt 正交化构建局部坐标系的三个轴 (e1, e2, e3)
+        e1 = F.normalize(v1, dim=-1)
+        u2 = v2 - e1 * (torch.sum(e1 * v2, dim=-1, keepdim=True))
+        e2 = F.normalize(u2, dim=-1)
+        e3 = torch.cross(e1, e2, dim=-1)
+
+        # 构建旋转矩阵 R (shape: [B, L, 3, 3])
+        R = torch.stack([e1, e2, e3], dim=-1)
+
+        # 2. 计算并投影 Backbone Offset (使其也具备旋转不变性)
         bb = curr_coords[:, :, [0, 1, 2], :]      # [B, L, 3, 3]
-        ca = curr_coords[:, :, 1, :]              # [B, L, 3]
-
-        # CA-centered local backbone offsets
-        bb_offset = bb - ca[:, :, None, :]        # [B, L, 3, 3]
-        bb_offset = bb_offset.reshape(B, L, 9)
-
-        bb_context = self.bb_local_proj(bb_offset)
+        global_bb_offset = bb - CA.unsqueeze(2)   # [B, L, 3, 3]
+        
+        # [关键修复]: 使用 R 投影 bb_offset 到局部坐标系
+        # b=batch, l=length, i=global_dim, j=local_dim, a=atom(3个骨架原子)
+        local_bb_offset = torch.einsum('blij,blai->blaj', R, global_bb_offset)
+        
+        # 展平后通过 MLP
+        bb_offset_flat = local_bb_offset.reshape(B, L, 9)
+        bb_context = self.bb_local_proj(bb_offset_flat)
 
         # Add lightweight residue-to-antigen distance feature.
-        # This is not a full epitope encoder; it only informs current xt geometry.
         if antigen_mask is not None:
             antigen_mask = antigen_mask.to(torch.bool)
             ag_context = torch.zeros_like(bb_context)
@@ -226,9 +242,9 @@ class LiteXtStructAttention(nn.Module):
                 if ag_idx.numel() == 0:
                     continue
 
-                ag_ca = ca[b, ag_idx]  # [L_ag, 3]
+                ag_ca = CA[b, ag_idx]  # [L_ag, 3]
                 dist_to_ag = torch.cdist(
-                    ca[b:b + 1],
+                    CA[b:b + 1],
                     ag_ca.unsqueeze(0),
                 ).min(dim=-1).values.squeeze(0)  # [L]
 
@@ -242,26 +258,17 @@ class LiteXtStructAttention(nn.Module):
 
             bb_context = bb_context + ag_context
 
-        return bb_context
+        return bb_context, R
 
     def _cdr_atom_context(
         self,
         curr_coords: torch.Tensor,
         atom_mask: torch.Tensor,
         cdr_mask: torch.Tensor,
+        R: torch.Tensor,
     ) -> torch.Tensor:
         """
         Lightweight CDR all-atom perception.
-
-        No atom self-attention here.
-        Just CA-centered atom offset MLP + masked pooling.
-
-        curr_coords: [B, L, 14, 3]
-        atom_mask:   [B, L, 14]
-        cdr_mask:    [B, L]
-
-        return:
-            cdr_context: [B, L, c_s], non-CDR residues are zero.
         """
         B, L, A, _ = curr_coords.shape
         device = curr_coords.device
@@ -270,9 +277,16 @@ class LiteXtStructAttention(nn.Module):
         atom_type = self.atom_type_emb(atom_ids).view(1, 1, A, -1).expand(B, L, A, -1)
 
         ca = curr_coords[:, :, 1:2, :]                  # [B, L, 1, 3]
-        atom_offset = curr_coords - ca                  # [B, L, A, 3]
+        
+        # [修复]: 取消不正确的 unsqueeze(-2)，ca已经是[B,L,1,3]，与[B,L,14,3]相减即可
+        global_atom_offset = curr_coords - ca           # [B, L, 14, 3]
 
-        atom_feat = torch.cat([atom_offset, atom_type], dim=-1)
+        # [关键修复]: R的shape是4维，方程必须是 'blij'，而不能是 'bli'
+        # einsum 解释: b=batch, l=length, a=atoms, i=global_dim, j=local_dim
+        local_atom_offset = torch.einsum('blij,blai->blaj', R, global_atom_offset)
+
+        # 现在 local_atom_offset 是绝对旋转不变的！
+        atom_feat = torch.cat([local_atom_offset, atom_type], dim=-1)
         atom_feat = self.cdr_atom_proj(atom_feat)       # [B, L, A, c_s]
 
         valid = atom_mask.to(torch.bool) & cdr_mask.unsqueeze(-1).to(torch.bool)
@@ -282,7 +296,7 @@ class LiteXtStructAttention(nn.Module):
         pooled = pooled * cdr_mask.unsqueeze(-1).to(pooled.dtype)
 
         return pooled
-
+    
     def forward(
         self,
         sfea_tns: torch.Tensor,        # [B, L, c_s]
@@ -303,7 +317,7 @@ class LiteXtStructAttention(nn.Module):
             ca_coords=ca_coords,
         )
 
-        bb_context = self._backbone_context(
+        bb_context,R = self._backbone_context(
             curr_coords=curr_coords,
             atom_mask=atom_mask,
             antigen_mask=antigen_mask,
@@ -324,6 +338,7 @@ class LiteXtStructAttention(nn.Module):
                 curr_coords=curr_coords,
                 atom_mask=atom_mask,
                 cdr_mask=cdr_mask,
+                R = R,
             )
             cdr_gate = self.cdr_gate(out)
             out = out + cdr_gate * cdr_context
