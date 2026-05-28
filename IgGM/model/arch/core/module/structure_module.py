@@ -6,7 +6,7 @@ from torch import nn
 from IgGM.protein import ProtStruct, ProtConverter, AtomMapper
 from .head import PLDDTHead
 from .fr_cdr_blocks import FRBranch, CDRFusionBlock
-from .simple_sfeatnse_uodate import LiteXtStructAttention
+from .simple_sfeatnse_uodate import LiteXtStructAttention,CoordinateAwareIPA
 
 
 class StructureModule(nn.Module):
@@ -43,7 +43,7 @@ class StructureModule(nn.Module):
         self.net['linear_s'] = nn.Linear(self.n_dims_sfea, self.n_dims_sfea)
 
         
-        self.net['percpt_xt'] = LiteXtStructAttention(
+        self.net['percpt_xt'] = LiteXtStructAttention ( # LiteXtStructAttention
                                         c_s=self.n_dims_sfea,
                                         c_z=self.n_dims_pfea,
                                         n_heads=8,
@@ -75,7 +75,7 @@ class StructureModule(nn.Module):
         curr_coords = cord_tns_init.detach().clone()
         curr_cmsk = cmsk_tns_init.detach().clone()
 
-        cord_list, plddt_list, loop_cords, trsl_list, rota_list  = [], [], [], [], []
+        cord_list, plddt_list, loop_cords, trsl_list, rota_list = [], [], [], [], []
 
         antibody_mask = self._expand_batch_mask(region_metadata['antibody_mask'].to(device=device, dtype=torch.bool), n_smpls)
         loop_type_ids = self._expand_batch_mask(region_metadata['loop_type_ids'].to(device=device), n_smpls)
@@ -110,14 +110,25 @@ class StructureModule(nn.Module):
         sigma_raw = region_metadata["sigama_t"]["sigma_raw"].to(device=device, dtype=dtype).view(-1)
         sigma_t = sigma_raw.expand(n_smpls) if sigma_raw.numel() == 1 else sigma_raw
 
+        # 1. 提取 FR 专属的 sigma
+        fr_sigma_trsl = region_metadata['anchor_frame_meta']['fr_sigma_trsl'].detach().clone()
+        fr_sigma_rota = region_metadata['anchor_frame_meta']['fr_sigma_rota'].detach().clone()
+        if fr_sigma_trsl.ndim == 1:
+            fr_sigma_trsl = fr_sigma_trsl.unsqueeze(0).expand(n_smpls, -1)
+        if fr_sigma_rota.ndim == 1:
+            fr_sigma_rota = fr_sigma_rota.unsqueeze(0).expand(n_smpls, -1)
+        fr_sigma_trsl = fr_sigma_trsl.to(device=device, dtype=dtype)
+        fr_sigma_rota = fr_sigma_rota.to(device=device, dtype=dtype)
+
+
         for _ in range(n_lyrs):
-            # 1. 彻底切断几何计算图跨层传播
+            # # 1. 彻底切断几何计算图跨层传播
             rota_xt = rota_xt.detach()
             trsl_xt = trsl_xt.detach()
             curr_coords = curr_coords.detach()
             loop_xt_local = loop_xt_local.detach()
 
-            # 2. xt结构感知
+            # 1. xt结构感知
             if self.activation_checkpoint:
                 sfea_tns = self.activation_checkpoint_fn(
                     self.net['percpt_xt'],sfea_tns,pfea_tns,curr_coords,curr_cmsk,cdr_mask,
@@ -127,8 +138,8 @@ class StructureModule(nn.Module):
                     sfea_tns=sfea_tns,pfea_tns=pfea_tns,curr_coords=curr_coords,atom_mask=curr_cmsk,cdr_mask=cdr_mask,
                     antibody_mask=antibody_mask,antigen_mask=antigen_mask, chunk_size=chunk_size,
                 )
-
-            # 3. 抗体fr旋转平移预测
+                
+            # 2. 抗体fr旋转平移预测
             fr_out = self.net['fr_branch'](
                 sfea_tns=sfea_tns,
                 sfea_tns_init=sfea_tns_init,
@@ -138,14 +149,15 @@ class StructureModule(nn.Module):
                 rota_xt=rota_xt,
                 trsl_xt=trsl_xt,
                 antibody_local_coords=antibody_local_coords,
+                fr_sigma_trsl=fr_sigma_trsl,
+                fr_sigma_rota=fr_sigma_rota,
             )
-            
             fr_coords = fr_out['fr_coords']
             sfea_tns = fr_out['sfea_tns']
             trsl_xt = fr_out['trsl']
             rota_xt = fr_out['rota']
 
-            # 4. cdr全原子坐标去噪
+            # 3. cdr全原子坐标去噪
             cdr_out = self.net['cdr_fusion_block'](
                 sfea_tns=sfea_tns,
                 encd_tns=encd_tns,
@@ -164,10 +176,10 @@ class StructureModule(nn.Module):
             sfea_tns = cdr_out['sfea_after_cdr']
             loop_xt_local = cdr_out['loop_xt_new_local']
 
-            # 5. plddt预测
+            # 4. plddt预测
             plddt_dict = self.net['plddt'](sfea_tns.detach())
 
-            # 6. 保存用于计算 Loss 的张量（强烈建议加上 clone 以防后续代码做 inplace 操作）
+            # 5. 保存用于计算 Loss 的张量
             cord_list.append(curr_coords.clone())
             trsl_list.append(trsl_xt.clone())
             rota_list.append(rota_xt.clone())
@@ -175,8 +187,16 @@ class StructureModule(nn.Module):
             plddt_list.append(plddt_dict)
             
         pi_logits = cdr_out['cdr_pred']['pi_logits']
-        return sfea_tns, cord_list, plddt_list, trsl_list, rota_list, loop_cords, pi_logits
-
+        
+        return (
+            sfea_tns,
+            cord_list,
+            plddt_list,
+            trsl_list,
+            rota_list,
+            loop_cords,
+            pi_logits,
+        )
     @staticmethod
     def _expand_batch_mask(mask, n_smpls):
         return mask.unsqueeze(0).expand(n_smpls, *mask.shape)

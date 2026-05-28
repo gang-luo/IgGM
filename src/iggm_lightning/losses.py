@@ -115,50 +115,6 @@ class IgGMPaperLoss:
             rot, tr = self._kabsch_transform(src, dst, val)
             aligned[b] = torch.matmul(pred[b], rot.transpose(-1, -2)) + tr.view(1, 1, 3)
         return aligned
-
-    def _backbone_mse(
-        self,
-        inputs: Dict[str, torch.Tensor],
-        outputs: Dict[str, torch.Tensor],
-    ) -> torch.Tensor:
-
-        tgt_rota = inputs['anchor_frame_meta']['rota_orig']
-        tgt_trsl = inputs['anchor_frame_meta']['trsl_orig']
-        sigma_rota = inputs['anchor_frame_meta']['fr_sigma_rota']
-        sigma_trsl = inputs['anchor_frame_meta']['fr_sigma_trsl']
-
-        rota_preds = outputs['3d']['rota']
-        trsl_preds = outputs["3d"]["trsl"]
-        pre_rota_ref = rota_preds[-1] if isinstance(rota_preds, (list, tuple)) else rota_preds
-        pre_trsl_ref = trsl_preds[-1] if isinstance(trsl_preds, (list, tuple)) else trsl_preds
-
-        sigma_rota = torch.as_tensor(sigma_rota, device=pre_rota_ref.device, dtype=pre_rota_ref.dtype).view(-1)
-        sigma_rota = sigma_rota.clamp_min(5e-2)
-        w_rota = 1.0 / (sigma_rota.square() + 1e-6)
-        w_rota = torch.clamp(w_rota, max=10.0)
-        pre_rota = pre_rota_ref
-        tgt_rota_f32 = tgt_rota.to(device=pre_rota.device, dtype=torch.float32)
-        pre_rota_f32 = pre_rota.to(device=pre_rota.device, dtype=torch.float32)
-        r_err_f32 = torch.matmul(tgt_rota_f32, pre_rota_f32.transpose(-1, -2))
-        eps_rota_f32 = skew2vec(log_rmat(r_err_f32))
-        sq_rota = (eps_rota_f32 ** 2).sum(dim=-1)
-        w_use = w_rota.expand_as(sq_rota) if w_rota.numel() == 1 else w_rota[: sq_rota.numel()]
-        loss_rota = (sq_rota * w_use).mean().to(pre_rota.dtype)
-
-        # Translation, only valid if both are absolute global translations
-        sigma_trsl = torch.as_tensor(sigma_trsl, device=pre_trsl_ref.device, dtype=pre_trsl_ref.dtype).view(-1)
-        sigma_trsl = sigma_trsl.clamp_min(5e-2)
-        w_trsl = 1.0 / (sigma_trsl.square() + 1e-6)
-        w_trsl = torch.clamp(w_trsl, max=10.0)
-        pre_trsl = pre_trsl_ref
-        tgt_trsl_use = tgt_trsl.to(device=pre_trsl.device, dtype=pre_trsl.dtype)
-        sq_trsl = F.huber_loss(pre_trsl, tgt_trsl_use, reduction='none', delta=2.0).sum(dim=-1)
-        w_use = w_trsl.expand_as(sq_trsl) if w_trsl.numel() == 1 else w_trsl[: sq_trsl.numel()]
-        loss_trsl = (sq_trsl * w_use).mean()
-
-        loss_backbone = loss_rota + loss_trsl
-
-        return loss_backbone,loss_rota, loss_trsl
     
     def _seq_to_aatype(self, seq_obj, bsz: int, seq_len: int, device: torch.device) -> torch.Tensor:
         aa_to_idx = {aa: i for i, aa in enumerate(RESD_NAMES_1C)}
@@ -323,7 +279,7 @@ class IgGMPaperLoss:
             diff = pred_loop_local - clean_loop_local
 
             # 仅对有效的原子求平方误差
-            sq_diff = F.huber_loss(pred_loop_local, clean_loop_local, reduction='none', delta=2.0) * valid_mask
+            sq_diff = F.huber_loss(pred_loop_local, clean_loop_local, reduction='none', delta=2.0) * valid_mask # huber_loss
 
             # 先在特征空间 (dim 1,2,3,4) 求和并平均
             denom = valid_mask.sum(dim=(1, 2, 3, 4)).clamp_min(1.0)
@@ -334,6 +290,94 @@ class IgGMPaperLoss:
 
             return loss_val
     
+    def _backbone_mse_layer(
+        self,
+        inputs: Dict[str, torch.Tensor],
+        pre_trsl,
+        pre_rota,
+
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        
+        tgt_rota = inputs['anchor_frame_meta']['rota_orig']
+        tgt_trsl = inputs['anchor_frame_meta']['trsl_orig']
+        sigma_rota = inputs['anchor_frame_meta']['fr_sigma_rota']
+        sigma_trsl = inputs['anchor_frame_meta']['fr_sigma_trsl']
+
+        device, dtype = pre_trsl.device, pre_trsl.dtype
+
+        # --------- A. 平移 Loss (保持纯净，带 EDM 权重) ---------
+        sigma_trsl = torch.as_tensor(sigma_trsl, device=device, dtype=dtype).view(-1).clamp_min(1e-4)
+        sigma_data_trsl = 15.0  # 数据经验标准差
+        w_trsl = (sigma_trsl.square() + sigma_data_trsl**2) / ((sigma_trsl * sigma_data_trsl).square() + 1e-8)
+        w_use_trsl = torch.clamp(w_trsl, max=20.0).view(-1, 1) 
+        
+        
+        sq_trsl = F.mse_loss(pre_trsl, tgt_trsl.to(device, dtype), reduction='none').sum(dim=-1, keepdim=True)
+        loss_trsl = (sq_trsl * w_use_trsl).mean()
+
+        # --------- B. 旋转 Loss (替换为绝对稳健的 MSE) ---------
+        sigma_rota = torch.as_tensor(sigma_rota, device=device, dtype=dtype).view(-1)
+        w_rota = 1.0 / (sigma_rota.square() + 1e-6)
+        w_use_rota = torch.clamp(w_rota, min=0.1, max=10.0).view(-1, 1, 1) # [B, 1, 1]
+        
+        tgt_rota_f32 = tgt_rota.to(device=device, dtype=torch.float32)
+        pre_rota_f32 = pre_rota.to(device=device, dtype=torch.float32)
+        sq_rota = F.mse_loss(pre_rota_f32, tgt_rota_f32, reduction='none')
+        loss_rota = (sq_rota * w_use_rota).mean().to(dtype)
+
+        loss_backbone = 10 * loss_rota + loss_trsl
+
+        return loss_backbone, loss_trsl, loss_rota
+    
+
+    # def _aligned_backbone_cdr_vio_loss(self, inputs: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    #     n_layers = len(outputs["3d"]["trsl"])
+        
+    #     tot_loss_trsl = 0.0
+    #     tot_loss_rota = 0.0
+    #     tot_loss_backbone = 0.0
+        
+    #     # 对 8 层的输出分别计算 Loss，然后求平均
+    #     for l in range(n_layers):
+    #         pre_rota = outputs["3d"]["rota"][l]
+    #         pre_trsl = outputs["3d"]["trsl"][l]
+            
+    #         # 复用你写好的单层 MSE 函数
+    #         l_backbone, l_trsl, l_rota = self._backbone_mse_layer(
+    #             inputs, pre_trsl, pre_rota
+    #         )
+            
+    #         # 累加（可以加一个层级权重，通常最后几层权重大一点，这里简写为平均）
+    #         tot_loss_trsl += l_trsl
+    #         tot_loss_rota += l_rota
+    #         tot_loss_backbone += l_backbone
+            
+    #     # 求平均
+    #     tot_loss_trsl /= n_layers
+    #     tot_loss_rota /= n_layers
+    #     tot_loss_backbone /= n_layers
+    #     # ==============================================================
+
+    #     total = tot_loss_backbone
+        
+    #     if self.idx_save % 50 == 0:
+    #         import time
+    #         ts = int(time.time())
+    #         torch.save({
+    #             'perturb': inputs['cord-p'],
+    #             'pre': outputs["3d"]["cord"][-1], 
+    #             'clean': inputs.get("cords_atom14", inputs["cord-o"])
+    #         }, f'/root/private_data/luog/codex/IgGM/see/seefile/trsl-sS26_{ts}.pt')
+    #     self.idx_save += 1
+            
+            
+    #     return {
+    #         "loss": total,
+    #         "loss_backbone": tot_loss_backbone,
+    #         "loss_trsl": tot_loss_trsl,
+    #         "loss_rota": tot_loss_rota,
+    #     }
+
     def _aligned_backbone_cdr_vio_loss(self, inputs: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         
         pred = outputs["3d"]["cord"][-1]
@@ -347,31 +391,55 @@ class IgGMPaperLoss:
 
         loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, cmsk, cdr_mask)
         loss_bond = self._compute_bond_loss(pred, atom14_tgt, cmsk, cdr_mask)
-        loss_backbone,loss_rota, loss_trsl = self._backbone_mse(inputs, outputs) 
 
-        loops_pred,pi_logits,loops_local_label,loop_atom_valid_mask = outputs["3d"]["loop_cords"][-1],outputs["3d"]["pi_logits"],inputs["clean_loop_local_coords"],inputs.get("loop_atom_supervise_mask", inputs["loop_atom_valid_mask"])
+        loops_pred, pi_logits, loops_local_label, loop_atom_valid_mask = \
+            outputs["3d"]["loop_cords"][-1], outputs["3d"]["pi_logits"],inputs["clean_loop_local_coords"], inputs.get("loop_atom_supervise_mask", inputs["loop_atom_valid_mask"])
         
         loss_cdr = self._cdr_all_atom_mse(
             loops_pred, 
             loops_local_label, 
             loop_atom_valid_mask
         )
-
-        loss_vio = torch.zeros_like(loss_backbone)
-        
-        sigma_raw = inputs["sigama_t"]["sigma_raw"].to(device=pred.device, dtype=pred.dtype).view(-1)
-        sigma = sigma_raw.clamp_min(1e-6)
         
         # ========== EDM 黄金损失权重 ==========
+        sigma_raw = inputs["sigama_t"]["sigma_raw"].to(device=pred.device, dtype=pred.dtype).view(-1)
+        sigma = sigma_raw.clamp_min(1e-6)
         sigma_data = 4.0
-        # 这是 Karras 等人证明过的最优 SNR 权重方案：
         w_t = (sigma.square() + sigma_data**2) / ((sigma * sigma_data).square() + 1e-8)
-        
-        # 截断最高权重，防止极早期的小 sigma 引发梯度爆炸
         weight_factor = torch.clamp(w_t, max=5.0).mean()
-        # ======================================
 
-        # CDR loss
+
+        # =================  backbone ======================
+        n_layers = len(outputs["3d"]["trsl"])
+        
+        loss_trsl = 0.0
+        loss_rota = 0.0
+        loss_backbone = 0.0
+        
+        # 对 8 层的输出分别计算 Loss，然后求平均
+        for l in range(n_layers):
+            pre_rota = outputs["3d"]["rota"][l]
+            pre_trsl = outputs["3d"]["trsl"][l]
+            
+            # 复用你写好的单层 MSE 函数
+            l_backbone, l_trsl, l_rota = self._backbone_mse_layer(
+                inputs, pre_trsl, pre_rota
+            )
+            
+            # 累加（可以加一个层级权重，通常最后几层权重大一点，这里简写为平均）
+            loss_trsl += l_trsl
+            loss_rota += l_rota
+            loss_backbone += l_backbone
+            
+        # 求平均
+        loss_trsl /= n_layers
+        loss_rota /= n_layers
+        loss_backbone /= n_layers
+        # ==============================================================
+
+        
+        loss_vio = torch.zeros_like(loss_backbone)
+        #  loss
         total = (
             self.cfg.backbone_weight * loss_backbone
             + weight_factor * loss_cdr
@@ -386,7 +454,7 @@ class IgGMPaperLoss:
                 'perturb': inputs['cord-p'],
                 'pre': pred,
                 'clean': atom14_tgt
-            }, f'/root/private_data/luog/codex/IgGM/see/seefile/S26_{ts}.pt')
+            }, f'/root/private_data/luog/codex/IgGM/see/seefile/S27_{ts}.pt')
             
         self.idx_save += 1
             

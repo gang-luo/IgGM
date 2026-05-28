@@ -23,14 +23,14 @@ model:
   igso3_buffer: "/root/private_data/luog/codex/IgGM/checkpoints/igso3_buffer.pth"
 
 optimizer:
-  lr: 1.0e-4
+  lr: 5.0e-4
   weight_decay: 1.0e-2
-  grad_clip: 1.0
+  grad_clip: 10.0
 
-# scheduler:
-#   name: cosine
-#   t_max: 1750
-#   eta_min: 1.0e-6
+scheduler:
+  name: cosine
+  t_max: 1000
+  eta_min: 1.0e-6
 
 loss:
   vio_weight: 0.02
@@ -53,12 +53,12 @@ trainer:
 wandb:
   disabled: false # true or false
   project: IgGM
-  run_name: iggm-stage_one-S3
+  run_name: iggm-stage_one-S3-trsl
   entity: "mllm-csu"
   api_key: "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"
 
 runtime:
-  output_dir: outputs/lightning-stage_one-S3
+  output_dir: outputs/lightning-stage_one-S3-trsl
   seed: 56
   resume: False
   run_test: true

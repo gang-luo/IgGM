@@ -3,16 +3,15 @@ data:
   metadata: data/sabdab_2603/processed/sabdab_2603/metadata.json
   pdb_dir: data/sabdab_2603/processed/pdb
   samples_dir: data/sabdab_2603/processed/sabdab_2603/samples
-  train_ids: data/sabdab_2603/processed/split/train_prot_ids.txt
-  val_ids: data/sabdab_2603/processed/split/val_prot_ids.txt
-  test_ids: data/sabdab_2603/processed/split/test_prot_ids.txt
-  train_clusters: data/sabdab_2603/processed/split/train_prot_cluster.txt
+  train_ids: data/sabdab_2603/processed/split_onetest/train_prot_ids.txt
+  val_ids: data/sabdab_2603/processed/split_onetest/val_prot_ids.txt
+  test_ids: data/sabdab_2603/processed/split_onetest/test_prot_ids.txt
+  train_clusters: data/sabdab_2603/processed/split_onetest/train_prot_cluster.txt
   batch_size: 1
   num_workers: 1
   n_steps: 200
   forward_chunk_size: 128
   max_antigen_len: 256  # 384
-
 
 model:
   # ppi_ckpt留空时，将自动下载并使用官方PPI预训练权重
@@ -23,9 +22,9 @@ model:
   igso3_buffer: "/root/private_data/luog/codex/IgGM/checkpoints/igso3_buffer.pth"
 
 optimizer:
-  lr: 1.0e-4
+  lr: 5.0e-4
   weight_decay: 1.0e-2
-  grad_clip: 1.0
+  grad_clip: 10.0
 
 loss:
   # gamma: 0.8
@@ -35,10 +34,10 @@ metrics:
   dockq_threshold: 0.23
 
 trainer:
-  max_epochs: 40
+  max_epochs: 500
   precision: bf16 # bf16-mixed
   accelerator: gpu
-  devices: [0] # [0,1]
+  devices: [1] # [0,1]
   log_every_n_steps: 5
   accumulate_grad_batches: 1
   num_sanity_val_steps: 0

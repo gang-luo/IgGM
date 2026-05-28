@@ -53,13 +53,12 @@ trainer:
 wandb:
   disabled: false # true or false
   project: IgGM
-  run_name: iggm-stage_one-S4
+  run_name: iggm-stage_one-rota
   entity: "mllm-csu"
   api_key: "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"
 
-
 runtime:
-  output_dir: outputs/lightning-stage_one-S4
+  output_dir: outputs/lightning-stage_one-rota
   seed: 56
   resume: False
   run_test: true

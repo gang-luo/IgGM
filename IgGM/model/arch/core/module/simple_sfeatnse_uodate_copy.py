@@ -347,3 +347,186 @@ class LiteXtStructAttention(nn.Module):
         out = out + self.ffn(out)
 
         return out
+    
+
+
+# import numpy as np
+# import torch
+# from torch import nn
+# import torch.nn.functional as F
+
+# class CoordinateAwareIPA(nn.Module):
+#     """
+#     Coordinate-based Invariant Point Attention.
+    
+#     Directly extracts Local Frames (R, T) from `curr_coords` 
+#     and applies rigorous IPA spatial point aggregation.
+#     No external quat_tns or trsl_tns needed!
+#     """
+#     def __init__(
+#             self,
+#             c_s=384,
+#             c_z=256,
+#             head_dim=16,
+#             n_heads=12,
+#             n_qpnts=4,
+#             n_vpnts=8,
+#             drop_prob=0.1,
+#             # 保留接口兼容性
+#             n_atom=14, 
+#             rbf_bins=32,
+#             use_cdr_atom=True,
+#     ):
+#         super().__init__()
+#         self.c_s = c_s
+#         self.c_z = c_z
+#         self.n_dims_attn = head_dim
+#         self.n_heads = n_heads
+#         self.n_qpnts = n_qpnts
+#         self.n_vpnts = n_vpnts
+#         self.drop_prob = drop_prob
+#         self.use_cdr_atom = use_cdr_atom
+
+#         self.n_dims_cord = 3  
+#         self.n_dims_shid = self.n_heads * (
+#             self.c_z + self.n_dims_attn + self.n_vpnts * 3 + self.n_vpnts
+#         )
+#         self.wc = np.sqrt(2.0 / (9.0 * max(self.n_qpnts, 1)))
+#         self.wl = np.sqrt(1.0 / 3.0)
+#         self.ws = np.log(np.exp(1.0) - 1.0)
+
+#         # Q, K, V for scalar features
+#         self.linear_q = nn.Linear(self.c_s, self.n_heads * self.n_dims_attn, bias=False)
+#         self.linear_k = nn.Linear(self.c_s, self.n_heads * self.n_dims_attn, bias=False)
+#         self.linear_v = nn.Linear(self.c_s, self.n_heads * self.n_dims_attn, bias=False)
+        
+#         # QP, KP, VP for 3D point features
+#         self.linear_qp = nn.Linear(self.c_s, self.n_heads * self.n_qpnts * self.n_dims_cord, bias=False)
+#         self.linear_kp = nn.Linear(self.c_s, self.n_heads * self.n_qpnts * self.n_dims_cord, bias=False)
+#         self.linear_vp = nn.Linear(self.c_s, self.n_heads * self.n_vpnts * self.n_dims_cord, bias=False)
+        
+#         self.linear_b = nn.Linear(self.c_z, self.n_heads, bias=False)
+#         self.linear_s = nn.Linear(self.n_dims_shid, self.c_s)
+#         self.register_parameter(name='scale', param=nn.Parameter(self.ws * torch.ones((self.n_heads))))
+        
+#         self.softplus = nn.Softplus()
+#         self.softmax = nn.Softmax(dim=2)
+
+#         self.drop_1 = nn.Dropout(p=self.drop_prob)
+#         self.norm_1 = nn.LayerNorm(self.c_s)
+#         self.mlp = nn.Sequential(
+#             nn.Linear(self.c_s, self.c_s),
+#             nn.ReLU(),
+#             nn.Linear(self.c_s, self.c_s),
+#             nn.ReLU(),
+#             nn.Linear(self.c_s, self.c_s),
+#         )
+#         self.drop_2 = nn.Dropout(p=self.drop_prob)
+#         self.norm_2 = nn.LayerNorm(self.c_s)
+
+#     def _extract_frames(self, curr_coords: torch.Tensor):
+#         """实时从带噪 3D 坐标中提取局部旋转矩阵 R 和平移向量 T"""
+#         # curr_coords: [B, L, 14, 3]
+#         N, CA, C = curr_coords[:, :, 0, :], curr_coords[:, :, 1, :], curr_coords[:, :, 2, :]
+        
+#         # 平移 T 就是 CA 的坐标
+#         T = CA  # [B, L, 3]
+
+#         # 提取旋转矩阵 R
+#         v1 = N - CA
+#         v2 = C - CA
+#         e1 = F.normalize(v1, dim=-1)
+#         u2 = v2 - e1 * (torch.sum(e1 * v2, dim=-1, keepdim=True))
+#         e2 = F.normalize(u2, dim=-1)
+#         e3 = torch.cross(e1, e2, dim=-1)
+#         R = torch.stack([e1, e2, e3], dim=-1)  # [B, L, 3, 3]
+
+#         return R, T
+
+#     def forward(
+#         self,
+#         sfea_tns: torch.Tensor,        # [B, L, c_s]
+#         pfea_tns: torch.Tensor,        # [B, L, L, c_z]
+#         curr_coords: torch.Tensor,     # [B, L, 14, 3]
+#         atom_mask: torch.Tensor,       # [B, L, 14]
+#         cdr_mask: torch.Tensor,        # [B, L]
+#         antibody_mask: torch.Tensor | None = None,  
+#         antigen_mask: torch.Tensor | None = None,   
+#         chunk_size: int | None = None,              
+#     ) -> torch.Tensor:
+        
+#         B, L, _ = sfea_tns.shape
+#         s, z = sfea_tns, pfea_tns
+
+#         # 1. 动态提取刚体标架！(取代原版传入的 quat_tns, trsl_tns)
+#         R, T = self._extract_frames(curr_coords)
+
+#         # 2. 标量特征的 Q, K, V
+#         q_tns = self.linear_q(s).view(B, L, self.n_heads, self.n_dims_attn)
+#         k_tns = self.linear_k(s).view(B, L, self.n_heads, self.n_dims_attn)
+#         v_tns = self.linear_v(s).view(B, L, self.n_heads, self.n_dims_attn)
+
+#         # 3. 三维点云的 Q, K, V (在局部坐标系中)
+#         qp_tns = self.linear_qp(s).view(B, L, self.n_heads, self.n_qpnts, self.n_dims_cord)
+#         kp_tns = self.linear_kp(s).view(B, L, self.n_heads, self.n_qpnts, self.n_dims_cord)
+#         vp_tns = self.linear_vp(s).view(B, L, self.n_heads, self.n_vpnts, self.n_dims_cord)
+        
+#         b_tns = self.linear_b(z)  # [B, L, L, H]
+
+#         # 4. 关键：将局部特征点，投影到全局 3D 物理空间！
+#         # einsum 解释：b=batch, l=length, i,j=coord_dims, h=heads, p=points
+#         # qp_global = R * qp_local + T
+#         qp_global = torch.einsum('blij, blhpj -> blhpi', R, qp_tns) + T.view(B, L, 1, 1, 3)
+#         kp_global = torch.einsum('blij, blhpj -> blhpi', R, kp_tns) + T.view(B, L, 1, 1, 3)
+#         vp_global = torch.einsum('blij, blhpj -> blhpi', R, vp_tns) + T.view(B, L, 1, 1, 3)
+
+#         # 5. 计算全局空间中的点云距离
+#         qp_global_ = qp_global.view(B, L, 1, self.n_heads, self.n_qpnts, 3)
+#         kp_global_ = kp_global.view(B, 1, L, self.n_heads, self.n_qpnts, 3)
+        
+#         # 物理距离平方: [B, L_q, L_k, H, P_q]
+#         dist_sq = torch.sum((qp_global_ - kp_global_) ** 2, dim=-1)
+
+#         # 6. 计算注意力权重
+#         qk_tns = torch.einsum('blhd, bmhd -> blmh', q_tns, k_tns) / np.sqrt(self.n_dims_attn)
+#         qkp_tns = 0.5 * self.wc * self.softplus(self.scale).view(1, 1, 1, -1) * torch.sum(dist_sq, dim=-1)
+        
+#         logits = self.wl * (qk_tns + b_tns - qkp_tns)
+        
+#         # 掩码无效原子
+#         if atom_mask is not None:
+#             valid_mask = atom_mask[:, :, 1].to(torch.bool) # CA mask
+#             logits = logits.masked_fill(~valid_mask.view(B, 1, L, 1), -1e4)
+
+#         a_tns = self.softmax(logits) # [B, L, L, H]
+
+#         # 7. 聚合特征
+#         op_tns = torch.einsum('blmh, blmd -> blhd', a_tns, z) # Pair聚合
+#         ov_tns = torch.einsum('blmh, bmhd -> blhd', a_tns, v_tns) # 标量聚合
+        
+#         # 最核心的一步：在全局 3D 空间聚合目标点云坐标！
+#         # 这相当于找出了“我要往哪移动”的绝对 3D 位置！
+#         ovp_global = torch.einsum('blmh, bmhpj -> blhpj', a_tns, vp_global)
+
+#         # 8. 逆向投射：把全局聚合点，拉回当前的局部坐标系
+#         # ovp_local = R^T * (ovp_global - T)
+#         # 注意：这里得到的不仅是不变性特征，它天然蕴含了精确的方向向量！
+#         ovp_local = torch.einsum('blji, blhpi -> blhpj', R, ovp_global - T.view(B, L, 1, 1, 3))
+        
+#         ovp_norm = torch.norm(ovp_local, dim=-1) # [B, L, H, P_v]
+
+#         # 展平所有特征
+#         op_tns = op_tns.reshape(B, L, -1)
+#         ov_tns = ov_tns.reshape(B, L, -1)
+#         ovp_local = ovp_local.reshape(B, L, -1)
+#         ovp_norm = ovp_norm.reshape(B, L, -1)
+
+#         shid_tns = torch.cat([op_tns, ov_tns, ovp_local, ovp_norm], dim=-1)
+        
+#         # 融合回主干特征 s
+#         s = s + self.linear_s(shid_tns)
+#         s = self.norm_1(self.drop_1(s))
+#         s = s + self.mlp(s)
+#         out = self.norm_2(self.drop_2(s))
+
+#         return out

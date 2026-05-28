@@ -42,7 +42,7 @@ class OptimizerConfig:
     name: str = "adamw"
     lr: float = 1e-4
     weight_decay: float = 1e-2
-    betas: tuple[float, float] = (0.9, 0.999)
+    betas: tuple[float, float] = (0.5, 0.999) # 0.9
     eps: float = 1e-8
 
 
@@ -266,7 +266,7 @@ class IgGMLightningModule(pl.LightningModule):
         inputs = self._build_inputs_cm(prot_data_curr, idx_step)
         outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
         loss_dict = self._compute_loss(inputs, outputs)
-
+        
         self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=True, on_epoch=True)
         self.log(f"{stage}/loss_backbone", loss_dict["loss_backbone"], prog_bar=True, on_step=True, on_epoch=True)
         self.log(f"{stage}/loss_cdr", loss_dict["loss_cdr"], prog_bar=True, on_step=True, on_epoch=True)
@@ -276,7 +276,7 @@ class IgGMLightningModule(pl.LightningModule):
         self.log(f"{stage}/weight_factor", loss_dict["weight_factor"], prog_bar=True, on_step=True, on_epoch=True)
         self.log(f"{stage}/loss_trsl", loss_dict["loss_trsl"], prog_bar=True, on_step=True, on_epoch=True)
         self.log(f"{stage}/loss_rota", loss_dict["loss_rota"], prog_bar=True, on_step=True, on_epoch=True)
-        
+
     # except Exception as exc:
     #     local_fail = True
 
@@ -406,3 +406,25 @@ class IgGMLightningModule(pl.LightningModule):
     def on_train_batch_end(self, outputs, batch, batch_idx: int) -> None:
         if self.ema is not None:
             self.ema.update(self.model)
+
+    def on_after_backward(self):
+        fr = self.model.net["af2_smod"].net["fr_branch"]
+
+        print("linear_t.weight.grad:",
+            None if fr.linear_t.weight.grad is None else fr.linear_t.weight.grad.norm().item())
+
+        # print("linear_t.bias.grad:",
+        #     None if fr.linear_t.bias.grad is None else fr.linear_t.bias.grad.norm().item())
+        
+        
+        print("linear_q.weight.grad:",
+            None if fr.linear_q.weight.grad is None else fr.linear_q.weight.grad.norm().item())
+
+        # print("linear_q.bias.grad:",
+        #     None if fr.linear_q.bias.grad is None else fr.linear_q.bias.grad.norm().item())
+
+
+        # if hasattr(fr, "_debug_tensors"):
+        #     for k, v in fr._debug_tensors.items():
+        #         print(k, "requires_grad=", v.requires_grad,
+        #             "grad=", None if v.grad is None else v.grad.norm().item())

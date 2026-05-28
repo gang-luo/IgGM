@@ -309,7 +309,7 @@ class DesignModel(BaseModel):
 
         # AF2SMod
         region_metadata = self.__extract_region_metadata(inputs)
-        sfea_tns_st, cord_list, plddt_list, trsl_list, rota_list,loop_cords,pi_logits = self.net['af2_smod'](
+        sfea_tns_st, cord_list, plddt_list, trsl_list, rota_list, loop_cords, pi_logits = self.net['af2_smod'](
             inputs['seq-p'], sfea_tns, pfea_tns, penc_tns,
             cord_tns_init=inputs['cord-p'],
             cmsk_tns_init=inputs['cmsk-p'],
@@ -329,14 +329,26 @@ class DesignModel(BaseModel):
         # masked = inputs['pmsk'].to(torch.bool)
         # cord_masked = inputs['pmsk-ligand'].to(torch.bool)
 
-        # pack output tensors into a dict
+        # # pack output tensors into a dict
         outputs = {
             'sfea': sfea_tns,
             'mask': inputs['pmsk'],
             'pfea': pfea_tns,
             '1d': logt_tns_aa,
-            '2d': {'cb': logt_tns_cb, 'om': logt_tns_om, 'th': logt_tns_th, 'ph': logt_tns_ph},
-            '3d': {'cord': cord_list,  'plddt': plddt_list, 'trsl': trsl_list, 'rota': rota_list,'loop_cords': loop_cords, 'pi_logits': pi_logits},
+            '2d': {
+                'cb': logt_tns_cb,
+                'om': logt_tns_om,
+                'th': logt_tns_th,
+                'ph': logt_tns_ph,
+            },
+            '3d': {
+                'cord': cord_list,
+                'plddt': plddt_list,
+                'trsl': trsl_list,
+                'rota': rota_list,
+                'loop_cords': loop_cords,
+                'pi_logits': pi_logits,
+            },
         }
         return outputs
 

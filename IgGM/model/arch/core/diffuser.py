@@ -51,7 +51,7 @@ class Diffuser:
         self.igso3_buffer = igso3_buffer
         self.fr_noise_scale_trsl = float(1.0)
         self.fr_noise_scale_rota =  float(1.0)
-        self.cdr_local_noise_scale =  float(1.0)
+        self.cdr_local_noise_scale =  float(1.0) # 几乎不做扰动
         self.occupancy_mode = occupancy_mode
 
         # additional configurations
@@ -98,22 +98,31 @@ class Diffuser:
             else:
                 rota_buf = self.igso3_buffer.sample(stdev.item(), self.rota_buf_size)
             self.rota_buf_list_fwd.append(rota_buf)
-
+    
     def _sample_fr_rigid_transform(self, rota_orig, trsl_orig, idxs_step, device, dtype):
+        torch.manual_seed(42)
+        random.seed(42)
+        
         """纯 VE 的刚体加噪"""
         sigma_t = self.sigmas[idxs_step].to(device=device, dtype=dtype)
         
-        # 1. 纯 VE 平移：x_t = x_0 + sigma * eps (不压缩原始坐标)
+        # 1. 纯 VE 平移 (无界欧氏空间，单位：埃)
         sigma_trsl = self.fr_noise_scale_trsl * sigma_t
         fr_translation = sigma_trsl * torch.randn(3, device=device, dtype=dtype)
         trsl_xt = trsl_orig + fr_translation
+        # trsl_xt = trsl_orig # 暂时去除平移扰动
         
-        # 2. 旋转相对扰动
+        # ================== 【核心修复：计算真实的旋转 Sigma】 ==================
+        # 0.1 是将埃映射到弧度的经验系数，3.14 是 Haar 均匀分布的极限
+        sigma_rota = torch.clamp(sigma_t * self.fr_noise_scale_rota * 0.1, max=3.14)
         rota_buf = self.rota_buf_list_fwd[idxs_step].to(device=device, dtype=dtype)
         fr_rotation = rota_buf[random.randrange(self.rota_buf_size)]
         rota_xt = torch.matmul(fr_rotation, rota_orig)
+        # rota_xt = rota_orig # 暂时去除旋转扰动
         
-        return sigma_t, sigma_trsl, rota_xt, trsl_xt
+        # 旋转尺度、平移尺度、带噪旋转、带噪平移
+        return sigma_rota, sigma_trsl, rota_xt, trsl_xt
+
     def run(self, prot_data_orig, idxs_step=None, return_time_steps=False):
         """Run the protein diffusion model.
 
@@ -159,37 +168,86 @@ class Diffuser:
 
     @staticmethod
     def _build_antibody_rigid_params(cord_tns_orig, cmsk_mat_orig, antibody_mask):
-        """Build clean antibody-level rigid params and local coordinates."""
+        import contextlib
 
-        ab_mask = antibody_mask.to(torch.bool)
-        coords_ab = cord_tns_orig[ab_mask]  # [N_ab, A, 3]
-        atom_mask_ab = cmsk_mat_orig[ab_mask].to(cord_tns_orig.dtype)  # [N_ab, A]
+        device = cord_tns_orig.device
+        out_dtype = cord_tns_orig.dtype
 
-        ca_mask = atom_mask_ab[:, 1]
-        ca = coords_ab[:, 1] # using the new 14-atom scheme where N=0, CA=1, C=2, O=3
-        if ca_mask.sum() > 0:
-            trsl_orig = (ca * ca_mask.unsqueeze(-1)).sum(dim=0) / ca_mask.sum().clamp_min(1.0)
+        ab_mask = antibody_mask.to(device=device, dtype=torch.bool)
+        if ab_mask.sum() == 0:
+            raise ValueError("No antibody residues found.")
+
+        coords_ab_orig = cord_tns_orig[ab_mask]
+        atom_mask_ab_orig = cmsk_mat_orig[ab_mask]
+
+        if device.type == "cuda":
+            autocast_ctx = torch.amp.autocast(device_type="cuda", enabled=False)
         else:
-            trsl_orig = coords_ab.mean(dim=(0, 1))
+            autocast_ctx = contextlib.nullcontext()
 
-        n_ca = coords_ab[:, 1] - coords_ab[:, 0]
-        x_axis = coords_ab[-1, 1] - coords_ab[0, 1]
-        if torch.linalg.norm(x_axis) < 1e-6:
-            x_axis = torch.tensor([1.0, 0.0, 0.0], device=cord_tns_orig.device, dtype=cord_tns_orig.dtype)
-        x_axis = x_axis / x_axis.norm().clamp_min(1e-6)
-        guide = n_ca.mean(dim=0)
-        if torch.linalg.norm(guide) < 1e-6:
-            guide = torch.tensor([0.0, 1.0, 0.0], device=cord_tns_orig.device, dtype=cord_tns_orig.dtype)
-        z_axis = torch.cross(x_axis, guide, dim=-1)
-        if torch.linalg.norm(z_axis) < 1e-6:
-            z_axis = torch.tensor([0.0, 0.0, 1.0], device=cord_tns_orig.device, dtype=cord_tns_orig.dtype)
-        z_axis = z_axis / z_axis.norm().clamp_min(1e-6)
-        y_axis = torch.cross(z_axis, x_axis, dim=-1)
-        y_axis = y_axis / y_axis.norm().clamp_min(1e-6)
-        rota_orig = torch.stack([x_axis, y_axis, z_axis], dim=-1)  # [3, 3]
+        with autocast_ctx:
+            coords_ab = coords_ab_orig.float()
+            atom_mask_ab = atom_mask_ab_orig.float()
 
-        ab_local = global_to_local_coords(coords_ab, rota_orig, trsl_orig)
-        ab_local = ab_local * atom_mask_ab.unsqueeze(-1)
+            ca = coords_ab[:, 1]
+            ca_mask = atom_mask_ab[:, 1].to(torch.bool)
+
+            if ca_mask.sum() >= 3:
+                valid_points = ca[ca_mask] 
+            else:
+                valid_atom_mask = atom_mask_ab.to(torch.bool)
+                valid_points = coords_ab[valid_atom_mask]
+
+            if valid_points.numel() == 0:
+                raise ValueError("No valid antibody atoms found.")
+
+            trsl_orig_f32 = valid_points.mean(dim=0)
+            centered = valid_points - trsl_orig_f32
+
+            if valid_points.shape[0] < 3 or torch.linalg.norm(centered) < 1e-6:
+                rota_orig_f32 = torch.eye(3, device=device, dtype=torch.float32)
+            else:
+                cov = centered.transpose(0, 1).matmul(centered)
+                cov = cov / float(valid_points.shape[0])
+                U, S, Vh = torch.linalg.svd(cov.float().contiguous(), full_matrices=True)
+                U = U.float()
+
+                # --- 核心强制对齐：彻底消灭 180 度翻转震荡 ---
+                n_ca_mask = atom_mask_ab[:, 0] * atom_mask_ab[:, 1]
+                n_ca = coords_ab[:, 1] - coords_ab[:, 0]
+
+                # X轴向 N->CA 对齐
+                if n_ca_mask.sum() > 0:
+                    guide_x = (n_ca * n_ca_mask[:, None]).sum(dim=0) / n_ca_mask.sum().clamp_min(1.0)
+                else:
+                    guide_x = torch.tensor([1.0, 0.0, 0.0], device=device, dtype=torch.float32)
+
+                # Y轴向 首尾CA 对齐
+                if ca_mask.sum() >= 2:
+                    ca_valid = ca[ca_mask]
+                    guide_y = ca_valid[-1] - ca_valid[0]
+                else:
+                    guide_y = torch.tensor([0.0, 1.0, 0.0], device=device, dtype=torch.float32)
+
+                sign0 = 1.0 if torch.dot(U[:, 0], guide_x).item() >= 0.0 else -1.0
+                u0 = U[:, 0] * sign0
+
+                sign1 = 1.0 if torch.dot(U[:, 1], guide_y).item() >= 0.0 else -1.0
+                u1 = U[:, 1] * sign1
+
+                # Z轴由 X和Y 叉乘得到，绝对保证右手系且无翻转
+                u2 = torch.cross(u0, u1, dim=-1)
+                
+                rota_orig_f32 = torch.stack([u0, u1, u2], dim=-1).contiguous()
+
+            trsl_orig_f32 = trsl_orig_f32.contiguous()
+
+        rota_orig = rota_orig_f32.to(dtype=out_dtype)
+        trsl_orig = trsl_orig_f32.to(dtype=out_dtype)
+
+        ab_local = global_to_local_coords(coords_ab_orig, rota_orig, trsl_orig)
+        ab_local = ab_local * atom_mask_ab_orig.to(dtype=out_dtype).unsqueeze(-1)
+
         return rota_orig, trsl_orig, ab_local
 
     def _run_fr_cdr_sync(self, prot_data_orig, idxs_step):
@@ -322,10 +380,8 @@ class Diffuser:
             "antibody_mask": antibody_mask.detach().clone(),
             "occupancy_mode": self.occupancy_mode,
             "sigama_t": {
-                # "alpha_bar": alpha_bar_local.detach().clone(),
                 "cord_scale": torch.as_tensor(self.cord_scale, device=device, dtype=dtype),
                 "cdr_local_noise_scale": torch.as_tensor(self.cdr_local_noise_scale, device=device, dtype=dtype),
-                # "cdr_sigma": local_noise_scale.detach().clone(),
                 "cdr_sigma": sigma_cdr.detach().clone(),
                 "sigma_raw": sigma_t.detach().clone(),
             },
@@ -354,39 +410,6 @@ class Diffuser:
             self.trmat_list_st.append(trmat_st)
             self.trmat_list_ac.append(trmat_ac)
 
-            
-    # def _sample_fr_rigid_transform(self, rota_orig, trsl_orig, idxs_step, device, dtype):
-    #     """Sample one SE(3) perturbation for antibody-level FR rigid frame."""
-
-    #     alpha_bar_trsl = self.trsl_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
-    #     alpha_bar_rota = self.rota_schedule.alphas_bar[idxs_step].to(device=device, dtype=dtype)
-
-    #     sigma_trsl = (
-    #         self.fr_noise_scale_trsl
-    #         * self.cord_scale
-    #         * torch.sqrt(1.0 - alpha_bar_trsl)
-    #     )
-
-    #     sigma_rota = (
-    #         self.fr_noise_scale_rota
-    #         * torch.sqrt(1.0 - alpha_bar_rota)
-    #     )
-
-    #     # Translation perturbation under VP-style schedule: x_t = sqrt(alpha_bar) * x_0 + sigma * eps
-    #     fr_translation = sigma_trsl * torch.randn(3, device=device, dtype=dtype)
-
-    #     # Rotation relative perturbation
-    #     rota_buf = self.rota_buf_list_fwd[idxs_step].to(device=device, dtype=dtype)
-    #     fr_noise = rota_buf[random.randrange(self.rota_buf_size)]
-
-    #     fr_rotation = so3_scale(fr_noise, sigma_rota)
-
-    #     # NOTE: keep rigid convention consistent with training targets.
-    #     rota_xt = torch.matmul(fr_rotation, rota_orig)
-    #     trsl_xt = torch.sqrt(alpha_bar_trsl) * trsl_orig + fr_translation
-    #     return sigma_rota, sigma_trsl, rota_xt, trsl_xt
-
-
     def __build_igso3_list(self):
         """Build a list of IGSO(3) distributions."""
 
@@ -412,6 +435,7 @@ class Diffuser:
                 rota_buf = self.igso3_buffer.sample(stdev.item(), self.rota_buf_size)
             self.rota_buf_list_bwd.append(rota_buf)
 
+      
 class VarianceSchedule():
     """General variance schedule for DDPM training & sampling.
 
