@@ -1,0 +1,13 @@
+*.zip
+sabdab_summary_all.tsv
+*.pyc
+*.pt
+zz_trash
+*.pth
+*.gz
+outputs/
+data/sabdab
+data/sabdab*
+
+openfold/*
+.ipynb_checkpoints
