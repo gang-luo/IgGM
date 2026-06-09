@@ -348,7 +348,7 @@ class DesignModel(BaseModel):
                 'rota': rota_list,
                 'loop_cords': loop_cords,
                 'pi_logits': pi_logits,
-                'clean_labels': clean_label_list,    # 【新增】每层实时对齐的 CDR label
+                'clean_labels': clean_label_list,
             },
         }
         return outputs
