@@ -126,8 +126,6 @@ class FRBranch(nn.Module):
             'delta_trsl_local': delta_trsl_local,
             'delta_trsl': delta_trsl_global,
             'raw_delta_trsl': raw_delta_trsl,
-            'delta_rota': delta_rota,
-            'rot_vec': rot_vec,
         }
 
 

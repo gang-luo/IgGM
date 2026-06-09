@@ -253,127 +253,6 @@ class IgGMPaperLoss:
             out[f"loss_cdr_local_rmse_{safe_name}"] = torch.sqrt(mse.clamp_min(0.0)).detach()
         return out
 
-    @staticmethod
-    def _match_batch(t: torch.Tensor, batch_size: int) -> torch.Tensor:
-        if t.ndim == 0:
-            t = t.view(1)
-        if t.shape[0] == 1 and batch_size > 1:
-            t = t.expand(batch_size, *t.shape[1:])
-        return t
-
-    @staticmethod
-    def _so3_geodesic_angle(pred_rota: torch.Tensor, tgt_rota: torch.Tensor) -> torch.Tensor:
-        pred_f32 = pred_rota.float()
-        tgt_f32 = tgt_rota.to(device=pred_rota.device, dtype=torch.float32)
-        rel = torch.matmul(pred_f32, tgt_f32.transpose(-1, -2))
-        cos_angle = ((rel.diagonal(dim1=-2, dim2=-1).sum(dim=-1) - 1.0) * 0.5).clamp(-1.0, 1.0)
-        return torch.acos(cos_angle).to(dtype=pred_rota.dtype)
-
-    def _fr_rotation_diagnostic_losses(self, inputs, pre_rota, rota_in=None, delta_rota=None):
-        pre_rota = pre_rota.detach()
-        if rota_in is not None:
-            rota_in = rota_in.detach()
-        if delta_rota is not None:
-            delta_rota = delta_rota.detach()
-        tgt_rota = inputs['anchor_frame_meta']['rota_orig']
-        sigma_rota = inputs['anchor_frame_meta']['fr_sigma_rota']
-        batch_size = pre_rota.shape[0]
-        device, dtype = pre_rota.device, pre_rota.dtype
-
-        if tgt_rota.ndim == 2:
-            tgt_rota = tgt_rota.unsqueeze(0)
-        tgt_rota = self._match_batch(tgt_rota.to(device=device, dtype=dtype), batch_size)
-        sigma_rota = self._match_batch(torch.as_tensor(sigma_rota, device=device, dtype=dtype).view(-1), batch_size).clamp_min(1e-4)
-        w_rota = torch.clamp(1.0 / (sigma_rota.square() + 1e-6), min=0.1, max=10.0)
-
-        angle = self._so3_geodesic_angle(pre_rota, tgt_rota)
-        out = {
-            'loss_rota_geodesic': (angle.square() * w_rota).mean(),
-            'loss_rota_angle_rad': angle.mean(),
-        }
-
-        if rota_in is not None and delta_rota is not None:
-            rota_in = self._match_batch(rota_in.to(device=device, dtype=dtype), batch_size)
-            delta_rota = self._match_batch(delta_rota.to(device=device, dtype=dtype), batch_size)
-            local_order = torch.bmm(rota_in, delta_rota)
-            global_order = torch.bmm(delta_rota, rota_in)
-            local_angle = self._so3_geodesic_angle(local_order, tgt_rota)
-            global_angle = self._so3_geodesic_angle(global_order, tgt_rota)
-            out['loss_rota_geodesic_local_order'] = (local_angle.square() * w_rota).mean()
-            out['loss_rota_geodesic_global_order'] = (global_angle.square() * w_rota).mean()
-            out['loss_rota_order_margin'] = out['loss_rota_geodesic_global_order'] - out['loss_rota_geodesic_local_order']
-        return out
-
-    def _fr_translation_diagnostic_losses(self, inputs, pre_trsl, trsl_in=None, rota_in=None, raw_delta_trsl=None):
-        pre_trsl = pre_trsl.detach()
-        if trsl_in is not None:
-            trsl_in = trsl_in.detach()
-        if rota_in is not None:
-            rota_in = rota_in.detach()
-        if raw_delta_trsl is not None:
-            raw_delta_trsl = raw_delta_trsl.detach()
-        tgt_trsl = inputs['anchor_frame_meta']['trsl_orig']
-        xt_trsl = inputs['anchor_frame_meta']['trsl_xt']
-        sigma_trsl = inputs['anchor_frame_meta']['fr_sigma_trsl']
-        batch_size = pre_trsl.shape[0]
-        device, dtype = pre_trsl.device, pre_trsl.dtype
-
-        if tgt_trsl.ndim == 1:
-            tgt_trsl = tgt_trsl.unsqueeze(0)
-        if xt_trsl.ndim == 1:
-            xt_trsl = xt_trsl.unsqueeze(0)
-        tgt_trsl = self._match_batch(tgt_trsl.to(device=device, dtype=dtype), batch_size)
-        xt_trsl = self._match_batch(xt_trsl.to(device=device, dtype=dtype), batch_size)
-        sigma_trsl = self._match_batch(torch.as_tensor(sigma_trsl, device=device, dtype=dtype).view(-1), batch_size).clamp_min(1e-4)
-
-        sq_x0 = F.mse_loss(pre_trsl, tgt_trsl, reduction='none').sum(dim=-1)
-        eps_pred = (xt_trsl - pre_trsl) / sigma_trsl.view(-1, 1)
-        eps_tgt = (xt_trsl - tgt_trsl) / sigma_trsl.view(-1, 1)
-        sq_eps = F.mse_loss(eps_pred, eps_tgt, reduction='none').sum(dim=-1)
-        out = {
-            'loss_trsl_x0_unweighted': sq_x0.mean(),
-            'loss_trsl_eps': sq_eps.mean(),
-        }
-
-        if trsl_in is not None and rota_in is not None and raw_delta_trsl is not None:
-            trsl_in = self._match_batch(trsl_in.to(device=device, dtype=dtype), batch_size)
-            rota_in = self._match_batch(rota_in.to(device=device, dtype=dtype), batch_size)
-            raw_delta_trsl = self._match_batch(raw_delta_trsl.to(device=device, dtype=dtype), batch_size)
-            target_raw_local = torch.matmul((tgt_trsl - trsl_in).unsqueeze(1), rota_in).squeeze(1) / sigma_trsl.view(-1, 1)
-            out['loss_trsl_raw_local'] = F.mse_loss(raw_delta_trsl, target_raw_local, reduction='none').sum(dim=-1).mean()
-        return out
-
-    def compute_fr_test_losses(self, inputs: Dict, outputs: Dict) -> Dict[str, torch.Tensor]:
-        """Return diagnostic FR losses for comparing rotation/translation targets.
-
-        These losses are not included in the training objective.  They expose:
-        - matrix-free SO(3) geodesic rotation error;
-        - local/body-frame vs global/spatial-frame rotation composition error;
-        - x0-style, epsilon-style, and raw local translation residual targets.
-        """
-        rota_list = outputs["3d"]["rota"]
-        trsl_list = outputs["3d"]["trsl"]
-        n_layers = len(rota_list)
-        fr_aux = outputs["3d"].get("fr_aux", {})
-        diag_sums: Dict[str, torch.Tensor] = {}
-        for l in range(n_layers):
-            rota_diag = self._fr_rotation_diagnostic_losses(
-                inputs,
-                rota_list[l],
-                rota_in=(fr_aux.get("rota_in", [None] * n_layers)[l] if fr_aux.get("rota_in") else None),
-                delta_rota=(fr_aux.get("delta_rota", [None] * n_layers)[l] if fr_aux.get("delta_rota") else None),
-            )
-            trsl_diag = self._fr_translation_diagnostic_losses(
-                inputs,
-                trsl_list[l],
-                trsl_in=(fr_aux.get("trsl_in", [None] * n_layers)[l] if fr_aux.get("trsl_in") else None),
-                rota_in=(fr_aux.get("rota_in", [None] * n_layers)[l] if fr_aux.get("rota_in") else None),
-                raw_delta_trsl=(fr_aux.get("raw_delta_trsl", [None] * n_layers)[l] if fr_aux.get("raw_delta_trsl") else None),
-            )
-            for key, value in {**rota_diag, **trsl_diag}.items():
-                diag_sums[key] = diag_sums.get(key, torch.zeros_like(value)) + value
-        return {key: value / n_layers for key, value in diag_sums.items()}
-
     # ----------------------------------------------------------------
     # FR backbone loss（不变）
     # ----------------------------------------------------------------
@@ -467,7 +346,6 @@ class IgGMPaperLoss:
         loss_trsl = loss_trsl / n_layers
         loss_rota = loss_rota / n_layers
         loss_backbone = loss_backbone / n_layers
-        diag_means = self.compute_fr_test_losses(inputs, outputs)
 
         loss_vio = torch.zeros_like(loss_backbone)
         total = (
@@ -490,5 +368,4 @@ class IgGMPaperLoss:
             "weight_factor": weight_factor,
             "loss_trsl": loss_trsl,
             "loss_rota": loss_rota,
-            **diag_means,
         }

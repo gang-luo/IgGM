@@ -86,7 +86,6 @@ class StructureModule(nn.Module):
         curr_cmsk = cmsk_tns_init.detach().clone()
 
         cord_list, plddt_list, loop_cords, trsl_list, rota_list = [], [], [], [], []
-        raw_delta_trsl_list, delta_rota_list, rota_in_list, trsl_in_list = [], [], [], []
         clean_label_list = []
 
         # ----------------------------------------------------------------
@@ -177,8 +176,6 @@ class StructureModule(nn.Module):
                 )
 
             # 2. FR 刚体预测（sfea_tns 正常传入，FR loss 正常反传）
-            rota_in = rota_xt
-            trsl_in = trsl_xt
             fr_out = self.net['fr_branch'](
                 sfea_tns=sfea_tns,
                 sfea_tns_init=sfea_tns_init,
@@ -232,10 +229,6 @@ class StructureModule(nn.Module):
             cord_list.append(curr_coords.clone())
             trsl_list.append(trsl_xt.clone())
             rota_list.append(rota_xt.clone())
-            raw_delta_trsl_list.append(fr_out['raw_delta_trsl'].clone())
-            delta_rota_list.append(fr_out['delta_rota'].clone())
-            rota_in_list.append(rota_in.clone())
-            trsl_in_list.append(trsl_in.clone())
             loop_cords.append(cdr_out['pred_x0_local'].clone())
             plddt_list.append(plddt_dict)
 
@@ -250,12 +243,6 @@ class StructureModule(nn.Module):
             loop_cords,
             pi_logits,
             clean_label_list,
-            {
-                'raw_delta_trsl': raw_delta_trsl_list,
-                'delta_rota': delta_rota_list,
-                'rota_in': rota_in_list,
-                'trsl_in': trsl_in_list,
-            },
         )
 
     @staticmethod

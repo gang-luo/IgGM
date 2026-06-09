@@ -279,18 +279,7 @@ class IgGMLightningModule(pl.LightningModule):
         for key, value in loss_dict.items():
             if str(key).startswith("loss_cdr_local_rmse_"):
                 self.log(f"{stage}/{key}", value, prog_bar=False, on_step=True, on_epoch=True)
-        for diag_key in (
-            "loss_rota_geodesic",
-            "loss_rota_angle_rad",
-            "loss_rota_geodesic_local_order",
-            "loss_rota_geodesic_global_order",
-            "loss_rota_order_margin",
-            "loss_trsl_x0_unweighted",
-            "loss_trsl_eps",
-            "loss_trsl_raw_local",
-        ):
-            if diag_key in loss_dict:
-                self.log(f"{stage}/{diag_key}", loss_dict[diag_key], prog_bar=False, on_step=True, on_epoch=True)
+
 
     # except Exception as exc:
     #     local_fail = True

@@ -309,7 +309,7 @@ class DesignModel(BaseModel):
 
         # AF2SMod
         region_metadata = self.__extract_region_metadata(inputs)
-        sfea_tns_st, cord_list, plddt_list, trsl_list, rota_list, loop_cords, pi_logits, clean_label_list, fr_aux = self.net['af2_smod'](
+        sfea_tns_st, cord_list, plddt_list, trsl_list, rota_list, loop_cords, pi_logits, clean_label_list = self.net['af2_smod'](
             inputs['seq-p'], sfea_tns, pfea_tns, penc_tns,
             cord_tns_init=inputs['cord-p'],
             cmsk_tns_init=inputs['cmsk-p'],
@@ -349,7 +349,6 @@ class DesignModel(BaseModel):
                 'loop_cords': loop_cords,
                 'pi_logits': pi_logits,
                 'clean_labels': clean_label_list,
-                'fr_aux': fr_aux,
             },
         }
         return outputs

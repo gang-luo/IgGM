@@ -153,15 +153,15 @@ The metric path aligns predicted and target coordinates for RMSD-like measures. 
 | Area | Issue | Why it matters | Current direction |
 | --- | --- | --- | --- |
 | Entrypoint | Scheduler dictionary construction had a duplicated assignment that made the launcher syntactically invalid. | The provided startup command could not run. | Fixed by constructing one scheduler dictionary. |
-| Timestep noising | `_run_fr_cdr_sync` overwrote every sampled timestep with `80`. | The model never learned the configured diffusion-time distribution; time embeddings and sigma conditioning were inconsistent with sampled `idx_step`. | Fixed by honoring the caller timestep and clamping it to `[1, n_steps]`. |
-| Randomness | Rigid noising reset Python and PyTorch random seeds inside every noising call. | Different samples could receive repeated noise, reducing stochastic diversity and undermining diffusion training. | Fixed by removing per-call seed resets. |
+| Timestep noising | `_run_fr_cdr_sync` fixes every sampled timestep to `80`. | This is intentional for the current single-sample overfit/debug command, but it is not a valid setting for real diffusion training across timesteps. | Keep it for the overfit experiment; remove the hardcoded step before production training. |
+| Randomness | Rigid noising resets Python and PyTorch random seeds inside the noising path. | This fixes the input noise for single-sample overfit debugging, but collapses stochastic diversity for real training. | Keep it for the current overfit experiment; remove reseeding before production training. |
 | Antibody rigid frame | The SVD-derived antibody frame did not enforce an orthonormal right-handed basis after guide-direction sign handling. | A non-orthonormal frame injects scale/shear into transformations and breaks rigid-body assumptions. | Fixed by Gram-Schmidt orthogonalization, normalization, and determinant correction. |
 | CDR local labels | A previous review proposed per-layer clean-label reprojection from `clean_coords_global`. | That coupling is unnecessary for inference and weakens the intended invariant local-coordinate target. Under shared rigid antibody motion, `clean_loop_local_coords` remains invariant and is the better canonical supervision target. | Use diffuser-provided `clean_loop_local_coords` directly for CDR local loss; use current FR anchors only for local-to-global merging. |
 | Loss side effect | The loss periodically wrote debug tensors to an absolute machine-specific path. | This can fail on other machines, leak storage, and make training behavior environment-dependent. | Removed the unconditional absolute-path save side effect. |
 
 ## 10. Remaining Review Concerns
 
-The FR rotation/translation items are now exposed as comparison-only diagnostics instead of being forced into the training objective. Remaining checks are:
+The FR rotation/translation comparison losses were removed per current debugging preference. Remaining checks are:
 
 1. **Antigen conditioning strength**: antigen features enter through PLM blocks, contact/interface features, and antigen structural pair encoding. An ablation that zeros antigen features is needed to prove antigen awareness.
 2. **Anchor closure validation**: the local CDR target should encode anchor-relative loop closure, but explicit anchor-to-CDR peptide distance logging is still needed to verify that the learned local target produces closed loops.
@@ -178,24 +178,8 @@ The FR rotation/translation items are now exposed as comparison-only diagnostics
 - Report anchor peptide bond distances separately from intra-CDR bond distances.
 - Run antigen ablations by zeroing `ic_feat`, `a-cord`, and antigen pair blocks to quantify antigen dependency.
 
-## 12. FR Rotation / Translation Diagnostic Losses
+## 12. Single-Sample Overfit Notes
 
-The training objective still keeps the original FR backbone loss for continuity, but the loss module now exposes comparison-only diagnostics through `IgGMPaperLoss.compute_fr_test_losses(inputs, outputs)`. These diagnostics are returned in `loss_dict` and logged by the Lightning module when present.
-
-- `loss_rota_geodesic` and `loss_rota_angle_rad` measure SO(3) geodesic error instead of elementwise rotation-matrix MSE.
-- `loss_rota_geodesic_local_order` evaluates the body/local-frame composition `R_new = R_in @ Delta_R`.
-- `loss_rota_geodesic_global_order` evaluates the spatial/global-frame composition `R_new = Delta_R @ R_in`.
-- `loss_rota_order_margin = global_order - local_order`; positive values indicate the implemented local/body-frame composition is closer to the clean target.
-- `loss_trsl_x0_unweighted` evaluates direct x0 translation regression.
-- `loss_trsl_eps` evaluates the equivalent VE epsilon-style translation target.
-- `loss_trsl_raw_local` compares the FR head raw translation vector against the current-local residual target `(t_0 - t_in) @ R_in / sigma`.
-
-From the code convention `x_global = x_local @ R.T + t`, the translation head explicitly predicts a local/body-frame residual because `raw_delta_trsl * sigma` is multiplied by `R_in.T` before being added in global coordinates. The matching rotation update is therefore `R_new = R_in @ Delta_R`; `Delta_R @ R_in` would correspond to a spatial/global-frame update.
-
-For anchor closure, the local CDR target already encodes the first/last CDR residue position relative to the left/right anchors. Therefore no new hard-coded anchor-bond fallback was added in this pass; the recommended check is to log explicit anchor-to-CDR peptide distances to verify the learned local target produces closed loops.
-
-## 13. Single-Sample Overfit Notes
-
-For one-sample architecture debugging, `config/train_0526_signle.yaml` now explicitly fixes `diffusion.fixed_step: 80` and `diffusion.fixed_seed: 42`. This restores deterministic noising for the current overfit command while keeping the fixed-noise behavior visible in YAML rather than hidden inside the diffuser. Remove these two fields for real diffusion training across random timesteps/noise samples.
+For the current one-sample architecture debugging path, the diffuser keeps the original fixed `idxs_step = 80` and fixed seed `42` inside `_run_fr_cdr_sync` / `_sample_fr_rigid_transform`. This intentionally fixes the noised input so single-sample fitting tests the model architecture rather than stochastic input variation.
 
 If total CDR loss is very low but a specific CDR loop still has 0.2-1.0 Å RMSD, the most likely code-level explanation is metric/loss aggregation: the training loss averages all loops and all supervised atom14 slots, while evaluation reports each loop separately on backbone atoms after per-loop Kabsch alignment. A single difficult loop can therefore remain visible in RMSD even when the global averaged CDR loss is small. To expose this directly, the loss now returns per-loop local-coordinate RMSE keys named `loss_cdr_local_rmse_<loop_name>` from the final CDR layer. Compare these keys with `rmsd_H1/H2/H3/L1/L2/L3` before changing architecture.
