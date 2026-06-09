@@ -1,35 +1,19 @@
 """
-fr_cdr_blocks.py  【修改版】
-----------------------------
-核心改动：
-
-P0-第一条（anchor frame 统一）：
-  CDRFusionBlock.forward 新增参数 clean_coords_global（cord_tns_orig），
-  在每一层前向中用当前 fr_coords 的 anchor frame 实时重投影干净坐标，
-  得到与预测空间一致的 clean_loop_local_realigned，返回给 StructureModule 用于 loss。
-  不再依赖 diffuser 预计算的 clean_loop_local_coords（那个是固定坐标系，与预测坐标系不一致）。
-
-P1-第一条（sfea 梯度隔离）：
-  CDRFusionBlock 接收 sfea_tns_for_cdr（已在 StructureModule 外部 detach），
-  而非 FR 修改后的 sfea_tns（防止 CDR loss 梯度回传污染 FRBranch 参数）。
-  FRBranch 的 delta_feat 更新只受 FR loss 监督。
-
-注意：
-  CDRLoopHead.forward 的参数名 loop_xt_local → loop_xt_scaled（已 c_in 缩放的输入）。
-  返回的 'pred_x0_local' 改为由 StructureModule 外层统一用 c_skip/c_out 组装。
-  CDRFusionBlock 直接从 CDRLoopHead 拿 F_theta，并用从 StructureModule 传入的
-  c_skip / c_out 组装 pred_x0_local，再做全局映射。
+fr_cdr_blocks.py
+----------------
+FRBranch predicts the antibody-level rigid denoising update, while
+CDRFusionBlock predicts CDR loop coordinates in the loop-local anchor frames
+provided by the diffuser.  The block uses the current predicted FR coordinates
+only to build the local->global anchor frame used for merging predicted CDR
+coordinates back into the full complex.
 """
 
 from __future__ import annotations
 
 import torch
 from torch import nn
-import torch.nn.functional as F
-
 from .cdr_loop_head import CDRLoopHead
-from IgGM.utils.fr_cdr_diffusion_utils import local_to_global_coords,extract_trsl_rota_from_noisefr
-from IgGM.utils.fr_cdr_frame_utils import build_loop_frames_and_realign_labels
+from IgGM.utils.fr_cdr_diffusion_utils import local_to_global_coords, extract_trsl_rota_from_noisefr
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +103,11 @@ class FRBranch(nn.Module):
         raw_delta_rota = self.linear_q(pooled)
         rot_vec = raw_delta_rota * sigma_rota_expand
         delta_rota = self._axis_angle_to_matrix(rot_vec)
+        # local_to_global_coords uses row vectors: x_global = x_local @ R.T + t.
+        # raw_delta_trsl is explicitly interpreted in the current antibody-local
+        # frame by multiplying it with rota_xt.T.  The matching body-frame
+        # rotation update is therefore R_new = R_xt @ Delta_R; using
+        # Delta_R @ R_xt would be a spatial/global-frame update.
         updated_rota = torch.bmm(rota_xt, delta_rota)
 
         updated = curr_coords.clone()
@@ -137,6 +126,8 @@ class FRBranch(nn.Module):
             'delta_trsl_local': delta_trsl_local,
             'delta_trsl': delta_trsl_global,
             'raw_delta_trsl': raw_delta_trsl,
+            'delta_rota': delta_rota,
+            'rot_vec': rot_vec,
         }
 
 
@@ -147,12 +138,10 @@ class FRBranch(nn.Module):
 class CDRFusionBlock(nn.Module):
     """CDR denoise + FR/CDR merge + output packing in one block.
 
-    修改要点：
-    1. 接收 sfea_tns_for_cdr（已 detach，梯度隔离）而非原始 sfea_tns。
-    2. 接收 clean_coords_global（cord_tns_orig），在当前 fr_coords anchor frame 下
-       实时重投影干净坐标，得到与预测空间一致的 clean_loop_local_realigned。
-    3. 接收外部计算好的 c_skip / c_out，与 CDRLoopHead 输出的 F_theta 组装 pred_x0_local。
-    4. 返回 clean_loop_local_realigned 供 losses.py 使用（替代固定的 clean_loop_local_coords）。
+    The CDR head predicts clean loop-local coordinates in the canonical
+    diffuser anchor-local frame.  Current FR coordinates are used only to
+    construct the local-to-global frame for merging predictions back into the
+    full complex.
     """
 
     def __init__(self, c_s: int = 384, max_positions: int = 64):
@@ -221,7 +210,7 @@ class CDRFusionBlock(nn.Module):
         sfea_tns_orig: torch.Tensor,             # [B, L, c_s]  未 detach，用于 loop_feedback 写回
         encd_tns: torch.Tensor,
         fr_coords: torch.Tensor,                 # [B, L, 14, 3] 当前 FRBranch 预测坐标
-        loop_true_len: torch.Tensor,       # [B, L, 14, 3] cord_tns_orig（干净全局坐标，新参数）
+        loop_true_len: torch.Tensor,             # [B, N_loop] 每个 loop 的真实长度
         loop_xt_scaled: torch.Tensor,            # [B, N_loop, L_max, N_atom, 3] 已 c_in 缩放（新参数名）
         c_skip: torch.Tensor,                    # [B, 1, 1, 1, 1] 由外部 StructureModule 计算
         c_out: torch.Tensor,                     # [B, 1, 1, 1, 1] 由外部 StructureModule 计算
@@ -237,17 +226,13 @@ class CDRFusionBlock(nn.Module):
     ):
         local_pos = torch.arange(loop_global_res_indices.shape[-1], device=sfea_tns_for_cdr.device, dtype=torch.long)
 
-        # # =====================================================================
-        # 用 fr_coords 的 anchor frame 构建 loop rota和trsl，用于后期的loop到global映射
-        # # =====================================================================
         loop_frame_rota, loop_frame_trsl = extract_trsl_rota_from_noisefr(
-            fr_coords.detach(), # 必须 detach，构建梯度防火墙！
+            fr_coords.detach(),
             loop_global_res_indices,
             loop_true_len,
             loop_left_anchor_idx,
             loop_right_anchor_idx,
         )
-
 
         # =====================================================================
         # P1 核心修改：CDR 使用 detach 后的 sfea（sfea_tns_for_cdr）
@@ -303,7 +288,6 @@ class CDRFusionBlock(nn.Module):
         return {
             'cdr_pred': cdr_pred,
             'pred_x0_local': pred_x0_local,             # [B, N_loop, L_max, N_atom, 3] 组装后的 x0 预测
-            'clean_loop_local_realigned': None,  # 实时对齐的 label（新增）
             'pred_loop_global': pred_loop_global,
             'loop_frame_rota': loop_frame_rota,
             'loop_frame_trsl': loop_frame_trsl,

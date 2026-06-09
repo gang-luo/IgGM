@@ -276,6 +276,18 @@ class IgGMLightningModule(pl.LightningModule):
         self.log(f"{stage}/weight_factor", loss_dict["weight_factor"], prog_bar=True, on_step=True, on_epoch=True)
         self.log(f"{stage}/loss_trsl", loss_dict["loss_trsl"], prog_bar=True, on_step=True, on_epoch=True)
         self.log(f"{stage}/loss_rota", loss_dict["loss_rota"], prog_bar=True, on_step=True, on_epoch=True)
+        for diag_key in (
+            "loss_rota_geodesic",
+            "loss_rota_angle_rad",
+            "loss_rota_geodesic_local_order",
+            "loss_rota_geodesic_global_order",
+            "loss_rota_order_margin",
+            "loss_trsl_x0_unweighted",
+            "loss_trsl_eps",
+            "loss_trsl_raw_local",
+        ):
+            if diag_key in loss_dict:
+                self.log(f"{stage}/{diag_key}", loss_dict[diag_key], prog_bar=False, on_step=True, on_epoch=True)
 
     # except Exception as exc:
     #     local_fail = True
