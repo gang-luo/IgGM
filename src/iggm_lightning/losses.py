@@ -234,6 +234,25 @@ class IgGMPaperLoss:
         loss_per_batch = sq_diff.sum(dim=(1, 2, 3, 4)) / (3.0 * denom)
         return loss_per_batch.mean()
 
+    def _cdr_per_loop_rmse(self, pred_loop_local, clean_loop_local, loop_atom_valid_mask, loop_names) -> Dict[str, torch.Tensor]:
+        if clean_loop_local.ndim == 4:
+            clean_loop_local = clean_loop_local.unsqueeze(0)
+        if loop_atom_valid_mask.ndim == 3:
+            loop_atom_valid_mask = loop_atom_valid_mask.unsqueeze(0)
+        clean_loop_local = clean_loop_local.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
+        loop_atom_valid_mask = loop_atom_valid_mask.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
+        n_loop = pred_loop_local.shape[1]
+        names = list(loop_names or [])
+        out: Dict[str, torch.Tensor] = {}
+        for i in range(n_loop):
+            name = str(names[i]) if i < len(names) else f"loop{i}"
+            safe_name = name.lower().replace("-", "_")
+            valid = loop_atom_valid_mask[:, i].unsqueeze(-1)
+            denom = (valid.sum() * 3.0).clamp_min(1.0)
+            mse = (((pred_loop_local[:, i] - clean_loop_local[:, i]) ** 2) * valid).sum() / denom
+            out[f"loss_cdr_local_rmse_{safe_name}"] = torch.sqrt(mse.clamp_min(0.0)).detach()
+        return out
+
     @staticmethod
     def _match_batch(t: torch.Tensor, batch_size: int) -> torch.Tensor:
         if t.ndim == 0:
@@ -419,6 +438,12 @@ class IgGMPaperLoss:
             )
             loss_cdr = loss_cdr + w * loss_cdr_l
         loss_cdr = loss_cdr / weight_sum
+        cdr_loop_diag = self._cdr_per_loop_rmse(
+            loop_cords_list[-1],
+            clean_loop_local_gt,
+            loop_atom_valid_mask,
+            inputs.get("loop_names", []),
+        )
 
         # EDM 权重（不变）
         sigma_raw = inputs["sigama_t"]["sigma_raw"].to(device=pred.device, dtype=pred.dtype).view(-1)
@@ -459,6 +484,7 @@ class IgGMPaperLoss:
             "loss_viol": loss_vio,
             "loss_backbone": loss_backbone,
             "loss_cdr": loss_cdr,
+            **cdr_loop_diag,
             "loss_smooth_lddt": loss_smooth_lddt,
             "loss_bond": loss_bond,
             "weight_factor": weight_factor,

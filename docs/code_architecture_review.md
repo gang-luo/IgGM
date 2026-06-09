@@ -193,3 +193,9 @@ The training objective still keeps the original FR backbone loss for continuity,
 From the code convention `x_global = x_local @ R.T + t`, the translation head explicitly predicts a local/body-frame residual because `raw_delta_trsl * sigma` is multiplied by `R_in.T` before being added in global coordinates. The matching rotation update is therefore `R_new = R_in @ Delta_R`; `Delta_R @ R_in` would correspond to a spatial/global-frame update.
 
 For anchor closure, the local CDR target already encodes the first/last CDR residue position relative to the left/right anchors. Therefore no new hard-coded anchor-bond fallback was added in this pass; the recommended check is to log explicit anchor-to-CDR peptide distances to verify the learned local target produces closed loops.
+
+## 13. Single-Sample Overfit Notes
+
+For one-sample architecture debugging, `config/train_0526_signle.yaml` now explicitly fixes `diffusion.fixed_step: 80` and `diffusion.fixed_seed: 42`. This restores deterministic noising for the current overfit command while keeping the fixed-noise behavior visible in YAML rather than hidden inside the diffuser. Remove these two fields for real diffusion training across random timesteps/noise samples.
+
+If total CDR loss is very low but a specific CDR loop still has 0.2-1.0 Å RMSD, the most likely code-level explanation is metric/loss aggregation: the training loss averages all loops and all supervised atom14 slots, while evaluation reports each loop separately on backbone atoms after per-loop Kabsch alignment. A single difficult loop can therefore remain visible in RMSD even when the global averaged CDR loss is small. To expose this directly, the loss now returns per-loop local-coordinate RMSE keys named `loss_cdr_local_rmse_<loop_name>` from the final CDR layer. Compare these keys with `rmsd_H1/H2/H3/L1/L2/L3` before changing architecture.

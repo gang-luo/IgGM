@@ -72,4 +72,7 @@ stage_training:
   mix_cdr_all: 2
   lazy_cache_size: 128
   occupancy_mode: joint_predict
-  
+
+diffusion:
+  fixed_step: 80
+  fixed_seed: 42

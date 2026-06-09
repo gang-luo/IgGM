@@ -42,6 +42,8 @@ class Diffuser:
             cord_scale=4.0,  # coordinate scaling factor (in Angstrom)
             igso3_buffer=None,  # buffered rotational matrices sampled from IGSO(3) distributions
             occupancy_mode="joint_predict",
+            fixed_step=None,
+            fixed_seed=None,
     ):
         """Constructor function."""
 
@@ -54,6 +56,8 @@ class Diffuser:
         self.fr_noise_scale_rota =  float(1.0)
         self.cdr_local_noise_scale =  float(1.0) # 几乎不做扰动
         self.occupancy_mode = occupancy_mode
+        self.fixed_step = None if fixed_step is None else int(fixed_step)
+        self.fixed_seed = None if fixed_seed is None else int(fixed_seed)
 
         # additional configurations
         self.rota_buf_size = 1024  # number of rotation matrices buffered for each IGSO(3) distr.
@@ -102,6 +106,9 @@ class Diffuser:
     
     def _sample_fr_rigid_transform(self, rota_orig, trsl_orig, idxs_step, device, dtype):
         """纯 VE 的刚体加噪"""
+        if self.fixed_seed is not None:
+            torch.manual_seed(self.fixed_seed)
+            random.seed(self.fixed_seed)
         sigma_t = self.sigmas[idxs_step].to(device=device, dtype=dtype)
         
         # 1. 纯 VE 平移 (无界欧氏空间，单位：埃)
@@ -256,9 +263,14 @@ class Diffuser:
     def _run_fr_cdr_sync(self, prot_data_orig, idxs_step):
         """Build a synchronized noisy state with FR rigid motion + CDR local diffusion."""
 
-        if idxs_step is None:
+        if self.fixed_step is not None:
+            idxs_step = self.fixed_step
+        elif idxs_step is None:
             idxs_step = random.randint(1, self.n_steps)
         idxs_step = max(1, min(int(idxs_step), self.n_steps))
+        if self.fixed_seed is not None:
+            torch.manual_seed(self.fixed_seed)
+            random.seed(self.fixed_seed)
         device = prot_data_orig["cord"].device
         dtype = prot_data_orig["cord"].dtype
 

@@ -165,6 +165,8 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--mix_cdr_all", type=int, default=int(stage_training.get("mix_cdr_all", 2)))
     p.add_argument("--lazy_cache_size", type=int, default=int(stage_training.get("lazy_cache_size", 128)))
     p.add_argument("--occupancy_mode", default=stage_training.get("occupancy_mode", diffusion.get("occupancy_mode", "joint_predict")))
+    p.add_argument("--fixed_diffusion_step", type=int, default=diffusion.get("fixed_step"))
+    p.add_argument("--fixed_noise_seed", type=int, default=diffusion.get("fixed_seed"))
     return p
 
 
@@ -254,6 +256,8 @@ def main() -> None:
     diffuser = Diffuser(
         igso3_buffer=igso3,
         occupancy_mode=args.occupancy_mode,
+        fixed_step=args.fixed_diffusion_step,
+        fixed_seed=args.fixed_noise_seed,
     )
 
     if args.sched_name != "common_lr":
