@@ -115,8 +115,39 @@ class IgGMPaperLoss:
         return out
 
     # ----------------------------------------------------------------
-    # CDR smooth lDDT
+    # CDR smooth lDDT（不变）
     # ----------------------------------------------------------------
+    # def _cdr_smooth_lddt_loss(self, pred_coords, true_coords, atom14_mask, cdr_mask, cutoff=15.0):
+    #     bsz = pred_coords.shape[0]
+    #     pred_flat = pred_coords.reshape(bsz, -1, 3)
+    #     true_flat = true_coords.reshape(bsz, -1, 3)
+    #     valid_mask = (cdr_mask.unsqueeze(-1) & atom14_mask).reshape(bsz, -1)
+    #     lddt = []
+    #     for i in range(bsz):
+    #         true_dists = torch.cdist(true_flat[i], true_flat[i])
+    #         mask_i = valid_mask[i]
+    #         mask = (true_dists < cutoff).float()
+    #         mask *= 1.0 - torch.eye(pred_flat.shape[1], device=pred_flat.device)
+    #         mask *= mask_i.unsqueeze(-1).float()
+    #         mask *= mask_i.unsqueeze(-2).float()
+    #         valid_pairs = mask.nonzero()
+    #         if valid_pairs.shape[0] == 0:
+    #             lddt.append(torch.tensor(1.0, device=pred_flat.device))
+    #             continue
+    #         true_dists_i = true_dists[valid_pairs[:, 0], valid_pairs[:, 1]]
+    #         pred_coords_i1 = pred_flat[i, valid_pairs[:, 0]]
+    #         pred_coords_i2 = pred_flat[i, valid_pairs[:, 1]]
+    #         pred_dists_i = F.pairwise_distance(pred_coords_i1, pred_coords_i2)
+    #         dist_diff_i = torch.abs(true_dists_i - pred_dists_i)
+    #         eps_i = (
+    #             F.sigmoid(0.5 - dist_diff_i)
+    #             + F.sigmoid(1.0 - dist_diff_i)
+    #             + F.sigmoid(2.0 - dist_diff_i)
+    #             + F.sigmoid(4.0 - dist_diff_i)
+    #         ) / 4.0
+    #         lddt.append(eps_i.sum() / (valid_pairs.shape[0] + 1e-5))
+    #     return 1.0 - torch.stack(lddt).mean()
+    # # 改进版本
     def _cdr_smooth_lddt_loss(
         self,
         pred_coords,
@@ -197,8 +228,8 @@ class IgGMPaperLoss:
         clean_loop_local = clean_loop_local.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
         loop_atom_valid_mask = loop_atom_valid_mask.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
         valid_mask = loop_atom_valid_mask.unsqueeze(-1)
-        # sq_diff = F.huber_loss(pred_loop_local, clean_loop_local, reduction='none', delta=0.2) * valid_mask
-        sq_diff = F.mse_loss(pred_loop_local, clean_loop_local, reduction='none') * valid_mask
+        sq_diff = F.huber_loss(pred_loop_local, clean_loop_local, reduction='none', delta=0.2) * valid_mask
+        # sq_diff = F.mse_loss(pred_loop_local, clean_loop_local, reduction='none') * valid_mask
         denom = valid_mask.sum(dim=(1, 2, 3, 4)).clamp_min(1.0)
         loss_per_batch = sq_diff.sum(dim=(1, 2, 3, 4)) / (3.0 * denom)
         return loss_per_batch.mean()
@@ -229,7 +260,6 @@ class IgGMPaperLoss:
         loss_rota = (sq_rota * w_use_rota).mean().to(dtype)
 
         loss_backbone = 10 * loss_rota + loss_trsl
-        
         return loss_backbone, loss_trsl, loss_rota
 
     # ----------------------------------------------------------------
@@ -268,7 +298,14 @@ class IgGMPaperLoss:
             )
             loss_cdr = loss_cdr + w * loss_cdr_l
         loss_cdr = loss_cdr / weight_sum
+        cdr_loop_diag = self._cdr_per_loop_rmse(
+            loop_cords_list[-1],
+            clean_loop_local_gt,
+            loop_atom_valid_mask,
+            inputs.get("loop_names", []),
+        )
 
+        # EDM 权重（不变）
         sigma_raw = inputs["sigama_t"]["sigma_raw"].to(device=pred.device, dtype=pred.dtype).view(-1)
         sigma = sigma_raw.clamp_min(1e-6)
         sigma_data = 4.0
@@ -306,7 +343,7 @@ class IgGMPaperLoss:
                 'perturb': inputs['cord-p'],
                 'pre': pred,
                 'clean': atom14_tgt,
-            }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S28_{ts}.pt')
+            }, f'/root/private_data/luog/codex/IgGM/see/seefile/S28_{ts}.pt')
         self.idx_save += 1
 
         return {
@@ -314,9 +351,261 @@ class IgGMPaperLoss:
             "loss_viol": loss_vio,
             "loss_backbone": loss_backbone,
             "loss_cdr": loss_cdr,
+            **cdr_loop_diag,
             "loss_smooth_lddt": loss_smooth_lddt,
             "loss_bond": loss_bond,
             "weight_factor": weight_factor,
             "loss_trsl": loss_trsl,
             "loss_rota": loss_rota,
         }
+    
+    
+    # def _cdr_per_loop_rmse(self, pred_loop_local, clean_loop_local, loop_atom_valid_mask, loop_names) -> Dict[str, torch.Tensor]:
+    #     if clean_loop_local.ndim == 4:
+    #         clean_loop_local = clean_loop_local.unsqueeze(0)
+    #     if loop_atom_valid_mask.ndim == 3:
+    #         loop_atom_valid_mask = loop_atom_valid_mask.unsqueeze(0)
+    #     clean_loop_local = clean_loop_local.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
+    #     loop_atom_valid_mask = loop_atom_valid_mask.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
+    #     n_loop = pred_loop_local.shape[1]
+    #     names = list(loop_names or [])
+    #     out: Dict[str, torch.Tensor] = {}
+    #     for i in range(n_loop):
+    #         name = str(names[i]) if i < len(names) else f"loop{i}"
+    #         safe_name = name.lower().replace("-", "_")
+    #         valid = loop_atom_valid_mask[:, i].unsqueeze(-1)
+    #         denom = (valid.sum() * 3.0).clamp_min(1.0)
+    #         mse = (((pred_loop_local[:, i] - clean_loop_local[:, i]) ** 2) * valid).sum() / denom
+    #         out[f"loss_cdr_local_rmse_{safe_name}"] = torch.sqrt(mse.clamp_min(0.0)).detach()
+    #     return out
+
+    def _cdr_per_loop_rmse(
+        self,
+        pred_loop_local: torch.Tensor,
+        clean_loop_local: torch.Tensor,
+        loop_atom_valid_mask: torch.Tensor,
+        loop_names: Optional[Sequence[str]] = None,
+        real_atom_mask: Optional[torch.Tensor] = None,
+        backbone_atom_idx: Sequence[int] = (0, 1, 2),
+        eps: float = 1e-8,
+    ) -> Dict[str, torch.Tensor]:
+
+        # -------------------------
+        # 1. Normalize dimensions
+        # -------------------------
+        if pred_loop_local.ndim == 4:
+            pred_loop_local = pred_loop_local.unsqueeze(0)      # [1, L, R, A, 3]
+        if clean_loop_local.ndim == 4:
+            clean_loop_local = clean_loop_local.unsqueeze(0)    # [1, L, R, A, 3]
+        if loop_atom_valid_mask.ndim == 3:
+            loop_atom_valid_mask = loop_atom_valid_mask.unsqueeze(0)  # [1, L, R, A]
+
+        clean_loop_local = clean_loop_local.to(
+            device=pred_loop_local.device,
+            dtype=pred_loop_local.dtype,
+        )
+        loop_atom_valid_mask = loop_atom_valid_mask.to(
+            device=pred_loop_local.device,
+            dtype=pred_loop_local.dtype,
+        )
+
+        if real_atom_mask is not None:
+            if real_atom_mask.ndim == 3:
+                real_atom_mask = real_atom_mask.unsqueeze(0)
+            real_atom_mask = real_atom_mask.to(
+                device=pred_loop_local.device,
+                dtype=pred_loop_local.dtype,
+            )
+
+        # Basic shape checks
+        assert pred_loop_local.ndim == 5, pred_loop_local.shape
+        assert clean_loop_local.ndim == 5, clean_loop_local.shape
+        assert loop_atom_valid_mask.ndim == 4, loop_atom_valid_mask.shape
+
+        B, n_loop, R, A, _ = pred_loop_local.shape
+
+        names = list(loop_names or [])
+        out: Dict[str, torch.Tensor] = {}
+
+        # Squared coordinate error: [B, L, R, A, 3]
+        sq_coord_err = (pred_loop_local - clean_loop_local) ** 2
+
+        # Per-atom 3D distance: [B, L, R, A]
+        atom_err = torch.sqrt(sq_coord_err.sum(dim=-1).clamp_min(0.0) + eps)
+
+        # -------------------------
+        # Helper functions
+        # -------------------------
+        def _coord_rmse_for_loop(loop_i: int, atom_mask: torch.Tensor) -> torch.Tensor:
+            """
+            sqrt(mean coordinate-wise squared error)
+            Equivalent to your original implementation.
+            """
+            # atom_mask: [B, R, A]
+            mask = atom_mask.unsqueeze(-1)  # [B, R, A, 1]
+            denom = (mask.sum() * 3.0).clamp_min(1.0)
+            mse = (sq_coord_err[:, loop_i] * mask).sum() / denom
+            return torch.sqrt(mse.clamp_min(0.0))
+
+        def _atom_rmsd_for_loop(loop_i: int, atom_mask: torch.Tensor) -> torch.Tensor:
+            """
+            sqrt(mean 3D atom squared distance)
+            This is closer to structural RMSD than coord_rmse.
+            """
+            # atom_mask: [B, R, A]
+            denom = atom_mask.sum().clamp_min(1.0)
+            sq_atom_dist = sq_coord_err[:, loop_i].sum(dim=-1)  # [B, R, A]
+            mse = (sq_atom_dist * atom_mask).sum() / denom
+            return torch.sqrt(mse.clamp_min(0.0))
+
+        def _mean_atom_error_for_loop(loop_i: int, atom_mask: torch.Tensor) -> torch.Tensor:
+            """
+            mean Euclidean atom error.
+            """
+            denom = atom_mask.sum().clamp_min(1.0)
+            return (atom_err[:, loop_i] * atom_mask).sum() / denom
+
+        def _max_atom_error_for_loop(loop_i: int, atom_mask: torch.Tensor) -> torch.Tensor:
+            """
+            Max Euclidean atom error among valid atoms.
+            """
+            valid_err = atom_err[:, loop_i][atom_mask > 0.5]
+            if valid_err.numel() == 0:
+                return pred_loop_local.new_tensor(0.0)
+            return valid_err.max()
+
+        def _p95_atom_error_for_loop(loop_i: int, atom_mask: torch.Tensor) -> torch.Tensor:
+            """
+            95th percentile Euclidean atom error among valid atoms.
+            Useful for detecting outlier atoms hidden by averaging.
+            """
+            valid_err = atom_err[:, loop_i][atom_mask > 0.5]
+            if valid_err.numel() == 0:
+                return pred_loop_local.new_tensor(0.0)
+            if valid_err.numel() == 1:
+                return valid_err[0]
+            return torch.quantile(valid_err, 0.95)
+
+        # -------------------------
+        # 2. Per-loop diagnostics
+        # -------------------------
+        for i in range(n_loop):
+            name = str(names[i]) if i < len(names) else f"loop{i}"
+            safe_name = name.lower().replace("-", "_")
+
+            valid_all = loop_atom_valid_mask[:, i]  # [B, R, A]
+
+            # Original-style metric: coordinate-wise RMSE
+            out[f"loss_cdr_local_coord_rmse_{safe_name}"] = (
+                _coord_rmse_for_loop(i, valid_all).detach()
+            )
+
+            # RMSD-style metric: 3D atom RMSD
+            out[f"loss_cdr_local_atom_rmsd_{safe_name}"] = (
+                _atom_rmsd_for_loop(i, valid_all).detach()
+            )
+
+            # Mean absolute 3D atom error
+            out[f"loss_cdr_local_mean_atom_error_{safe_name}"] = (
+                _mean_atom_error_for_loop(i, valid_all).detach()
+            )
+
+            # Outlier-sensitive metrics
+            out[f"loss_cdr_local_max_atom_error_{safe_name}"] = (
+                _max_atom_error_for_loop(i, valid_all).detach()
+            )
+
+            out[f"loss_cdr_local_p95_atom_error_{safe_name}"] = (
+                _p95_atom_error_for_loop(i, valid_all).detach()
+            )
+
+            # Number of supervised atoms
+            out[f"loss_cdr_local_n_valid_atoms_{safe_name}"] = (
+                valid_all.sum().detach()
+            )
+
+            # -------------------------
+            # Backbone-only diagnostics
+            # -------------------------
+            bb_idx = torch.as_tensor(
+                list(backbone_atom_idx),
+                device=pred_loop_local.device,
+                dtype=torch.long,
+            )
+            bb_idx = bb_idx[(bb_idx >= 0) & (bb_idx < A)]
+
+            if bb_idx.numel() > 0:
+                valid_bb = torch.zeros_like(valid_all)
+                valid_bb.index_copy_(
+                    dim=-1,
+                    index=bb_idx,
+                    source=valid_all.index_select(dim=-1, index=bb_idx),
+                )
+
+                out[f"loss_cdr_local_backbone_coord_rmse_{safe_name}"] = (
+                    _coord_rmse_for_loop(i, valid_bb).detach()
+                )
+
+                out[f"loss_cdr_local_backbone_atom_rmsd_{safe_name}"] = (
+                    _atom_rmsd_for_loop(i, valid_bb).detach()
+                )
+
+                out[f"loss_cdr_local_backbone_mean_atom_error_{safe_name}"] = (
+                    _mean_atom_error_for_loop(i, valid_bb).detach()
+                )
+
+                out[f"loss_cdr_local_backbone_max_atom_error_{safe_name}"] = (
+                    _max_atom_error_for_loop(i, valid_bb).detach()
+                )
+
+                out[f"loss_cdr_local_backbone_n_valid_atoms_{safe_name}"] = (
+                    valid_bb.sum().detach()
+                )
+
+            # -------------------------
+            # Real atom / virtual atom diagnostics
+            # -------------------------
+            if real_atom_mask is not None:
+                real_i = real_atom_mask[:, i]  # [B, R, A]
+
+                valid_real = valid_all * real_i
+                valid_virtual = valid_all * (1.0 - real_i)
+
+                out[f"loss_cdr_local_real_coord_rmse_{safe_name}"] = (
+                    _coord_rmse_for_loop(i, valid_real).detach()
+                )
+
+                out[f"loss_cdr_local_real_atom_rmsd_{safe_name}"] = (
+                    _atom_rmsd_for_loop(i, valid_real).detach()
+                )
+
+                out[f"loss_cdr_local_real_mean_atom_error_{safe_name}"] = (
+                    _mean_atom_error_for_loop(i, valid_real).detach()
+                )
+
+                out[f"loss_cdr_local_real_n_valid_atoms_{safe_name}"] = (
+                    valid_real.sum().detach()
+                )
+
+                out[f"loss_cdr_local_virtual_coord_rmse_{safe_name}"] = (
+                    _coord_rmse_for_loop(i, valid_virtual).detach()
+                )
+
+                out[f"loss_cdr_local_virtual_atom_rmsd_{safe_name}"] = (
+                    _atom_rmsd_for_loop(i, valid_virtual).detach()
+                )
+
+                out[f"loss_cdr_local_virtual_mean_atom_error_{safe_name}"] = (
+                    _mean_atom_error_for_loop(i, valid_virtual).detach()
+                )
+
+                out[f"loss_cdr_local_virtual_max_atom_error_{safe_name}"] = (
+                    _max_atom_error_for_loop(i, valid_virtual).detach()
+                )
+
+                out[f"loss_cdr_local_virtual_n_valid_atoms_{safe_name}"] = (
+                    valid_virtual.sum().detach()
+                )
+
+        return out
+

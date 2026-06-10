@@ -15,7 +15,12 @@ python src/train_iggm_lightning.py --config config/train_0507.yaml
 nohup python src/train_iggm_lightning.py --config config/train_0518.yaml > log_runout/train_0518_S3.log 2>&1 &
 
 python src/train_iggm_lightning.py --config config/train_0526_signle.yaml
-python src/train_iggm_lightning.py --config config/train_0526_signle2.yaml
+
+python src/train_iggm_lightning.py --config config/valval.yaml
 
 # # 环境
 # conda env update -f envirs.yaml
+
+
+
+nohup python src/train_iggm_lightning.py --config config/train_0526_signle.yaml > log_runout/train_0526_signle1.log 2>&1 &

@@ -114,7 +114,7 @@ class FRBranch(nn.Module):
         for b in range(updated.shape[0]):
             if ab_mask_bool[b].any():
                 moved = local_to_global_coords(antibody_local_coords[b], updated_rota[b], updated_trsl[b])
-                updated[b, ab_mask_bool[b]] = moved.to(dtype=updated.dtype)
+                updated[b, ab_mask_bool[b]] = moved.to(dtype=updated.dtype) # 只处理抗体，不动抗原
 
         global_delta_feat = self.delta_feat(pooled).unsqueeze(1) * mask_f
         return {
@@ -281,7 +281,6 @@ class CDRFusionBlock(nn.Module):
             loop_valid_res_mask,
             sfea_tns_orig, 
         )
-
 
         return {
             'cdr_pred': cdr_pred,

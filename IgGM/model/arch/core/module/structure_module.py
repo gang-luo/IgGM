@@ -188,7 +188,7 @@ class StructureModule(nn.Module):
                 fr_sigma_trsl=fr_sigma_trsl,
                 fr_sigma_rota=fr_sigma_rota,
             )
-            fr_coords = fr_out['fr_coords']
+            fr_coords = fr_out['fr_coords'] # 基于干净的antibody_local_coords局部和更新trsl和rota进行的处理，当然最好的是基于加噪的antibody_local_coords进行处理的。
             sfea_tns = fr_out['sfea_tns']   # FR 更新后的 sfea（含 delta_feat）
             trsl_xt = fr_out['trsl']
             rota_xt = fr_out['rota']
@@ -200,8 +200,8 @@ class StructureModule(nn.Module):
 
             # 3. CDR 全原子坐标去噪
             cdr_out = self.net['cdr_fusion_block'](
-                sfea_tns_for_cdr=sfea_tns_for_cdr,      # detach：梯度隔离
-                sfea_tns_orig=sfea_tns,                  # 未 detach：loop_feedback 写回用
+                sfea_tns_for_cdr=sfea_tns_for_cdr, 
+                sfea_tns_orig=sfea_tns, 
                 encd_tns=encd_tns,
                 fr_coords=fr_coords,
                 loop_true_len=loop_true_len,
@@ -234,6 +234,11 @@ class StructureModule(nn.Module):
 
         pi_logits = cdr_out['cdr_pred']['pi_logits']
 
+        # torch.save({
+        #         'clean_origin': region_metadata['clean_loop_local_coords'],
+        #         'pre': loop_cords[-1],
+        #     }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S28_loop_localoverfit.pt')
+        
         return (
             sfea_tns,
             cord_list,

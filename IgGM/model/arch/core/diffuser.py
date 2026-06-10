@@ -303,7 +303,7 @@ class Diffuser:
         
         # stage-2 forward perturbation: loop-anchor local all-atom Gaussian perturbation
         clean_loop_local_coords, clean_anchor_rots, clean_anchor_trans = extract_per_loop_clean_local_coords(
-            cord_tns_orig,
+            cord_tns_orig, # 使用加噪版本更方便于理解，但是本质是一样的
             loop_global_res_indices,
             loop_true_len,
             loop_left_anchor_idx,
