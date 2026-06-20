@@ -1,25 +1,16 @@
 """
-losses.py  【修改版】
----------------------
-核心改动：
+Losses for the Lightning training path.
 
-P1-第二条（多层 CDR loss）：
-  旧版：只用最后一层的 loop_cords[-1] 计算 CDR loss。
-  新版：对 outputs['3d']['loop_cords'] 每一层都计算 Huber loss，
-        越靠后的层权重越大（线性递增），加权平均。
-
-P0-第一条（使用实时对齐 label）：
-  旧版：clean 坐标来自 inputs["clean_loop_local_coords"]（diffuser 预计算，固定坐标系）。
-  新版：clean 坐标来自 outputs['3d']['clean_labels']（每层由 CDRFusionBlock 实时重投影，
-        与预测坐标系一致）。两者 shape 相同：[B, N_loop, L_max, 14, 3]。
-
-其余 loss 函数（bond loss, smooth lddt, FR backbone loss）保持不变。
+The CDR coordinate loss supervises the model's predicted clean loop-local
+coordinates with the diffuser-provided clean_loop_local_coords.  These local
+coordinates are invariant to a shared rigid transform of the antibody and its
+anchors, so they are the canonical training target for the local CDR denoiser.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional,Sequence
 import torch
 import torch.nn.functional as F
 
@@ -124,43 +115,58 @@ class IgGMPaperLoss:
         return out
 
     # ----------------------------------------------------------------
-    # CDR smooth lDDT（不变）
+    # CDR smooth lDDT
     # ----------------------------------------------------------------
-    def _cdr_smooth_lddt_loss(self, pred_coords, true_coords, atom14_mask, cdr_mask, cutoff=15.0):
+    def _cdr_smooth_lddt_loss(
+        self,
+        pred_coords,
+        true_coords,
+        atom14_mask,
+        cdr_mask,
+        cutoff=15.0,
+        sharpness=10.0,
+    ):
         bsz = pred_coords.shape[0]
         pred_flat = pred_coords.reshape(bsz, -1, 3)
         true_flat = true_coords.reshape(bsz, -1, 3)
         valid_mask = (cdr_mask.unsqueeze(-1) & atom14_mask).reshape(bsz, -1)
-        lddt = []
+        lddt_list = []
         for i in range(bsz):
-            true_dists = torch.cdist(true_flat[i], true_flat[i])
             mask_i = valid_mask[i]
-            mask = (true_dists < cutoff).float()
-            mask *= 1.0 - torch.eye(pred_flat.shape[1], device=pred_flat.device)
-            mask *= mask_i.unsqueeze(-1).float()
-            mask *= mask_i.unsqueeze(-2).float()
-            valid_pairs = mask.nonzero()
-            if valid_pairs.shape[0] == 0:
-                lddt.append(torch.tensor(1.0, device=pred_flat.device))
+            if mask_i.sum() < 2:
+                lddt_list.append(pred_coords.new_tensor(1.0))
                 continue
-            true_dists_i = true_dists[valid_pairs[:, 0], valid_pairs[:, 1]]
-            pred_coords_i1 = pred_flat[i, valid_pairs[:, 0]]
-            pred_coords_i2 = pred_flat[i, valid_pairs[:, 1]]
-            pred_dists_i = F.pairwise_distance(pred_coords_i1, pred_coords_i2)
-            dist_diff_i = torch.abs(true_dists_i - pred_dists_i)
-            eps_i = (
-                F.sigmoid(0.5 - dist_diff_i)
-                + F.sigmoid(1.0 - dist_diff_i)
-                + F.sigmoid(2.0 - dist_diff_i)
-                + F.sigmoid(4.0 - dist_diff_i)
+            pred_i = pred_flat[i][mask_i]  # [N_valid, 3]
+            true_i = true_flat[i][mask_i]  # [N_valid, 3]
+            true_dists = torch.cdist(true_i, true_i)
+            pred_dists = torch.cdist(pred_i, pred_i)
+            pair_mask = true_dists < cutoff
+            pair_mask = torch.triu(pair_mask, diagonal=1)
+            if pair_mask.sum() == 0:
+                lddt_list.append(pred_coords.new_tensor(1.0))
+                continue
+            dist_diff = torch.abs(pred_dists[pair_mask] - true_dists[pair_mask])
+            score = (
+                torch.sigmoid(sharpness * (0.5 - dist_diff))
+                + torch.sigmoid(sharpness * (1.0 - dist_diff))
+                + torch.sigmoid(sharpness * (2.0 - dist_diff))
+                + torch.sigmoid(sharpness * (4.0 - dist_diff))
             ) / 4.0
-            lddt.append(eps_i.sum() / (valid_pairs.shape[0] + 1e-5))
-        return 1.0 - torch.stack(lddt).mean()
+            lddt_list.append(score.mean())
+        lddt = torch.stack(lddt_list).mean()
+        return 1.0 - lddt
 
     # ----------------------------------------------------------------
     # Bond loss（不变）
     # ----------------------------------------------------------------
     def _compute_bond_loss(self, pred_coords, true_coords, atom14_mask, cdr_mask):
+
+        # 典型主链键长（仅供参考，实际损失函数不直接使用这些值，而是计算预测与真实键长的 MSE）：
+        # N - CA      ≈ 1.458 Å
+        # CA - C      ≈ 1.525 Å
+        # C - O       ≈ 1.231 Å
+        # C - N_next  ≈ 1.329 Å
+
         pred_bonds_intra = torch.stack([
             torch.norm(pred_coords[:, :, 0] - pred_coords[:, :, 1], dim=-1),
             torch.norm(pred_coords[:, :, 1] - pred_coords[:, :, 2], dim=-1),
@@ -179,7 +185,7 @@ class IgGMPaperLoss:
         loss_intra = F.mse_loss(pred_bonds_intra[mask_intra], true_bonds_intra[mask_intra]) if mask_intra.any() else pred_coords.new_tensor(0.0)
         loss_inter = F.mse_loss(pred_bonds_inter[mask_inter], true_bonds_inter[mask_inter]) if mask_inter.any() else pred_coords.new_tensor(0.0)
         return loss_intra + loss_inter
-
+    
     # ----------------------------------------------------------------
     # CDR 局部坐标 Huber loss（不变，调用方更新了传入的 label）
     # ----------------------------------------------------------------
@@ -191,37 +197,77 @@ class IgGMPaperLoss:
         clean_loop_local = clean_loop_local.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
         loop_atom_valid_mask = loop_atom_valid_mask.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
         valid_mask = loop_atom_valid_mask.unsqueeze(-1)
-        sq_diff = F.huber_loss(pred_loop_local, clean_loop_local, reduction='none', delta=2.0) * valid_mask
+        # sq_diff = F.huber_loss(pred_loop_local, clean_loop_local, reduction='none', delta=0.2) * valid_mask
+        sq_diff = F.mse_loss(pred_loop_local, clean_loop_local, reduction='none') * valid_mask
         denom = valid_mask.sum(dim=(1, 2, 3, 4)).clamp_min(1.0)
         loss_per_batch = sq_diff.sum(dim=(1, 2, 3, 4)) / (3.0 * denom)
         return loss_per_batch.mean()
 
     # ----------------------------------------------------------------
-    # FR backbone loss（不变）
+    # FR backbone loss
     # ----------------------------------------------------------------
+
     def _backbone_mse_layer(self, inputs, pre_trsl, pre_rota):
+        # 1. 提取目标标签与噪声标准差
         tgt_rota = inputs['anchor_frame_meta']['rota_orig']
         tgt_trsl = inputs['anchor_frame_meta']['trsl_orig']
         sigma_rota = inputs['anchor_frame_meta']['fr_sigma_rota']
         sigma_trsl = inputs['anchor_frame_meta']['fr_sigma_trsl']
+
         device, dtype = pre_trsl.device, pre_trsl.dtype
 
-        sigma_trsl = torch.as_tensor(sigma_trsl, device=device, dtype=dtype).view(-1).clamp_min(1e-4)
+        # ============================================================
+        # 平移损失 (Translation Loss) 
+        # ============================================================
+        tgt_trsl = tgt_trsl.to(device=device, dtype=dtype)
+
+        sigma_trsl = torch.as_tensor(
+            sigma_trsl,
+            device=device,
+            dtype=dtype,
+        ).view(-1).clamp_min(1e-4)
+
         sigma_data_trsl = 15.0
+
+        # 平移权重计算
         w_trsl = (sigma_trsl.square() + sigma_data_trsl ** 2) / ((sigma_trsl * sigma_data_trsl).square() + 1e-8)
         w_use_trsl = torch.clamp(w_trsl, max=20.0).view(-1, 1)
-        sq_trsl = F.mse_loss(pre_trsl, tgt_trsl.to(device, dtype), reduction='none').sum(dim=-1, keepdim=True)
+        sq_trsl = ((pre_trsl - tgt_trsl) ** 2).sum(dim=-1, keepdim=True) # 均方误差
         loss_trsl = (sq_trsl * w_use_trsl).mean()
 
-        sigma_rota = torch.as_tensor(sigma_rota, device=device, dtype=dtype).view(-1)
-        w_rota = 1.0 / (sigma_rota.square() + 1e-6)
-        w_use_rota = torch.clamp(w_rota, min=0.1, max=10.0).view(-1, 1, 1)
+        # ============================================================
+        # 旋转损失 (Rotation Loss) - 绝对稳定的 SO(3) 弦损失
+        # ============================================================
+        # 强制转换到 float32 以保证矩阵乘法和差值平方的精度
         tgt_rota_f32 = tgt_rota.to(device=device, dtype=torch.float32)
         pre_rota_f32 = pre_rota.to(device=device, dtype=torch.float32)
-        sq_rota = F.mse_loss(pre_rota_f32, tgt_rota_f32, reduction='none')
+
+        # 计算残差旋转矩阵: R_err = R_pred @ R_tgt^T
+        R_err = torch.matmul(pre_rota_f32,tgt_rota_f32.transpose(-1, -2),)
+        I = torch.eye(3, device=device, dtype=torch.float32).expand_as(R_err)
+        # 核心数学恒等式: 0.5 * ||R_err - I||_F^2 = 2 * (1 - cos(theta)) ≈ theta^2
+        sq_rota = 0.5 * ((R_err - I) ** 2).sum(dim=(-1, -2), keepdim=True) # 纯乘加运算，绝对不会产生 NaN 或梯度爆炸
+
+        # sq_rota 目前的形状是 [B, 1, 1]（假设输入是 [B, 3, 3]）或者 [B, N, 1, 1]
+        # 需要 squeeze 掉最后一个维度，以便与 w_use_rota 对齐
+        sq_rota = sq_rota.squeeze(-1)
+
+        # 旋转权重计算
+        sigma_rota = torch.as_tensor(
+            sigma_rota,
+            device=device,
+            dtype=torch.float32,
+        ).view(-1).clamp_min(1e-4)
+
+        w_rota = 1.0 / (sigma_rota.square() + 1e-6)
+        w_use_rota = torch.clamp(w_rota, min=0.1, max=10.0).view(-1, 1)
         loss_rota = (sq_rota * w_use_rota).mean().to(dtype)
 
-        loss_backbone = 10 * loss_rota + loss_trsl
+        # ============================================================
+        # 总损失 (Total Loss)
+        # ============================================================
+        loss_backbone = 5.0 * loss_rota + loss_trsl
+        
         return loss_backbone, loss_trsl, loss_rota
 
     # ----------------------------------------------------------------
@@ -241,14 +287,10 @@ class IgGMPaperLoss:
         loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, cmsk, cdr_mask)
         loss_bond = self._compute_bond_loss(pred, atom14_tgt, cmsk, cdr_mask)
 
-        # ================================================================
-        # P0 核心：使用每层的实时对齐 label（clean_labels），而非预计算的固定 label
-        # P1 核心：对每层都计算 CDR loss，线性加权（越靠后权重越大）
-        # ================================================================
         loop_atom_valid_mask = inputs.get("loop_atom_supervise_mask", inputs["loop_atom_valid_mask"])
 
-        loop_cords_list = outputs["3d"]["loop_cords"]          # list，每层的 pred_x0_local
-        clean_labels_list = outputs["3d"]["clean_labels"]      # list，每层的实时对齐 label（新增）
+        loop_cords_list = outputs["3d"]["loop_cords"]
+        clean_loop_local_gt = inputs["clean_loop_local_coords"]
         n_layers = len(loop_cords_list)
 
         loss_cdr = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
@@ -257,21 +299,19 @@ class IgGMPaperLoss:
             # 线性权重：层 0 权重最小，最后一层权重最大
             w = float(l + 1)
             weight_sum += w
-            # 使用本层的实时对齐 label（坐标系与本层预测一致）
             loss_cdr_l = self._cdr_all_atom_mse(
                 loop_cords_list[l],
-                clean_labels_list[l],       # 实时 label（新），替代 inputs["clean_loop_local_coords"]
+                clean_loop_local_gt,
                 loop_atom_valid_mask,
             )
             loss_cdr = loss_cdr + w * loss_cdr_l
         loss_cdr = loss_cdr / weight_sum
 
-        # EDM 权重（不变）
         sigma_raw = inputs["sigama_t"]["sigma_raw"].to(device=pred.device, dtype=pred.dtype).view(-1)
         sigma = sigma_raw.clamp_min(1e-6)
         sigma_data = 4.0
         w_t = (sigma.square() + sigma_data ** 2) / ((sigma * sigma_data).square() + 1e-8)
-        weight_factor = torch.clamp(w_t, max=5.0).mean()
+        weight_factor = torch.clamp(w_t, max=10.0).mean()  # weight_factor = 1.0  # 直接使用 1.0，去掉动态权重调整（可选，根据实际训练情况调整）
 
         # FR backbone loss（多层，不变）
         loss_trsl = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
@@ -303,7 +343,7 @@ class IgGMPaperLoss:
                 'perturb': inputs['cord-p'],
                 'pre': pred,
                 'clean': atom14_tgt,
-            }, f'/root/private_data/luog/codex/IgGM/see/seefile/S28_{ts}.pt')
+            }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S613_{ts}.pt')
         self.idx_save += 1
 
         return {
@@ -317,3 +357,29 @@ class IgGMPaperLoss:
             "loss_trsl": loss_trsl,
             "loss_rota": loss_rota,
         }
+
+    # # 老版本loss
+    # def _backbone_mse_layer(self, inputs, pre_trsl, pre_rota):
+    #     tgt_rota = inputs['anchor_frame_meta']['rota_orig']
+    #     tgt_trsl = inputs['anchor_frame_meta']['trsl_orig']
+    #     sigma_rota = inputs['anchor_frame_meta']['fr_sigma_rota']
+    #     sigma_trsl = inputs['anchor_frame_meta']['fr_sigma_trsl']
+    #     device, dtype = pre_trsl.device, pre_trsl.dtype
+
+    #     sigma_trsl = torch.as_tensor(sigma_trsl, device=device, dtype=dtype).view(-1).clamp_min(1e-4)
+    #     sigma_data_trsl = 15.0
+    #     w_trsl = (sigma_trsl.square() + sigma_data_trsl ** 2) / ((sigma_trsl * sigma_data_trsl).square() + 1e-8)
+    #     w_use_trsl = torch.clamp(w_trsl, max=20.0).view(-1, 1)
+    #     sq_trsl = F.mse_loss(pre_trsl, tgt_trsl.to(device, dtype), reduction='none').sum(dim=-1, keepdim=True)
+    #     loss_trsl = (sq_trsl * w_use_trsl).mean()
+
+    #     sigma_rota = torch.as_tensor(sigma_rota, device=device, dtype=dtype).view(-1)
+    #     w_rota = 1.0 / (sigma_rota.square() + 1e-6)
+    #     w_use_rota = torch.clamp(w_rota, min=0.1, max=10.0).view(-1, 1, 1)
+    #     tgt_rota_f32 = tgt_rota.to(device=device, dtype=torch.float32)
+    #     pre_rota_f32 = pre_rota.to(device=device, dtype=torch.float32)
+    #     sq_rota = F.mse_loss(pre_rota_f32, tgt_rota_f32, reduction='none')
+    #     loss_rota = (sq_rota * w_use_rota).mean().to(dtype)
+
+    #     loss_backbone = 10 * loss_rota + loss_trsl
+    #     return loss_backbone, loss_trsl, loss_rota

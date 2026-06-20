@@ -1,38 +1,10 @@
 """
-structure_module.py  【修改版】
---------------------------------
-核心改动：
-
-P0-第二条（EDM preconditioning 移到循环外）：
-  旧版：CDRLoopHead 在每层内部自行计算 c_in / c_skip / c_out，loop_xt_local 随层更新。
-  新版：
-    - sigma → c_in / c_skip / c_out 只在 for 循环外计算一次。
-    - loop_xt_scaled = loop_xt_local * c_in（一次缩放，固定不变）在循环外完成。
-    - for 循环内 loop_xt_scaled 不更新（xt 输入固定，sfea 和 fr_coords 随层精修）。
-    - 循环结束后，用最后一层的 F_theta 组装最终 pred_x0_local（由 CDRFusionBlock 完成）。
-
-P0-第一条（clean_coords_global 传入）：
-  将 cord_tns_orig（干净全局坐标）传入 CDRFusionBlock，供实时重投影生成 label。
-  不再使用 diffuser 预计算的 clean_loop_local_coords（固定坐标系，与预测坐标系不一致）。
-
-P1-第一条（sfea 梯度隔离）：
-  CDR 使用 sfea_tns.detach()（sfea_tns_for_cdr），
-  FR 更新后的 sfea_tns 仅用于 percpt_xt 和下一层 FR 分支。
-
-P1-第二条（每层都收集 CDR label 和预测，供 loss 多层监督）：
-  loop_cords 改为收集每层的 pred_x0_local。
-  clean_loop_local_realigned_list 收集每层的实时对齐 label，返回给 loss。
-
-数据流核查：
-  输入：
-    loop_xt_local [B, N_loop, L_max, N_atom, 3]  -- 固定带噪坐标
-    sfea_tns      [B, L, c_s]                    -- 随层更新
-    fr_coords     [B, L, 14, 3]                  -- 随层更新
-    clean_coords_global [B, L, 14, 3]            -- 固定干净坐标（新增）
-
-  输出：
-    loop_cords     list[Tensor]  每层的 pred_x0_local
-    clean_labels   list[Tensor]  每层的实时对齐 label（新增，供多层 loss）
+structure_module.py
+-------------------
+Synchronized antibody rigid-body denoising and CDR loop-local all-atom
+denoising.  CDR predictions stay in the diffuser-defined anchor-local frame;
+the current predicted FR coordinates are used to map those local predictions
+back to global atom14 coordinates for iterative structure updates.
 """
 
 from __future__ import annotations
@@ -114,7 +86,6 @@ class StructureModule(nn.Module):
         curr_cmsk = cmsk_tns_init.detach().clone()
 
         cord_list, plddt_list, loop_cords, trsl_list, rota_list = [], [], [], [], []
-        # 新增：每层实时对齐的 CDR label 列表（供多层 loss 使用）
         clean_label_list = []
 
         # ----------------------------------------------------------------
@@ -131,15 +102,16 @@ class StructureModule(nn.Module):
         )
         loop_left_anchor_idx = self._expand_batch_mask(region_metadata['loop_left_anchor_idx'].to(device=device), n_smpls)
         loop_right_anchor_idx = self._expand_batch_mask(region_metadata['loop_right_anchor_idx'].to(device=device), n_smpls)
-
+        loop_true_len = region_metadata['loop_true_len'].to(device=device)
+        
         rota_xt = region_metadata['anchor_frame_meta']['rota_xt'].detach().clone()
         trsl_xt = region_metadata['anchor_frame_meta']['trsl_xt'].detach().clone()
         if rota_xt.ndim == 2:
             rota_xt = rota_xt.unsqueeze(0).expand(n_smpls, -1, -1)
         if trsl_xt.ndim == 1:
             trsl_xt = trsl_xt.unsqueeze(0).expand(n_smpls, -1)
-        rota_xt = rota_xt.to(device=device, dtype=dtype)
-        trsl_xt = trsl_xt.to(device=device, dtype=dtype)
+        rota_xt0 = rota_xt.detach().clone()
+        trsl_xt0 = trsl_xt.detach().clone()
 
         antibody_local_coords = region_metadata['antibody_local_coords'].to(device=device, dtype=dtype)
         if antibody_local_coords.ndim == 3:
@@ -182,21 +154,12 @@ class StructureModule(nn.Module):
         loop_xt_scaled = loop_xt_local * c_in          # [B, N_loop, L_max, N_atom, 3]  方差~O(1)
 
         # ================================================================
-        # P0 核心：cord_tns_orig（干净全局坐标）用于实时 label 对齐
-        # ================================================================
-        # cord_tns_orig 来自 diffuser 输出的 "cord-o"（shape [L, 14, 3] 或 [B, L, 14, 3]）
-        clean_coords_global = region_metadata['clean_coords_global'].to(device=device, dtype=dtype)
-        if clean_coords_global.ndim == 3:  # [L, 14, 3] -> [B, L, 14, 3]
-            clean_coords_global = clean_coords_global.unsqueeze(0).expand(n_smpls, -1, -1, -1).clone()
-
-        # ================================================================
         # for 循环：xt 固定，sfea 和 fr_coords 随层精修
         # ================================================================
         for layer_idx in range(n_lyrs):
-            rota_xt = rota_xt.detach()
-            trsl_xt = trsl_xt.detach()
             curr_coords = curr_coords.detach()
-            # loop_xt_scaled 不在循环内更新
+            rota_xt_in = rota_xt0
+            trsl_xt_in = trsl_xt0
 
             # 1. 结构感知更新 sfea
             if self.activation_checkpoint:
@@ -218,29 +181,29 @@ class StructureModule(nn.Module):
                 encd_tns=encd_tns,
                 antibody_mask=antibody_mask,
                 curr_coords=curr_coords,
-                rota_xt=rota_xt,
-                trsl_xt=trsl_xt,
+                rota_xt=rota_xt_in,
+                trsl_xt=trsl_xt_in,
                 antibody_local_coords=antibody_local_coords,
                 fr_sigma_trsl=fr_sigma_trsl,
                 fr_sigma_rota=fr_sigma_rota,
             )
-            fr_coords = fr_out['fr_coords']
+            fr_coords = fr_out['fr_coords'] # 基于干净的antibody_local_coords局部和更新trsl和rota进行的处理，当然最好的是基于加噪的antibody_local_coords进行处理的。
             sfea_tns = fr_out['sfea_tns']   # FR 更新后的 sfea（含 delta_feat）
-            trsl_xt = fr_out['trsl']
-            rota_xt = fr_out['rota']
+            pred_trsl  = fr_out['trsl']
+            pred_rota  = fr_out['rota']
 
             # =============================================================
             # P1 核心：CDR 使用 sfea_tns.detach()，切断 CDR loss 对 FR 参数的梯度
             # =============================================================
-            sfea_tns_for_cdr = sfea_tns.detach()
+            sfea_tns_for_cdr = sfea_tns
 
             # 3. CDR 全原子坐标去噪
             cdr_out = self.net['cdr_fusion_block'](
-                sfea_tns_for_cdr=sfea_tns_for_cdr,      # detach：梯度隔离
-                sfea_tns_orig=sfea_tns,                  # 未 detach：loop_feedback 写回用
+                sfea_tns_for_cdr=sfea_tns_for_cdr, 
+                sfea_tns_orig=sfea_tns, 
                 encd_tns=encd_tns,
                 fr_coords=fr_coords,
-                clean_coords_global=clean_coords_global,  # 干净全局坐标（实时 label 对齐用）
+                loop_true_len=loop_true_len,
                 loop_xt_scaled=loop_xt_scaled,            # 已 c_in 缩放，循环内固定
                 loop_xt_local_orig=loop_xt_local,         # 原始带噪坐标（c_skip 组装用）
                 c_skip=c_skip,
@@ -262,22 +225,19 @@ class StructureModule(nn.Module):
             # 4. pLDDT 预测
             plddt_dict = self.net['plddt'](sfea_tns.detach())
 
-            # 5. 保存每层输出（新增实时 label）
             cord_list.append(curr_coords.clone())
-            trsl_list.append(trsl_xt.clone())
-            rota_list.append(rota_xt.clone())
-            loop_cords.append(cdr_out['pred_x0_local'].clone())             # 预测
-            clean_label_list.append(cdr_out['clean_loop_local_realigned'].clone())  # 实时 label（新增）
+            trsl_list.append(pred_trsl.clone())
+            rota_list.append(pred_rota.clone())
+            loop_cords.append(cdr_out['pred_x0_local'].clone())
             plddt_list.append(plddt_dict)
-
-            # torch.save({
-            #     'clean_origin': region_metadata['clean_loop_local_coords'],
-            #     'clean_cdrblock': clean_label_list[-1],
-            #     'pre': loop_cords[-1],
-            # }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S28_loop.pt')
 
         pi_logits = cdr_out['cdr_pred']['pi_logits']
 
+        # torch.save({
+        #         'clean_origin': region_metadata['clean_loop_local_coords'],
+        #         'pre': loop_cords[-1],
+        #     }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S28_loop_localoverfit.pt')
+        
         return (
             sfea_tns,
             cord_list,
@@ -286,7 +246,7 @@ class StructureModule(nn.Module):
             rota_list,
             loop_cords,
             pi_logits,
-            clean_label_list,       # 新增返回值：每层实时对齐的 CDR label
+            clean_label_list,
         )
 
     @staticmethod

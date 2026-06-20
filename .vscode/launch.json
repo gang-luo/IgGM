@@ -25,7 +25,7 @@
             "python": "python",
             "args": [
                 "--config",
-                "config/valval.yaml"
+                "config/valval2.yaml"
             ]
         },
         {

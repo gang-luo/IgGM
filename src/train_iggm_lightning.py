@@ -112,6 +112,8 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--train_ids", default=data.get("train_ids", ""))
     p.add_argument("--val_ids", default=data.get("val_ids", ""))
     p.add_argument("--test_ids", default=data.get("test_ids", ""))
+    p.add_argument("--test_nanobody_ids", default=data.get("test_nanobody_ids", ""))
+    p.add_argument("--test_standard_ids", default=data.get("test_standard_ids", ""))
     p.add_argument("--train_clusters", default=data.get("train_clusters", ""))
     p.add_argument("--batch_size", type=int, default=int(data.get("batch_size", 1)))
     p.add_argument("--num_workers", type=int, default=int(data.get("num_workers", 0)))
@@ -127,6 +129,7 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--sched_name", default=scheduler.get("name", "common_lr"))
     p.add_argument("--sched_t_max", type=int, default=int(scheduler.get("t_max", 10000)))
     p.add_argument("--sched_eta_min", type=float, default=float(scheduler.get("eta_min", 1e-6)))
+    p.add_argument("--sched_warmup_steps", type=int, default=int(scheduler.get("warmup_steps", 0)))
 
     p.add_argument("--lr", type=float, default=float(optim.get("lr", 1e-4)))
     p.add_argument("--weight_decay", type=float, default=float(optim.get("weight_decay", 1e-2)))
@@ -198,6 +201,8 @@ def main() -> None:
         train_ids_path=(args.train_ids or None),
         val_ids_path=(args.val_ids or None),
         test_ids_path=(args.test_ids or None),
+        test_nanobody_ids_path=(args.test_nanobody_ids or None),
+        test_standard_ids_path=(args.test_standard_ids or None),
         train_cluster_path=(args.train_clusters or None),
         samples_dir=(args.samples_dir or None),
         n_steps=args.n_steps,
@@ -255,16 +260,17 @@ def main() -> None:
         igso3_buffer=igso3,
         occupancy_mode=args.occupancy_mode,
     )
-
+    
     if args.sched_name != "common_lr":
         scheduler_cfg = {
             "name": args.sched_name,
             "t_max": args.sched_t_max,
             "eta_min": args.sched_eta_min,
+            "warmup_steps": args.sched_warmup_steps, # 新增这一行
         }
     else:   
         scheduler_cfg = None
-    
+        
     lit_model = IgGMLightningModule(
         model=design_model,
         plm_featurizer=plm_featurizer,
@@ -329,7 +335,7 @@ def main() -> None:
         log_every_n_steps=args.log_every_n_steps,
         accumulate_grad_batches=max(1, args.accumulate_grad_batches),
         num_sanity_val_steps=max(0, args.num_sanity_val_steps),
-        check_val_every_n_epoch=50,
+        # check_val_every_n_epoch=50,
         # # detect_anomaly=True,
     )
 

@@ -10,7 +10,6 @@ from .fr_cdr_diffusion_utils import (
     apply_rigid_transform_coords,
     apply_rigid_transform_to_masked_coords,
     build_anchor_frame_from_full_coords,
-    check_loop_roundtrip,
     extract_clean_fr_reference,
     extract_per_loop_clean_local_coords,
     global_to_local_coords,

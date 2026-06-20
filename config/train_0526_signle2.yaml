@@ -8,7 +8,7 @@ data:
   test_ids: data/sabdab_2603/processed/split_onetest/test_prot_ids.txt
   train_clusters: data/sabdab_2603/processed/split_onetest/train_prot_cluster.txt
   batch_size: 1
-  num_workers: 4
+  num_workers: 2
   n_steps: 200
   forward_chunk_size: 128
   max_antigen_len: 256  # 384
@@ -23,14 +23,14 @@ model:
   igso3_buffer: "/root/private_data/luog/codex/IgGM/checkpoints/igso3_buffer.pth"
 
 optimizer:
-  lr: 1.0e-4
+  lr: 5.0e-4
   weight_decay: 1.0e-2
-  grad_clip: 1.0
+  grad_clip: 10.0
 
-# scheduler:
-#   name: cosine
-#   t_max: 1750
-#   eta_min: 1.0e-6
+scheduler:
+  name: cosine
+  t_max: 1000
+  eta_min: 5.0e-6
 
 loss:
   vio_weight: 0.02
@@ -42,7 +42,7 @@ trainer:
   max_epochs: 1000
   precision: bf16 # bf16-mixed
   accelerator: gpu
-  devices: [1] 
+  devices: [0] 
   log_every_n_steps: 5
   accumulate_grad_batches: 1
   num_sanity_val_steps: 0
@@ -53,12 +53,12 @@ trainer:
 wandb:
   disabled: false # true or false
   project: IgGM
-  run_name: iggm-stage_one-rota
+  run_name: iggm-stage_one-T8-ccfix
   entity: "mllm-csu"
   api_key: "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"
 
 runtime:
-  output_dir: outputs/lightning-stage_one-rota
+  output_dir: outputs/lightning-stage_one-T8-ccfix
   seed: 56
   resume: False
   run_test: true
@@ -72,4 +72,3 @@ stage_training:
   mix_cdr_all: 2
   lazy_cache_size: 128
   occupancy_mode: joint_predict
-  

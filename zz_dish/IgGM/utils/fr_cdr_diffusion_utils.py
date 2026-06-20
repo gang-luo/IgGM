@@ -248,7 +248,6 @@ def extract_per_loop_clean_local_coords(
     return local, frame_rots, frame_trans
 
 
-
 def rebuild_loops_from_local_coords(
     coords_local: torch.Tensor,
     noisy_fr_coords: torch.Tensor,
@@ -314,41 +313,47 @@ def merge_noisy_fr_and_loops(
     return merged
 
 
-def check_loop_roundtrip(
-    full_coords: torch.Tensor,
-    loop_global_res_indices: torch.Tensor,
-    loop_true_len: torch.Tensor,
-    loop_left_anchor_idx: torch.Tensor,
-    loop_right_anchor_idx: torch.Tensor,
-    loop_atom_valid_mask: torch.Tensor,
-) -> Dict[str, torch.Tensor]:
-    """Roundtrip check for loop local<->global conversion using clean anchors."""
+from typing import Tuple
+import torch
 
-    local, _, _ = extract_per_loop_clean_local_coords(
-        full_coords,
-        loop_global_res_indices,
-        loop_true_len,
-        loop_left_anchor_idx,
-        loop_right_anchor_idx,
-        loop_atom_valid_mask,
-    )
-    rebuilt, _, _ = rebuild_loops_from_local_coords(
-        local,
-        full_coords,
-        loop_global_res_indices,
-        loop_true_len,
-        loop_left_anchor_idx,
-        loop_right_anchor_idx,
-        loop_atom_valid_mask,
-    )
-    max_err = full_coords.new_zeros(())
-    for idx in range(loop_global_res_indices.shape[0]):
-        true_len = int(loop_true_len[idx].item())
-        if true_len <= 0:
-            continue
-        global_idx = loop_global_res_indices[idx, :true_len].to(torch.long)
-        diff = torch.abs(rebuilt[idx, :true_len] - full_coords[global_idx])
-        valid = loop_atom_valid_mask[idx, :true_len].unsqueeze(-1).to(diff.dtype)
-        if valid.sum() > 0:
-            max_err = torch.maximum(max_err, (diff * valid).max())
-    return {"max_abs_error": max_err, "roundtrip_ok": bool(max_err.item() < 1e-4)}
+def extract_trsl_rota_from_noisefr(
+    full_coords: torch.Tensor,             # [B, L, 14, 3] 当前层的 FR 刚体预测坐标
+    loop_global_res_indices: torch.Tensor, # [B, N_loop, L_max]
+    loop_true_len: torch.Tensor,           # [B, N_loop] 或 [N_loop]
+    loop_left_anchor_idx: torch.Tensor,    # [B, N_loop] 或 [N_loop]
+    loop_right_anchor_idx: torch.Tensor,   # [B, N_loop] 或 [N_loop]
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """从 Batched 全局坐标中，提取每个 Loop 锚点的旋转矩阵和平移向量。"""
+    
+    B, n_loops, max_lmax = loop_global_res_indices.shape
+    device = full_coords.device
+    dtype = full_coords.dtype
+
+    frame_rots = torch.zeros((B, n_loops, 3, 3), dtype=dtype, device=device)
+    frame_trans = torch.zeros((B, n_loops, 3), dtype=dtype, device=device)
+
+    eye = torch.eye(3, dtype=dtype, device=device)
+
+    for b in range(B):
+        for idx in range(n_loops):
+            # 兼容 1D [N_loop] 或 2D [B, N_loop] 的输入
+            true_len = int(loop_true_len[b, idx].item() if loop_true_len.ndim == 2 else loop_true_len[idx].item())
+            left_idx = int(loop_left_anchor_idx[b, idx].item() if loop_left_anchor_idx.ndim == 2 else loop_left_anchor_idx[idx].item())
+            right_idx = int(loop_right_anchor_idx[b, idx].item() if loop_right_anchor_idx.ndim == 2 else loop_right_anchor_idx[idx].item())
+
+            # 异常值保护
+            if true_len <= 0 or left_idx < 0 or right_idx < 0:
+                frame_rots[b, idx] = eye
+                continue
+
+            # 调用你的基础计算函数，传入单样本的 full_coords[b] -> 形如 [L, 14, 3]
+            rot, trans = build_anchor_frame_from_full_coords(
+                full_coords[b],
+                left_idx,
+                right_idx,
+            )
+            frame_rots[b, idx] = rot
+            frame_trans[b, idx] = trans
+
+    # 只返回 2 个张量
+    return frame_rots, frame_trans

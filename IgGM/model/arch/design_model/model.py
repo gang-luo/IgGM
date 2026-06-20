@@ -27,8 +27,8 @@ class DesignModel(BaseModel):
             n_dims_sfea=192,  # number of dimensions in single features (D_s)
             n_dims_pfea=128,  # number of dimensions in pair features (D_p)
             n_dims_penc=64,  # number of dimensions in positional encodings
-            n_lyrs_2d=8,  # number of <EvoformerBlockSS> layers
-            n_lyrs_3d=4,  # number of <AF2SMod> layers
+            n_lyrs_2d=4,  # number of <EvoformerBlockSS> layers
+            n_lyrs_3d=2,  # number of <AF2SMod> layers
             # n_lyrs_2d=16,  # number of <EvoformerBlockSS> layers
             # n_lyrs_3d=8,  # number of <AF2SMod> layers
             pred_oxyg=True,  # whether to predict backbone oxygen atoms' 3D coordinates
@@ -416,8 +416,8 @@ class DesignModel(BaseModel):
         'loop_occ_target', 'loop_valid_res_mask', 'loop_atom_valid_mask',
         'loop_atom_supervise_mask',
         'loop_global_res_indices', 'clean_fr_reference', 'clean_loop_local_coords',
-        'clean_coords_global',           # 【新增】
-        'noisy_loop_local_coords', 'anchor_frame_meta', 'sigama_t', 'step',
+        'clean_coords_global',           
+        'noisy_loop_local_coords', 'anchor_frame_meta', 'cdr_meta', 'sigama_t', 'step', # <--- 【新增 'cdr_meta'】
         ]
         return {k: inputs[k] for k in keys if k in inputs}
 

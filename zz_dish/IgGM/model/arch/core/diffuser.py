@@ -103,7 +103,7 @@ class Diffuser:
     def _sample_fr_rigid_transform(self, rota_orig, trsl_orig, idxs_step, device, dtype):
         torch.manual_seed(42)
         random.seed(42)
-        
+
         """纯 VE 的刚体加噪"""
         sigma_t = self.sigmas[idxs_step].to(device=device, dtype=dtype)
         
@@ -232,12 +232,19 @@ class Diffuser:
                 u0 = U[:, 0] * sign0
 
                 sign1 = 1.0 if torch.dot(U[:, 1], guide_y).item() >= 0.0 else -1.0
-                u1 = U[:, 1] * sign1
+                guide_u1 = U[:, 1] * sign1
+                u1 = guide_u1 - torch.dot(guide_u1, u0) * u0
+                if torch.linalg.norm(u1) < 1e-6:
+                    guide_u1 = U[:, 2]
+                    u1 = guide_u1 - torch.dot(guide_u1, u0) * u0
+                u1 = u1 / torch.linalg.norm(u1).clamp_min(1e-6)
 
-                # Z轴由 X和Y 叉乘得到，绝对保证右手系且无翻转
                 u2 = torch.cross(u0, u1, dim=-1)
-                
+                u2 = u2 / torch.linalg.norm(u2).clamp_min(1e-6)
+
                 rota_orig_f32 = torch.stack([u0, u1, u2], dim=-1).contiguous()
+                if torch.det(rota_orig_f32.float()) < 0:
+                    rota_orig_f32[:, 2] = -rota_orig_f32[:, 2]
 
             trsl_orig_f32 = trsl_orig_f32.contiguous()
 
@@ -251,8 +258,10 @@ class Diffuser:
 
     def _run_fr_cdr_sync(self, prot_data_orig, idxs_step):
         """Build a synchronized noisy state with FR rigid motion + CDR local diffusion."""
-        
-        idxs_step = 150
+
+        idxs_step = 80
+        torch.manual_seed(42)
+        random.seed(42)
         device = prot_data_orig["cord"].device
         dtype = prot_data_orig["cord"].dtype
 
@@ -294,7 +303,7 @@ class Diffuser:
         
         # stage-2 forward perturbation: loop-anchor local all-atom Gaussian perturbation
         clean_loop_local_coords, clean_anchor_rots, clean_anchor_trans = extract_per_loop_clean_local_coords(
-            cord_tns_orig,
+            cord_tns_orig, # 使用加噪版本更方便于理解，但是本质是一样的
             loop_global_res_indices,
             loop_true_len,
             loop_left_anchor_idx,

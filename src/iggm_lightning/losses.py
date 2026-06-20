@@ -189,48 +189,27 @@ class IgGMPaperLoss:
     # ----------------------------------------------------------------
     # CDR 局部坐标 Huber loss（不变，调用方更新了传入的 label）
     # ----------------------------------------------------------------
-    def _cdr_all_atom_mse(self, pred_loop_local, clean_loop_local, loop_atom_valid_mask):
+    def _cdr_all_atom_mse(self, pred_loop_local, clean_loop_local, loop_atom_valid_mask, cdr_scale):
         if clean_loop_local.ndim == 4:
             clean_loop_local = clean_loop_local.unsqueeze(0)
         if loop_atom_valid_mask.ndim == 3:
             loop_atom_valid_mask = loop_atom_valid_mask.unsqueeze(0)
+
         clean_loop_local = clean_loop_local.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
         loop_atom_valid_mask = loop_atom_valid_mask.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
         valid_mask = loop_atom_valid_mask.unsqueeze(-1)
-        # sq_diff = F.huber_loss(pred_loop_local, clean_loop_local, reduction='none', delta=0.2) * valid_mask
+        
+        # Calculate Physical MSE
         sq_diff = F.mse_loss(pred_loop_local, clean_loop_local, reduction='none') * valid_mask
+        
+        # Scale to match the implicit normalized EDM objective space
+        c_scale = cdr_scale.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype).view(-1, 1, 1, 1, 1)
+        sq_diff = sq_diff / (c_scale ** 2)
+        
         denom = valid_mask.sum(dim=(1, 2, 3, 4)).clamp_min(1.0)
         loss_per_batch = sq_diff.sum(dim=(1, 2, 3, 4)) / (3.0 * denom)
         return loss_per_batch.mean()
 
-    # ----------------------------------------------------------------
-    # FR backbone loss（不变）
-    # ----------------------------------------------------------------
-    def _backbone_mse_layer(self, inputs, pre_trsl, pre_rota):
-        tgt_rota = inputs['anchor_frame_meta']['rota_orig']
-        tgt_trsl = inputs['anchor_frame_meta']['trsl_orig']
-        sigma_rota = inputs['anchor_frame_meta']['fr_sigma_rota']
-        sigma_trsl = inputs['anchor_frame_meta']['fr_sigma_trsl']
-        device, dtype = pre_trsl.device, pre_trsl.dtype
-
-        sigma_trsl = torch.as_tensor(sigma_trsl, device=device, dtype=dtype).view(-1).clamp_min(1e-4)
-        sigma_data_trsl = 15.0
-        w_trsl = (sigma_trsl.square() + sigma_data_trsl ** 2) / ((sigma_trsl * sigma_data_trsl).square() + 1e-8)
-        w_use_trsl = torch.clamp(w_trsl, max=20.0).view(-1, 1)
-        sq_trsl = F.mse_loss(pre_trsl, tgt_trsl.to(device, dtype), reduction='none').sum(dim=-1, keepdim=True)
-        loss_trsl = (sq_trsl * w_use_trsl).mean()
-
-        sigma_rota = torch.as_tensor(sigma_rota, device=device, dtype=dtype).view(-1)
-        w_rota = 1.0 / (sigma_rota.square() + 1e-6)
-        w_use_rota = torch.clamp(w_rota, min=0.1, max=10.0).view(-1, 1, 1)
-        tgt_rota_f32 = tgt_rota.to(device=device, dtype=torch.float32)
-        pre_rota_f32 = pre_rota.to(device=device, dtype=torch.float32)
-        sq_rota = F.mse_loss(pre_rota_f32, tgt_rota_f32, reduction='none')
-        loss_rota = (sq_rota * w_use_rota).mean().to(dtype)
-
-        loss_backbone = 10 * loss_rota + loss_trsl
-        
-        return loss_backbone, loss_trsl, loss_rota
 
     # ----------------------------------------------------------------
     # 主 loss 函数
@@ -246,35 +225,39 @@ class IgGMPaperLoss:
         ab_mask = self._normalize_res_mask(inputs["pmsk-ligand"], bsz, seq_len).to(pred.device)
         cdr_mask = self._normalize_res_mask(inputs["cdr_mask"], bsz, seq_len).to(pred.device)
 
-        loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, cmsk, cdr_mask)
-        loss_bond = self._compute_bond_loss(pred, atom14_tgt, cmsk, cdr_mask)
+        # loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, cmsk, cdr_mask)
+        # loss_bond = self._compute_bond_loss(pred, atom14_tgt, cmsk, cdr_mask)
+        
+        loss_smooth_lddt = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        loss_bond = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
 
         loop_atom_valid_mask = inputs.get("loop_atom_supervise_mask", inputs["loop_atom_valid_mask"])
 
         loop_cords_list = outputs["3d"]["loop_cords"]
         clean_loop_local_gt = inputs["clean_loop_local_coords"]
         n_layers = len(loop_cords_list)
+        cdr_scale = inputs['cdr_meta']['cdr_scale']
 
         loss_cdr = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-        weight_sum = 0.0
-        for l in range(n_layers):
-            # 线性权重：层 0 权重最小，最后一层权重最大
-            w = float(l + 1)
-            weight_sum += w
-            loss_cdr_l = self._cdr_all_atom_mse(
-                loop_cords_list[l],
-                clean_loop_local_gt,
-                loop_atom_valid_mask,
-            )
-            loss_cdr = loss_cdr + w * loss_cdr_l
-        loss_cdr = loss_cdr / weight_sum
+        # weight_sum = 0.0
+        # for l in range(n_layers):
+        #     # 线性权重：层 0 权重最小，最后一层权重最大
+        #     w = float(l + 1)
+        #     weight_sum += w
+        #     loss_cdr_l = self._cdr_all_atom_mse(
+        #         loop_cords_list[l],
+        #         clean_loop_local_gt,
+        #         loop_atom_valid_mask,
+        #         cdr_scale,  # <--- 传入放缩系数
+        #     )
+        #     loss_cdr = loss_cdr + w * loss_cdr_l
+        # loss_cdr = loss_cdr / weight_sum
 
         sigma_raw = inputs["sigama_t"]["sigma_raw"].to(device=pred.device, dtype=pred.dtype).view(-1)
         sigma = sigma_raw.clamp_min(1e-6)
         sigma_data = 4.0
         w_t = (sigma.square() + sigma_data ** 2) / ((sigma * sigma_data).square() + 1e-8)
-        weight_factor = torch.clamp(w_t, max=5.0).mean() 
-        weight_factor = 1.0  # 直接使用 1.0，去掉动态权重调整（可选，根据实际训练情况调整）
+        weight_factor = torch.clamp(w_t, max=10.0).mean()  # weight_factor = 1.0  # 直接使用 1.0，去掉动态权重调整（可选，根据实际训练情况调整）
 
         # FR backbone loss（多层，不变）
         loss_trsl = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
@@ -306,7 +289,7 @@ class IgGMPaperLoss:
                 'perturb': inputs['cord-p'],
                 'pre': pred,
                 'clean': atom14_tgt,
-            }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S28_{ts}.pt')
+            }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S613_{ts}.pt')
         self.idx_save += 1
 
         return {
@@ -320,3 +303,109 @@ class IgGMPaperLoss:
             "loss_trsl": loss_trsl,
             "loss_rota": loss_rota,
         }
+    
+    # ==========================================
+    # In losses.py -> _backbone_mse_layer
+    # ==========================================
+
+    def _backbone_mse_layer(self, inputs, pre_trsl, pre_rota):
+
+        tgt_trsl = inputs['anchor_frame_meta']['trsl_orig'] 
+        tgt_rota = inputs['anchor_frame_meta']['rota_orig']
+        
+        trsl_scale = inputs['anchor_frame_meta']['trsl_scale']
+        sigma_trsl = inputs['anchor_frame_meta']['fr_sigma_trsl']
+        sigma_rota = inputs['anchor_frame_meta']['fr_sigma_rota']
+        device, dtype = pre_trsl.device, pre_trsl.dtype
+
+        # ============================================================
+        # (MSE TRSL)
+        # ============================================================
+
+        tgt_trsl_physical = tgt_trsl.to(device=device, dtype=dtype)
+        t_scale = trsl_scale.view(-1).to(device=device, dtype=dtype)
+
+        # Calculate Physical MSE
+        sq_trsl = ((pre_trsl - tgt_trsl_physical) ** 2).sum(dim=-1)       # [B]
+        
+
+        sigma_t = sigma_trsl.view(-1).clamp_min(1e-4).to(device=device, dtype=dtype)
+        sigma_data_t = trsl_scale.view(-1).clamp_min(1e-4).to(device=device, dtype=dtype)
+        w_trsl = (sigma_t.square() + sigma_data_t.square()) / ((sigma_t * sigma_data_t).square() + 1e-6)
+        w_use_trsl = torch.clamp(w_trsl, min=0.01, max=10.0)
+
+        # Scale to match the implicit normalized EDM objective space
+        loss_trsl = (sq_trsl * w_use_trsl).mean()
+        
+        # ============================================================
+        # (Geodesic SO(3) Loss with Bounded Weighting)
+        # ============================================================
+        tgt_rota_f32 = tgt_rota.to(device=device, dtype=torch.float32)
+        pre_rota_f32 = pre_rota.to(device=device, dtype=torch.float32)
+
+        R_rel = torch.matmul(pre_rota_f32.transpose(-1,-2), tgt_rota_f32)
+        rotvec = skew2vec(log_rmat(R_rel))
+        sq_rota = (rotvec**2).sum(dim=-1)
+
+        # SO(3) 是紧凑流形，方差有上限 (~1.8 弧度)
+        sigma_data_rota = 1.8 
+        sigma_rota = torch.as_tensor(sigma_rota, device=device, dtype=torch.float32).view(-1).clamp_min(1e-4)
+        w_rota = (sigma_rota.square() + sigma_data_rota**2) / ((sigma_rota * sigma_data_rota).square() + 1e-6)
+        w_use_rota = torch.clamp(w_rota, min=0.5, max=5.0)
+        
+        loss_rota = (sq_rota * w_use_rota).mean().to(dtype)
+
+        # ============================================================
+        # SUM (rota + trsl)
+        # ============================================================
+
+        loss_backbone = 2.0 * loss_rota + loss_trsl
+        return loss_backbone, loss_trsl, loss_rota
+    
+
+    # def _backbone_mse_layer(self, inputs, pre_trsl, pre_rota):
+
+    #     tgt_trsl = inputs['anchor_frame_meta']['trsl_orig'] # Note: trsl_orig should be the physical coords from diff_build
+    #     tgt_rota = inputs['anchor_frame_meta']['rota_orig']
+        
+    #     trsl_scale = inputs['anchor_frame_meta']['trsl_scale']
+    #     sigma_rota = inputs['anchor_frame_meta']['fr_sigma_rota']
+    #     device, dtype = pre_trsl.device, pre_trsl.dtype
+
+    #     # ============================================================
+    #     # (MSE TRSL)
+    #     # ============================================================
+
+    #     tgt_trsl_physical = tgt_trsl.to(device=device, dtype=dtype)
+    #     t_scale = trsl_scale.view(-1).to(device=device, dtype=dtype)
+
+    #     # Calculate Physical MSE
+    #     sq_trsl = ((pre_trsl - tgt_trsl_physical) ** 2).sum(dim=-1)       # [B]
+        
+    #     # Scale to match the implicit normalized EDM objective space
+    #     loss_trsl = (sq_trsl / (t_scale ** 2)).mean()
+        
+    #     # ============================================================
+    #     # (Geodesic SO(3) Loss with Bounded Weighting)
+    #     # ============================================================
+    #     tgt_rota_f32 = tgt_rota.to(device=device, dtype=torch.float32)
+    #     pre_rota_f32 = pre_rota.to(device=device, dtype=torch.float32)
+
+    #     R_rel = torch.matmul(pre_rota_f32.transpose(-1,-2), tgt_rota_f32)
+    #     rotvec = skew2vec(log_rmat(R_rel))
+    #     sq_rota = (rotvec**2).sum(dim=-1)
+
+    #     # SO(3) 是紧凑流形，方差有上限 (~1.8 弧度)
+    #     sigma_data_rota = 1.8 
+    #     sigma_rota = torch.as_tensor(sigma_rota, device=device, dtype=torch.float32).view(-1).clamp_min(1e-4)
+    #     w_rota = (sigma_rota.square() + sigma_data_rota**2) / ((sigma_rota * sigma_data_rota).square() + 1e-6)
+    #     w_use_rota = torch.clamp(w_rota, min=0.5, max=5.0)
+        
+    #     loss_rota = (sq_rota * w_use_rota).mean().to(dtype)
+
+    #     # ============================================================
+    #     # SUM (rota + trsl)
+    #     # ============================================================
+
+    #     loss_backbone = 2.0 * loss_rota + loss_trsl
+    #     return loss_backbone, loss_trsl, loss_rota

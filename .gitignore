@@ -8,6 +8,7 @@ zz_trash
 outputs/
 data/sabdab
 data/sabdab*
+data/test
 
 openfold/*
 .ipynb_checkpoints

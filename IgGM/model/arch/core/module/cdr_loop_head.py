@@ -107,7 +107,7 @@ class CDRLoopHead(nn.Module):
         local_position_ids: torch.Tensor,   # [L_max]
         loop_valid_res_mask: torch.Tensor,  # [B, N_loop, L_max] bool
         loop_atom_valid_mask: torch.Tensor, # [B, N_loop, L_max, N_atom] bool
-        sigma_t: torch.Tensor,              # [B]，用于 noise embedding（不再用于 preconditioning）
+        cdr_sigma: torch.Tensor,             
     ) -> dict:
         bsz, n_loop, lmax = loop_xt_scaled.shape[:3]
         device, dtype = loop_sfea.device, loop_sfea.dtype
@@ -116,7 +116,7 @@ class CDRLoopHead(nn.Module):
         pos_feat = self.local_pos(local_position_ids.to(device)).view(1, 1, lmax, -1).expand(bsz, n_loop, -1, -1)
 
         # ===== noise embedding：让网络感知当前噪声水平 =====
-        sigma = sigma_t.to(device=device, dtype=dtype).view(bsz).clamp_min(1e-8)
+        sigma = cdr_sigma.to(device=device, dtype=dtype).view(bsz).clamp_min(1e-8)
         c_noise = 0.25 * torch.log(sigma)                              # Karras formulation
         noise_feat = self.noise_embed(c_noise.unsqueeze(-1))           # [B, 32]
         noise_feat = noise_feat.view(bsz, 1, 1, -1).expand(-1, n_loop, lmax, -1)
