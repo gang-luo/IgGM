@@ -107,7 +107,7 @@ class CDRLoopHead(nn.Module):
         local_position_ids: torch.Tensor,   # [L_max]
         loop_valid_res_mask: torch.Tensor,  # [B, N_loop, L_max] bool
         loop_atom_valid_mask: torch.Tensor, # [B, N_loop, L_max, N_atom] bool
-        cdr_sigma: torch.Tensor,             
+        cdr_sigma: torch.Tensor,       
     ) -> dict:
         bsz, n_loop, lmax = loop_xt_scaled.shape[:3]
         device, dtype = loop_sfea.device, loop_sfea.dtype

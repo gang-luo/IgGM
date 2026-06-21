@@ -91,6 +91,7 @@ class FRBranch(nn.Module):
             fr_c_skip: torch.Tensor,
             fr_c_out: torch.Tensor,
             trsl_mu: torch.Tensor,
+            trsl_scale: torch.Tensor,           # sigma_data, de-normalize x0
             fr_sigma_trsl: torch.Tensor,
         ) -> dict:
             # --- shape normalization ---
@@ -126,12 +127,17 @@ class FRBranch(nn.Module):
             ag_com = (ca * ag_f).sum(dim=1) / ag_f.sum(dim=1).clamp_min(1.0)
             global_ctx = torch.cat([ab_com, ag_com, ab_com - ag_com], dim=-1).to(pooled.dtype)  # [B, 9]
 
-            # TRSL: EDM x0-prediction. Network outputs F_theta, assembled by c_skip/c_out.
-            F_theta = self.trsl_head(torch.cat([pooled, trsl_xt_scaled.to(pooled.dtype), noise_feat, global_ctx], dim=-1))
-            c_s = fr_c_skip.view(-1, 1).to(pooled.dtype)
-            c_o = fr_c_out.view(-1, 1).to(pooled.dtype)
-            trsl_x0_centered = c_s * trsl_xt_centered.to(pooled.dtype) + c_o * F_theta
-            trsl_x0_final    = trsl_x0_centered + trsl_mu.view(-1, 3).to(pooled.dtype)
+            # # TRSL: EDM x0-prediction. Network outputs F_theta, assembled by c_skip/c_out.
+            # F_theta = self.trsl_head(torch.cat([pooled, trsl_xt_scaled.to(pooled.dtype), noise_feat, global_ctx], dim=-1))
+            # c_s = fr_c_skip.view(-1, 1).to(pooled.dtype)
+            # c_o = fr_c_out.view(-1, 1).to(pooled.dtype)
+            # trsl_x0_centered = c_s * trsl_xt_centered.to(pooled.dtype) + c_o * F_theta
+            # trsl_x0_final    = trsl_x0_centered + trsl_mu.view(-1, 3).to(pooled.dtype)
+
+            # TRSL: direct x0-prediction (normalized clean centered translation)
+            x0c_norm = self.trsl_head(torch.cat([pooled, trsl_xt_scaled.to(pooled.dtype), noise_feat, global_ctx], dim=-1))
+            t_scale = trsl_scale.view(-1, 1).to(pooled.dtype)
+            trsl_x0_final = x0c_norm * t_scale + trsl_mu.view(-1, 3).to(pooled.dtype)
 
             # ROTA: direct clean-frame prediction (x0-prediction on SO(3)), no composition.
             rota_xt_flat = rota_xt.reshape(rota_xt.shape[0], 9).to(dtype=pooled.dtype)
@@ -252,6 +258,7 @@ class CDRFusionBlock(nn.Module):
         c_skip: torch.Tensor,                    
         c_out: torch.Tensor,
         cdr_mu: torch.Tensor,
+        cdr_scale: torch.Tensor,
         cdr_sigma:torch.Tensor,
     ):
         local_pos = torch.arange(loop_global_res_indices.shape[-1], device=sfea_tns_for_cdr.device, dtype=torch.long)
@@ -281,17 +288,11 @@ class CDRFusionBlock(nn.Module):
             cdr_sigma=cdr_sigma,
         )
 
-        F_theta = cdr_pred['F_theta']           
-
-        # Step 5: EDM Assembly and Inverse Recovery for CDR
-        # Assembly in decentralized physical space
-        cdr_pred_centered = c_skip * cdr_xt_centered + c_out * F_theta
-        
-        # Physical Space Closure (+ mu)
-        c_mu = cdr_mu.view(1, 1, 1, 1, 3).to(dtype=F_theta.dtype)
-        pred_x0_physical = cdr_pred_centered + c_mu
-        
-        # Ensure padding remains zeroed out
+        x0_norm = cdr_pred['F_theta']
+        # direct x0-prediction: de-normalize and add mean
+        c_scale = cdr_scale.view(1, 1, 1, 1, 1).to(dtype=x0_norm.dtype)
+        c_mu    = cdr_mu.view(1, 1, 1, 1, 3).to(dtype=x0_norm.dtype)
+        pred_x0_physical = x0_norm * c_scale + c_mu
         pred_x0_local = pred_x0_physical * loop_atom_valid_mask.unsqueeze(-1).to(pred_x0_physical.dtype)
 
         # Global coordinate mapping using anchor frame

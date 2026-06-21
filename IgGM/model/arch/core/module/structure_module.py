@@ -138,6 +138,7 @@ class StructureModule(nn.Module):
         fr_c_skip = region_metadata['anchor_frame_meta']['fr_c_skip'].to(device=device, dtype=dtype)
         fr_c_out  = region_metadata['anchor_frame_meta']['fr_c_out'].to(device=device, dtype=dtype)
         trsl_mu    = region_metadata['anchor_frame_meta']['trsl_mu'].to(device=device, dtype=dtype)
+        trsl_scale = region_metadata['anchor_frame_meta']['trsl_scale'].to(device=device, dtype=dtype)
 
         trsl_xt_centered = region_metadata['anchor_frame_meta']['trsl_xt_centered'].to(device=device, dtype=dtype)
 
@@ -146,6 +147,7 @@ class StructureModule(nn.Module):
         cdr_c_skip = region_metadata['cdr_meta']['cdr_c_skip'].view(-1, 1, 1, 1, 1).to(device=device, dtype=dtype)
         cdr_c_out  = region_metadata['cdr_meta']['cdr_c_out'].view(-1, 1, 1, 1, 1).to(device=device, dtype=dtype)
         cdr_mu     = region_metadata['cdr_meta']['cdr_mu'].to(device=device, dtype=dtype)
+        cdr_scale  = region_metadata['cdr_meta']['cdr_scale'].to(device=device, dtype=dtype)
 
         cdr_xt_centered = region_metadata['cdr_meta']['cdr_xt_centered'].to(device=device, dtype=dtype)
 
@@ -186,6 +188,7 @@ class StructureModule(nn.Module):
                 fr_c_skip=fr_c_skip,
                 fr_c_out=fr_c_out,
                 trsl_mu=trsl_mu,
+                trsl_scale=trsl_scale,
                 fr_sigma_trsl=fr_sigma_trsl,
             )
             fr_coords = fr_out['fr_coords']
@@ -216,6 +219,7 @@ class StructureModule(nn.Module):
                 c_skip=cdr_c_skip,
                 c_out=cdr_c_out,
                 cdr_mu=cdr_mu,  
+                cdr_scale=cdr_scale,
                 cdr_sigma = cdr_sigma
 
             )

@@ -262,22 +262,22 @@ class IgGMLightningModule(pl.LightningModule):
         local_fail = False
         inputs = outputs = loss_dict = None
 
-        try:
-            inputs = self._build_inputs_cm(prot_data_curr, idx_step)
-            outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
-            loss_dict = self._compute_loss(inputs, outputs)
+        # try:
+        inputs = self._build_inputs_cm(prot_data_curr, idx_step)
+        outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
+        loss_dict = self._compute_loss(inputs, outputs)
 
-            self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
-            self.log(f"{stage}/loss_backbone", loss_dict["loss_backbone"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
-            self.log(f"{stage}/loss_cdr", loss_dict["loss_cdr"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
-            self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
-            self.log(f"{stage}/loss_smooth_lddt", loss_dict["loss_smooth_lddt"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
-            self.log(f"{stage}/loss_bond", loss_dict["loss_bond"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
-            self.log(f"{stage}/loss_trsl", loss_dict["loss_trsl"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
-            self.log(f"{stage}/loss_rota", loss_dict["loss_rota"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
-    
-        except Exception as exc:
-            local_fail = True
+        self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+        self.log(f"{stage}/loss_backbone", loss_dict["loss_backbone"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+        self.log(f"{stage}/loss_cdr", loss_dict["loss_cdr"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+        self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+        self.log(f"{stage}/loss_smooth_lddt", loss_dict["loss_smooth_lddt"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+        self.log(f"{stage}/loss_bond", loss_dict["loss_bond"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+        self.log(f"{stage}/loss_trsl", loss_dict["loss_trsl"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+        self.log(f"{stage}/loss_rota", loss_dict["loss_rota"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+
+        # except Exception as exc:
+        #     local_fail = True
 
         if self._is_eval_stage(stage):
             pred_cord = outputs["3d"]["cord"][-1][0]
