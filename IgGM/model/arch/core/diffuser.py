@@ -53,6 +53,11 @@ class Diffuser:
         self.fr_noise_scale_trsl = float(1.0)
         self.fr_noise_scale_rota =  float(1.0)
         self.cdr_local_noise_scale =  float(0.3) # 20 A noise 
+        
+        # 旋转角度噪声调度（run 与 __build_igso3_list_ve 必须一致）
+        self.rota_noise_factor = 0.03
+        self.rota_noise_max = 1.5      # ≈86°, 避免长期 ≈均匀分布
+
         self.occupancy_mode = occupancy_mode
 
         self.rota_buf_size = 1024  # number of rotation matrices buffered for each IGSO(3) distr.
@@ -200,7 +205,7 @@ class Diffuser:
     def run(self, prot_data_orig, idxs_step=None, return_time_steps=False):
         """Build a synchronized noisy state with FR rigid motion + CDR local diffusion."""
 
-        # idxs_step = 80
+        # idxs_step = 150
         # torch.manual_seed(42)
         # random.seed(42)
 
@@ -257,7 +262,8 @@ class Diffuser:
         trsl_xt_physical = trsl_xt_centered + trsl_mu
         
         # Random rotation (existing logic)
-        sigma_rota = torch.clamp(sigma_t * self.fr_noise_scale_rota * 0.1, max=3.14)
+        sigma_rota = torch.clamp(sigma_t * self.fr_noise_scale_rota * self.rota_noise_factor, max=self.rota_noise_max)
+        # sigma_rota = torch.clamp(sigma_t * self.fr_noise_scale_rota * 0.1, max=3.14)
         rota_buf = self.rota_buf_list_fwd[idxs_step].to(device=device, dtype=dtype)
         fr_rotation = rota_buf[random.randrange(self.rota_buf_size)]
         rota_xt = torch.matmul(fr_rotation, rota_orig)
@@ -460,8 +466,10 @@ class Diffuser:
         logging.info('building VE IGSO(3) distributions ...')
         self.rota_buf_list_fwd = [None] 
         # 把线性的距离 sigma 映射到角度 sigma (假设 1A 大致对应 0.1 rad 的旋转剧烈程度)
+        # for sigma in self.sigmas[1:]:
+        #     stdev = torch.clamp(sigma * self.fr_noise_scale_rota * 0.1, max=3.14)
         for sigma in self.sigmas[1:]:
-            stdev = torch.clamp(sigma * self.fr_noise_scale_rota * 0.1, max=3.14)
+            stdev = torch.clamp(sigma * self.fr_noise_scale_rota * self.rota_noise_factor, max=self.rota_noise_max)
             if self.igso3_buffer is None:
                 igso3 = IsotropicGaussianSO3(eps=stdev.view(1))
                 rota_buf = igso3.sample_batch(torch.Size([self.rota_buf_size]))[:, 0]

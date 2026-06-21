@@ -267,15 +267,14 @@ class IgGMLightningModule(pl.LightningModule):
             outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
             loss_dict = self._compute_loss(inputs, outputs)
 
-            self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=True, on_epoch=True, add_dataloader_idx=False)
-            self.log(f"{stage}/loss_backbone", loss_dict["loss_backbone"], prog_bar=True, on_step=True, on_epoch=True, add_dataloader_idx=False)
-            self.log(f"{stage}/loss_cdr", loss_dict["loss_cdr"], prog_bar=True, on_step=True, on_epoch=True, add_dataloader_idx=False)
-            self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=True, on_step=True, on_epoch=True, add_dataloader_idx=False)
-            self.log(f"{stage}/loss_smooth_lddt", loss_dict["loss_smooth_lddt"], prog_bar=True, on_step=True, on_epoch=True, add_dataloader_idx=False)
-            self.log(f"{stage}/loss_bond", loss_dict["loss_bond"], prog_bar=True, on_step=True, on_epoch=True, add_dataloader_idx=False)
-            self.log(f"{stage}/weight_factor", loss_dict["weight_factor"], prog_bar=True, on_step=True, on_epoch=True, add_dataloader_idx=False)
-            self.log(f"{stage}/loss_trsl", loss_dict["loss_trsl"], prog_bar=True, on_step=True, on_epoch=True, add_dataloader_idx=False)
-            self.log(f"{stage}/loss_rota", loss_dict["loss_rota"], prog_bar=True, on_step=True, on_epoch=True, add_dataloader_idx=False)
+            self.log(f"{stage}/loss", loss_dict["loss"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+            self.log(f"{stage}/loss_backbone", loss_dict["loss_backbone"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+            self.log(f"{stage}/loss_cdr", loss_dict["loss_cdr"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+            self.log(f"{stage}/loss_viol", loss_dict["loss_viol"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+            self.log(f"{stage}/loss_smooth_lddt", loss_dict["loss_smooth_lddt"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+            self.log(f"{stage}/loss_bond", loss_dict["loss_bond"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+            self.log(f"{stage}/loss_trsl", loss_dict["loss_trsl"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+            self.log(f"{stage}/loss_rota", loss_dict["loss_rota"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
     
         except Exception as exc:
             local_fail = True
@@ -432,9 +431,7 @@ class IgGMLightningModule(pl.LightningModule):
 
     def on_after_backward(self):
         fr = self.model.net["af2_smod"].net["fr_branch"]
-
-        print("linear_t.weight.grad:",
-            None if fr.linear_t.weight.grad is None else fr.linear_t.weight.grad.norm().item())
-        print("linear_q.weight.grad:",
-            None if fr.linear_q.weight.grad is None else fr.linear_q.weight.grad.norm().item())
-        print("-------")
+        tw = fr.trsl_head[-1].weight.grad
+        qw = fr.rota_head[-1].weight.grad
+        print("trsl_head.weight.grad:", None if tw is None else tw.norm().item())
+        print("rota_head.weight.grad:", None if qw is None else qw.norm().item())

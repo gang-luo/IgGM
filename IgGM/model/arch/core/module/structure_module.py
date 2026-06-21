@@ -127,25 +127,18 @@ class StructureModule(nn.Module):
 
 
         fr_sigma_trsl = region_metadata['anchor_frame_meta']['fr_sigma_trsl'].detach().clone()
-        fr_sigma_rota = region_metadata['anchor_frame_meta']['fr_sigma_rota'].detach().clone()
         if fr_sigma_trsl.ndim == 1:
             fr_sigma_trsl = fr_sigma_trsl.unsqueeze(0).expand(n_smpls, -1)
-        if fr_sigma_rota.ndim == 1:
-            fr_sigma_rota = fr_sigma_rota.unsqueeze(0).expand(n_smpls, -1)
         fr_sigma_trsl = fr_sigma_trsl.to(device=device, dtype=dtype)
-        fr_sigma_rota = fr_sigma_rota.to(device=device, dtype=dtype)
-
 
         cdr_sigma = region_metadata["sigama_t"]["cdr_sigma"].to(device=device, dtype=dtype).view(-1)
-
 
         # ====== Unpack TRSL Stats & EDM ======
         fr_c_in   = region_metadata['anchor_frame_meta']['fr_c_in'].to(device=device, dtype=dtype)
         fr_c_skip = region_metadata['anchor_frame_meta']['fr_c_skip'].to(device=device, dtype=dtype)
         fr_c_out  = region_metadata['anchor_frame_meta']['fr_c_out'].to(device=device, dtype=dtype)
         trsl_mu    = region_metadata['anchor_frame_meta']['trsl_mu'].to(device=device, dtype=dtype)
-        trsl_scale = region_metadata['anchor_frame_meta']['trsl_scale'].to(device=device, dtype=dtype)
-        
+
         trsl_xt_centered = region_metadata['anchor_frame_meta']['trsl_xt_centered'].to(device=device, dtype=dtype)
 
         # ====== Unpack CDR Stats & EDM ======
@@ -153,12 +146,10 @@ class StructureModule(nn.Module):
         cdr_c_skip = region_metadata['cdr_meta']['cdr_c_skip'].view(-1, 1, 1, 1, 1).to(device=device, dtype=dtype)
         cdr_c_out  = region_metadata['cdr_meta']['cdr_c_out'].view(-1, 1, 1, 1, 1).to(device=device, dtype=dtype)
         cdr_mu     = region_metadata['cdr_meta']['cdr_mu'].to(device=device, dtype=dtype)
-        cdr_scale  = region_metadata['cdr_meta']['cdr_scale'].to(device=device, dtype=dtype)
-        
+
         cdr_xt_centered = region_metadata['cdr_meta']['cdr_xt_centered'].to(device=device, dtype=dtype)
 
-        # Step 4: Input Feature Processing (Implicit Normalization)
-        # The network receives N(0,1) scaled inputs.
+        # input feature normalization: network receives c_in-scaled (~N(0,1)) inputs
         trsl_xt_scaled = trsl_xt_centered * fr_c_in.view(-1, 1) if fr_c_in.numel() > 1 else trsl_xt_centered * fr_c_in
         loop_xt_scaled = cdr_xt_centered * cdr_c_in
 
@@ -180,23 +171,22 @@ class StructureModule(nn.Module):
                     antibody_mask=antibody_mask, antigen_mask=antigen_mask, chunk_size=chunk_size,
                 )
 
-            # 2. FR 
+            # 2. FR rigid denoising (EDM x0-prediction for trsl, clean-frame for rota)
             fr_out = self.net['fr_branch'](
                 sfea_tns=sfea_tns,
                 sfea_tns_init=sfea_tns_init,
                 encd_tns=encd_tns,
                 antibody_mask=antibody_mask,
+                antigen_mask=antigen_mask,
                 curr_coords=curr_coords,
                 antibody_local_coords=antibody_local_coords,
-
                 rota_xt=rota_xt_in,
-                trsl_xt_scaled=trsl_xt_scaled,   # Normalized input for F_theta
-                trsl_xt_centered=trsl_xt_centered, # Unscaled centered coords for c_skip assembly
-                fr_c_skip=fr_c_skip,              
-                fr_c_out=fr_c_out,                
+                trsl_xt_scaled=trsl_xt_scaled,     # c_in-scaled input for F_theta
+                trsl_xt_centered=trsl_xt_centered, # centered coords for c_skip assembly
+                fr_c_skip=fr_c_skip,
+                fr_c_out=fr_c_out,
                 trsl_mu=trsl_mu,
                 fr_sigma_trsl=fr_sigma_trsl,
-                fr_sigma_rota=fr_sigma_rota,
             )
             fr_coords = fr_out['fr_coords']
             sfea_tns = fr_out['sfea_tns']

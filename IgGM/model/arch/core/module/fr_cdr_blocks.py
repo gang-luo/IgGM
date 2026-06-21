@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 from .cdr_loop_head import CDRLoopHead
 from IgGM.utils.fr_cdr_diffusion_utils import local_to_global_coords, extract_trsl_rota_from_noisefr
 from IgGM.utils import log_rmat, skew2vec
@@ -44,72 +45,36 @@ class FRBranch(nn.Module):
             nn.Linear(c_hidden, c_hidden),
             nn.SiLU(),
         )
-        self.linear_t = nn.Linear(c_hidden + 3 + 32, 3)   # 与之前一致
-        self.linear_q = nn.Linear(c_hidden + 3 , 3)   # ← 同样 + 32
+
+        self.trsl_head = nn.Sequential(
+            nn.Linear(c_hidden + 3 + 32 + 9, c_hidden),
+            nn.SiLU(),
+            nn.Linear(c_hidden, 3),              # 直接输出 归一化的 clean centered translation
+        )
+        self.rota_head = nn.Sequential(
+            nn.Linear(c_hidden + 9 + 32 + 9, c_hidden),
+            nn.SiLU(),
+            nn.Linear(c_hidden, 6),              # 直接输出 clean frame 的 6D 表示
+        )
         self.delta_feat = nn.Linear(c_hidden, c_s)
 
-        nn.init.normal_(self.linear_t.weight, std=1e-2) 
-        nn.init.zeros_(self.linear_t.bias)
-        nn.init.normal_(self.linear_q.weight, std=1e-2) 
-        nn.init.zeros_(self.linear_q.bias)
-
-        
-        # nn.init.zeros_(self.linear_t.weight)
-        # nn.init.zeros_(self.linear_t.bias)
-        # nn.init.zeros_(self.linear_q.weight)
-        # nn.init.zeros_(self.linear_q.bias)
+        # trsl: 小初始化即可（目标 O(1)）
+        nn.init.zeros_(self.trsl_head[-1].weight)
+        nn.init.zeros_(self.trsl_head[-1].bias)
+        # rota: 权重置零 + bias 设为 identity 帧前两列，保证初始输出是合法旋转(单位阵)
+        nn.init.zeros_(self.rota_head[-1].weight)
+        with torch.no_grad():
+            self.rota_head[-1].bias.copy_(torch.tensor([1., 0., 0., 0., 1., 0.]))
 
     @staticmethod
-    def _axis_angle_to_matrix(vec: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-        """Convert axis-angle vector to rotation matrix with stable small-angle handling.
-
-        Args:
-            vec: Axis-angle vector, shape [..., 3].
-                The vector direction is the rotation axis, and its norm is the
-                rotation angle in radians.
-            eps: Small threshold for Taylor expansion.
-
-        Returns:
-            Rotation matrix, shape [..., 3, 3].
-        """
-
-        # theta: [..., 1]
-        theta = torch.linalg.norm(vec, dim=-1, keepdim=True)
-
-        x, y, z = vec[..., 0], vec[..., 1], vec[..., 2]
-        zero = torch.zeros_like(x)
-
-        # K = [vec]_x, shape [..., 3, 3]
-        K = torch.stack([
-            zero, -z, y,
-            z, zero, -x,
-            -y, x, zero,
-        ], dim=-1).reshape(*vec.shape[:-1], 3, 3)
-
-        # Use:
-        # R = I + A K + B K^2
-        # A = sin(theta) / theta
-        # B = (1 - cos(theta)) / theta^2
-        theta_mat = theta.unsqueeze(-1)          # [..., 1, 1]
-        theta2_mat = theta_mat.square()          # [..., 1, 1]
-
-        A = torch.where(
-            theta_mat > eps,
-            torch.sin(theta_mat) / theta_mat.clamp_min(eps),
-            1.0 - theta2_mat / 6.0 + theta2_mat.square() / 120.0,
-        )
-
-        B = torch.where(
-            theta_mat > eps,
-            (1.0 - torch.cos(theta_mat)) / theta2_mat.clamp_min(eps),
-            0.5 - theta2_mat / 24.0 + theta2_mat.square() / 720.0,
-        )
-
-        I = torch.eye(3, device=vec.device, dtype=vec.dtype).expand_as(K)
-        K2 = torch.matmul(K, K)
-
-        return I + A * K + B * K2
-
+    def _gram_schmidt(v6):
+        # 6D rotation representation -> rotation matrix (columns e1,e2,e3)
+        a1, a2 = v6[:, :3], v6[:, 3:]
+        e1 = F.normalize(a1, dim=-1)
+        a2 = a2 - (e1 * a2).sum(-1, keepdim=True) * e1
+        e2 = F.normalize(a2, dim=-1)
+        e3 = torch.cross(e1, e2, dim=-1)
+        return torch.stack([e1, e2, e3], dim=-1)
 
     def forward(
             self,
@@ -117,20 +82,18 @@ class FRBranch(nn.Module):
             sfea_tns_init: torch.Tensor,
             encd_tns: torch.Tensor,
             antibody_mask: torch.Tensor,
+            antigen_mask: torch.Tensor,
             curr_coords: torch.Tensor,
             antibody_local_coords: torch.Tensor,
-
             rota_xt: torch.Tensor,
-            trsl_xt_scaled: torch.Tensor,       
-            trsl_xt_centered: torch.Tensor,     # Changed name to reflect physics
-            fr_c_skip: torch.Tensor | None = None,   
-            fr_c_out:  torch.Tensor | None = None,
-            trsl_mu: torch.Tensor | None = None,
-            fr_sigma_trsl: torch.Tensor | None = None,
-            fr_sigma_rota: torch.Tensor | None = None,
-
+            trsl_xt_scaled: torch.Tensor,       # c_in-scaled noisy centered trsl (network input)
+            trsl_xt_centered: torch.Tensor,     # centered noisy trsl (for EDM c_skip assembly)
+            fr_c_skip: torch.Tensor,
+            fr_c_out: torch.Tensor,
+            trsl_mu: torch.Tensor,
+            fr_sigma_trsl: torch.Tensor,
         ) -> dict:
-            # --- shape 规范化 ---
+            # --- shape normalization ---
             if rota_xt.ndim == 2:
                 rota_xt = rota_xt.unsqueeze(0)
             if trsl_xt_scaled.ndim == 1:
@@ -149,44 +112,40 @@ class FRBranch(nn.Module):
             pooled     = self.pool_proj(pooled)                      # [B, c_hidden]
 
             sigma = fr_sigma_trsl.view(-1).clamp_min(1e-8)
-            c_noise = 0.25 * torch.log(sigma)
-            noise_feat = self.noise_embed(c_noise.unsqueeze(-1))  # [B, 32]
+            c_noise = 0.25 * torch.log(sigma)                        # Karras noise embedding
+            noise_feat = self.noise_embed(c_noise.unsqueeze(-1))     # [B, 32]
 
-            # Network predicts F_theta from ~N(0,1) scaled input
-            trsl_xt_scaled = trsl_xt_scaled.to(dtype=pooled.dtype)
-            pooled_with_trsl = torch.cat([pooled, trsl_xt_scaled, noise_feat], dim=-1)  
-            F_theta_trsl = self.linear_t(pooled_with_trsl)  
+            # global context: antigen is centered at origin, so ab_com encodes global pose
+            ca = curr_coords[:, :, 1, :]                                  # [B, L, 3]
+            ab_f = ab_mask_bool.unsqueeze(-1).to(ca.dtype)                # [B, L, 1]
+            ab_com = (ca * ab_f).sum(dim=1) / ab_f.sum(dim=1).clamp_min(1.0)   # [B, 3]
+            ag_b = antigen_mask.to(torch.bool)
+            if ag_b.ndim == 1:
+                ag_b = ag_b.unsqueeze(0)
+            ag_f = ag_b.unsqueeze(-1).to(ca.dtype)
+            ag_com = (ca * ag_f).sum(dim=1) / ag_f.sum(dim=1).clamp_min(1.0)
+            global_ctx = torch.cat([ab_com, ag_com, ab_com - ag_com], dim=-1).to(pooled.dtype)  # [B, 9]
 
-            # Step 5: EDM Assembly and Inverse Recovery
-            c_s = fr_c_skip.view(-1, 1).to(dtype=pooled.dtype)   
-            c_o = fr_c_out.view(-1, 1).to(dtype=pooled.dtype)    
-            
-            # Assembly in decentralized physical space
-            trsl_pred_centered = c_s * trsl_xt_centered + c_o * F_theta_trsl   
+            # TRSL: EDM x0-prediction. Network outputs F_theta, assembled by c_skip/c_out.
+            F_theta = self.trsl_head(torch.cat([pooled, trsl_xt_scaled.to(pooled.dtype), noise_feat, global_ctx], dim=-1))
+            c_s = fr_c_skip.view(-1, 1).to(pooled.dtype)
+            c_o = fr_c_out.view(-1, 1).to(pooled.dtype)
+            trsl_x0_centered = c_s * trsl_xt_centered.to(pooled.dtype) + c_o * F_theta
+            trsl_x0_final    = trsl_x0_centered + trsl_mu.view(-1, 3).to(pooled.dtype)
 
-            # Physical Space Closure (+ mu)
-            t_mu = trsl_mu.view(-1, 3).to(dtype=pooled.dtype)
-            trsl_x0_final = trsl_pred_centered + t_mu
+            # ROTA: direct clean-frame prediction (x0-prediction on SO(3)), no composition.
+            rota_xt_flat = rota_xt.reshape(rota_xt.shape[0], 9).to(dtype=pooled.dtype)
+            rota_feat = torch.cat([pooled, rota_xt_flat, noise_feat, global_ctx], dim=-1)
+            updated_rota = self._gram_schmidt(self.rota_head(rota_feat))
 
-
-            rota_xt_log = skew2vec(log_rmat(rota_xt)).to(dtype=pooled.dtype)   
-            pooled_with_rota = torch.cat([pooled, rota_xt_log], dim=-1)  
-            raw_delta_rota   = self.linear_q(pooled_with_rota)           
-
-            sigma_rota_expand = fr_sigma_rota.view(-1, 1).to(pooled.dtype)
-            rot_vec    = raw_delta_rota * sigma_rota_expand
-            delta_rota = self._axis_angle_to_matrix(rot_vec)
-
-            updated_rota = torch.bmm(delta_rota, rota_xt)
-
-            # Rebuild global coordinates using physical trsl_x0_final
+            # rebuild global antibody coordinates from predicted clean pose
             updated = curr_coords.clone()
             for b in range(updated.shape[0]):
                 if ab_mask_bool[b].any():
                     moved = local_to_global_coords(
                         antibody_local_coords[b],
                         updated_rota[b],
-                        trsl_x0_final[b], # Accurate physical coordinates
+                        trsl_x0_final[b],
                     )
                     updated[b, ab_mask_bool[b]] = moved.to(dtype=updated.dtype)
 
@@ -195,11 +154,9 @@ class FRBranch(nn.Module):
             return {
                 'fr_coords':      updated,
                 'sfea_tns':       sfea_tns + global_delta_feat,
-                'trsl':           trsl_x0_final, 
+                'trsl':           trsl_x0_final,
                 'rota':           updated_rota,
                 'mask':           (denom.squeeze(-1) > 0).to(torch.bool),
-                'F_theta_trsl':   F_theta_trsl,        
-                'raw_delta_trsl': F_theta_trsl,        
             }
     
 # ---------------------------------------------------------------------------

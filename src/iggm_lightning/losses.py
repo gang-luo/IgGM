@@ -238,28 +238,22 @@ class IgGMPaperLoss:
         n_layers = len(loop_cords_list)
         cdr_scale = inputs['cdr_meta']['cdr_scale']
 
+        # CDR x0-space loss: per-layer linear weight (refinement emphasis, sigma-independent)
         loss_cdr = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-        # weight_sum = 0.0
-        # for l in range(n_layers):
-        #     # 线性权重：层 0 权重最小，最后一层权重最大
-        #     w = float(l + 1)
-        #     weight_sum += w
-        #     loss_cdr_l = self._cdr_all_atom_mse(
-        #         loop_cords_list[l],
-        #         clean_loop_local_gt,
-        #         loop_atom_valid_mask,
-        #         cdr_scale,  # <--- 传入放缩系数
-        #     )
-        #     loss_cdr = loss_cdr + w * loss_cdr_l
-        # loss_cdr = loss_cdr / weight_sum
+        weight_sum = 0.0
+        for l in range(n_layers):
+            w = float(l + 1)
+            weight_sum += w
+            loss_cdr_l = self._cdr_all_atom_mse(
+                loop_cords_list[l],
+                clean_loop_local_gt,
+                loop_atom_valid_mask,
+                cdr_scale,
+            )
+            loss_cdr = loss_cdr + w * loss_cdr_l
+        loss_cdr = loss_cdr / weight_sum
 
-        sigma_raw = inputs["sigama_t"]["sigma_raw"].to(device=pred.device, dtype=pred.dtype).view(-1)
-        sigma = sigma_raw.clamp_min(1e-6)
-        sigma_data = 4.0
-        w_t = (sigma.square() + sigma_data ** 2) / ((sigma * sigma_data).square() + 1e-8)
-        weight_factor = torch.clamp(w_t, max=10.0).mean()  # weight_factor = 1.0  # 直接使用 1.0，去掉动态权重调整（可选，根据实际训练情况调整）
-
-        # FR backbone loss（多层，不变）
+        # FR backbone loss (multi-layer)
         loss_trsl = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
         loss_rota = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
         loss_backbone = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
@@ -277,7 +271,7 @@ class IgGMPaperLoss:
         loss_vio = torch.zeros_like(loss_backbone)
         total = (
             self.cfg.backbone_weight * loss_backbone
-            + weight_factor * loss_cdr
+            + self.cfg.cdr_all_atom_weight * loss_cdr
             + self.cfg.bond_weight * loss_bond
             + self.cfg.smooth_lddt_weight * loss_smooth_lddt
         )
@@ -299,113 +293,28 @@ class IgGMPaperLoss:
             "loss_cdr": loss_cdr,
             "loss_smooth_lddt": loss_smooth_lddt,
             "loss_bond": loss_bond,
-            "weight_factor": weight_factor,
             "loss_trsl": loss_trsl,
             "loss_rota": loss_rota,
         }
     
     # ==========================================
-    # In losses.py -> _backbone_mse_layer
+    # Backbone loss: x0-space MSE (trsl) + geodesic (rota), sigma-independent
     # ==========================================
-
     def _backbone_mse_layer(self, inputs, pre_trsl, pre_rota):
-
-        tgt_trsl = inputs['anchor_frame_meta']['trsl_orig'] 
-        tgt_rota = inputs['anchor_frame_meta']['rota_orig']
-        
-        trsl_scale = inputs['anchor_frame_meta']['trsl_scale']
-        sigma_trsl = inputs['anchor_frame_meta']['fr_sigma_trsl']
-        sigma_rota = inputs['anchor_frame_meta']['fr_sigma_rota']
+        meta = inputs['anchor_frame_meta']
         device, dtype = pre_trsl.device, pre_trsl.dtype
+        tgt_trsl   = meta['trsl_orig'].to(device=device, dtype=dtype).view(-1, 3)
+        tgt_rota   = meta['rota_orig'].to(device=device, dtype=torch.float32)
+        sigma_data = meta['trsl_scale'].to(device=device, dtype=dtype).view(-1, 1).clamp_min(1e-4)
 
-        # ============================================================
-        # (MSE TRSL)
-        # ============================================================
+        # TRSL: normalized x0 MSE (uniform weighting)
+        loss_trsl = (((pre_trsl.view(-1, 3) - tgt_trsl) / sigma_data) ** 2).sum(-1).mean()
 
-        tgt_trsl_physical = tgt_trsl.to(device=device, dtype=dtype)
-        t_scale = trsl_scale.view(-1).to(device=device, dtype=dtype)
-
-        # Calculate Physical MSE
-        sq_trsl = ((pre_trsl - tgt_trsl_physical) ** 2).sum(dim=-1)       # [B]
-        
-
-        sigma_t = sigma_trsl.view(-1).clamp_min(1e-4).to(device=device, dtype=dtype)
-        sigma_data_t = trsl_scale.view(-1).clamp_min(1e-4).to(device=device, dtype=dtype)
-        w_trsl = (sigma_t.square() + sigma_data_t.square()) / ((sigma_t * sigma_data_t).square() + 1e-6)
-        w_use_trsl = torch.clamp(w_trsl, min=0.01, max=10.0)
-
-        # Scale to match the implicit normalized EDM objective space
-        loss_trsl = (sq_trsl * w_use_trsl).mean()
-        
-        # ============================================================
-        # (Geodesic SO(3) Loss with Bounded Weighting)
-        # ============================================================
-        tgt_rota_f32 = tgt_rota.to(device=device, dtype=torch.float32)
-        pre_rota_f32 = pre_rota.to(device=device, dtype=torch.float32)
-
-        R_rel = torch.matmul(pre_rota_f32.transpose(-1,-2), tgt_rota_f32)
+        # ROTA: geodesic loss on clean frame
+        pre_r = pre_rota.to(device=device, dtype=torch.float32)
+        R_rel = torch.matmul(pre_r.transpose(-1, -2), tgt_rota)
         rotvec = skew2vec(log_rmat(R_rel))
-        sq_rota = (rotvec**2).sum(dim=-1)
-
-        # SO(3) 是紧凑流形，方差有上限 (~1.8 弧度)
-        sigma_data_rota = 1.8 
-        sigma_rota = torch.as_tensor(sigma_rota, device=device, dtype=torch.float32).view(-1).clamp_min(1e-4)
-        w_rota = (sigma_rota.square() + sigma_data_rota**2) / ((sigma_rota * sigma_data_rota).square() + 1e-6)
-        w_use_rota = torch.clamp(w_rota, min=0.5, max=5.0)
-        
-        loss_rota = (sq_rota * w_use_rota).mean().to(dtype)
-
-        # ============================================================
-        # SUM (rota + trsl)
-        # ============================================================
+        loss_rota = (rotvec ** 2).sum(-1).mean().to(dtype)
 
         loss_backbone = 2.0 * loss_rota + loss_trsl
         return loss_backbone, loss_trsl, loss_rota
-    
-
-    # def _backbone_mse_layer(self, inputs, pre_trsl, pre_rota):
-
-    #     tgt_trsl = inputs['anchor_frame_meta']['trsl_orig'] # Note: trsl_orig should be the physical coords from diff_build
-    #     tgt_rota = inputs['anchor_frame_meta']['rota_orig']
-        
-    #     trsl_scale = inputs['anchor_frame_meta']['trsl_scale']
-    #     sigma_rota = inputs['anchor_frame_meta']['fr_sigma_rota']
-    #     device, dtype = pre_trsl.device, pre_trsl.dtype
-
-    #     # ============================================================
-    #     # (MSE TRSL)
-    #     # ============================================================
-
-    #     tgt_trsl_physical = tgt_trsl.to(device=device, dtype=dtype)
-    #     t_scale = trsl_scale.view(-1).to(device=device, dtype=dtype)
-
-    #     # Calculate Physical MSE
-    #     sq_trsl = ((pre_trsl - tgt_trsl_physical) ** 2).sum(dim=-1)       # [B]
-        
-    #     # Scale to match the implicit normalized EDM objective space
-    #     loss_trsl = (sq_trsl / (t_scale ** 2)).mean()
-        
-    #     # ============================================================
-    #     # (Geodesic SO(3) Loss with Bounded Weighting)
-    #     # ============================================================
-    #     tgt_rota_f32 = tgt_rota.to(device=device, dtype=torch.float32)
-    #     pre_rota_f32 = pre_rota.to(device=device, dtype=torch.float32)
-
-    #     R_rel = torch.matmul(pre_rota_f32.transpose(-1,-2), tgt_rota_f32)
-    #     rotvec = skew2vec(log_rmat(R_rel))
-    #     sq_rota = (rotvec**2).sum(dim=-1)
-
-    #     # SO(3) 是紧凑流形，方差有上限 (~1.8 弧度)
-    #     sigma_data_rota = 1.8 
-    #     sigma_rota = torch.as_tensor(sigma_rota, device=device, dtype=torch.float32).view(-1).clamp_min(1e-4)
-    #     w_rota = (sigma_rota.square() + sigma_data_rota**2) / ((sigma_rota * sigma_data_rota).square() + 1e-6)
-    #     w_use_rota = torch.clamp(w_rota, min=0.5, max=5.0)
-        
-    #     loss_rota = (sq_rota * w_use_rota).mean().to(dtype)
-
-    #     # ============================================================
-    #     # SUM (rota + trsl)
-    #     # ============================================================
-
-    #     loss_backbone = 2.0 * loss_rota + loss_trsl
-    #     return loss_backbone, loss_trsl, loss_rota
