@@ -133,16 +133,14 @@ class StructureModule(nn.Module):
 
         cdr_sigma = region_metadata["sigama_t"]["cdr_sigma"].to(device=device, dtype=dtype).view(-1)
 
-        # ====== Unpack TRSL Stats & EDM ======
-        fr_c_in   = region_metadata['anchor_frame_meta']['fr_c_in'].to(device=device, dtype=dtype)
-        fr_c_skip = region_metadata['anchor_frame_meta']['fr_c_skip'].to(device=device, dtype=dtype)
-        fr_c_out  = region_metadata['anchor_frame_meta']['fr_c_out'].to(device=device, dtype=dtype)
+        # ====== Unpack TRSL stats ======
+        fr_c_in    = region_metadata['anchor_frame_meta']['fr_c_in'].to(device=device, dtype=dtype)
         trsl_mu    = region_metadata['anchor_frame_meta']['trsl_mu'].to(device=device, dtype=dtype)
         trsl_scale = region_metadata['anchor_frame_meta']['trsl_scale'].to(device=device, dtype=dtype)
 
         trsl_xt_centered = region_metadata['anchor_frame_meta']['trsl_xt_centered'].to(device=device, dtype=dtype)
 
-        # ====== Unpack CDR Stats & EDM ======
+        # ====== Unpack CDR stats & EDM ======
         cdr_c_in   = region_metadata['cdr_meta']['cdr_c_in'].view(-1, 1, 1, 1, 1).to(device=device, dtype=dtype)
         cdr_c_skip = region_metadata['cdr_meta']['cdr_c_skip'].view(-1, 1, 1, 1, 1).to(device=device, dtype=dtype)
         cdr_c_out  = region_metadata['cdr_meta']['cdr_c_out'].view(-1, 1, 1, 1, 1).to(device=device, dtype=dtype)
@@ -173,7 +171,7 @@ class StructureModule(nn.Module):
                     antibody_mask=antibody_mask, antigen_mask=antigen_mask, chunk_size=chunk_size,
                 )
 
-            # 2. FR rigid denoising (EDM x0-prediction for trsl, clean-frame for rota)
+            # 2. FR rigid denoising (direct x0-prediction for trsl, clean-frame for rota)
             fr_out = self.net['fr_branch'](
                 sfea_tns=sfea_tns,
                 sfea_tns_init=sfea_tns_init,
@@ -183,10 +181,7 @@ class StructureModule(nn.Module):
                 curr_coords=curr_coords,
                 antibody_local_coords=antibody_local_coords,
                 rota_xt=rota_xt_in,
-                trsl_xt_scaled=trsl_xt_scaled,     # c_in-scaled input for F_theta
-                trsl_xt_centered=trsl_xt_centered, # centered coords for c_skip assembly
-                fr_c_skip=fr_c_skip,
-                fr_c_out=fr_c_out,
+                trsl_xt_scaled=trsl_xt_scaled,     # c_in-scaled input for the head
                 trsl_mu=trsl_mu,
                 trsl_scale=trsl_scale,
                 fr_sigma_trsl=fr_sigma_trsl,

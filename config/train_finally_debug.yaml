@@ -17,12 +17,12 @@ data:
 model:
   ppi_ckpt: "/root/private_data/luog/codex/IgGM/checkpoints/esm_ppi_650m_ab.pth"
   design_ckpt: ""
-  igso3_buffer: "/root/private_data/luog/codex/IgGM/checkpoints/igso3_buffer.pth"
+  igso3_buffer: "/root/private_data/luog/codex/IgGM/checkpoints/igso3_buffer.pth" # 
 
 optimizer:
-  lr: 1.0e-4
+  lr: 5.0e-4
   weight_decay: 1.0e-2
-  grad_clip: 5.0
+  grad_clip: 1.0
 
 scheduler:
   name: cosine
@@ -51,12 +51,12 @@ trainer:
 wandb:
   disabled: false # true or false
   project: IgGM
-  run_name: Iggm_lightning_training_debug0617
+  run_name: Iggm_lightning_training_debug0622
   entity: "mllm-csu"
   api_key: "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"
 
 runtime:
-  output_dir: outputs/Iggm_lightning_training_debug0617
+  output_dir: outputs/Iggm_lightning_training_debug0622
   seed: 56
   resume: False
   run_test: true

@@ -33,4 +33,5 @@ nohup python src/train_iggm_lightning.py --config config/train_0526_signle.yaml 
 # python src/train_iggm_lightning.py --config config/train_finally.yaml
 
 python src/train_iggm_lightning.py --config config/train_finally_debug.yaml
+
 python src/train_iggm_lightning.py --config config/train_finally_debug_overfit.yaml

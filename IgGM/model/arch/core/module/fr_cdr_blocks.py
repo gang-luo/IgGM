@@ -46,15 +46,25 @@ class FRBranch(nn.Module):
             nn.SiLU(),
         )
 
-        self.trsl_head = nn.Sequential(
-            nn.Linear(c_hidden + 3 + 32 + 9, c_hidden),
+        # A1: interface-aware pooling. Antibody residues near the antigen are
+        # weighted up, so the pose head sees docking-contact geometry, not just
+        # a plain antibody-mean. iface_dim keeps the extra conditioning compact.
+        self.iface_dim = 64
+        self.iface_proj = nn.Sequential(
+            nn.LayerNorm(c_hidden),
+            nn.Linear(c_hidden, self.iface_dim),
             nn.SiLU(),
-            nn.Linear(c_hidden, 3),              # 直接输出 归一化的 clean centered translation
+        )
+
+        self.trsl_head = nn.Sequential(
+            nn.Linear(c_hidden + 3 + 32 + 9 + self.iface_dim, c_hidden),
+            nn.SiLU(),
+            nn.Linear(c_hidden, 3),              # normalized clean centered translation (x0)
         )
         self.rota_head = nn.Sequential(
-            nn.Linear(c_hidden + 9 + 32 + 9, c_hidden),
+            nn.Linear(c_hidden + 9 + 32 + 9 + self.iface_dim, c_hidden),
             nn.SiLU(),
-            nn.Linear(c_hidden, 6),              # 直接输出 clean frame 的 6D 表示
+            nn.Linear(c_hidden, 6),              # clean frame 6D representation (x0 on SO(3))
         )
         self.delta_feat = nn.Linear(c_hidden, c_s)
 
@@ -76,6 +86,32 @@ class FRBranch(nn.Module):
         e3 = torch.cross(e1, e2, dim=-1)
         return torch.stack([e1, e2, e3], dim=-1)
 
+    def _interface_pool(self, res_hidden, ca, ab_mask_bool, ag_mask_bool, tau: float = 8.0):
+        """Distance-softmax pooling of antibody residues toward the antigen.
+
+        res_hidden: [B, L, c_hidden]  ca: [B, L, 3]
+        Returns iface feature [B, iface_dim]. Falls back to antibody mean when a
+        sample has no antigen residue. tau (A) sets the contact softness.
+        """
+        B = res_hidden.shape[0]
+        feats = []
+        for b in range(B):
+            ab_idx = torch.nonzero(ab_mask_bool[b], as_tuple=False).squeeze(-1)
+            ag_idx = torch.nonzero(ag_mask_bool[b], as_tuple=False).squeeze(-1)
+            if ab_idx.numel() == 0:
+                feats.append(res_hidden.new_zeros(res_hidden.shape[-1]))
+                continue
+            h_ab = res_hidden[b, ab_idx]                       # [N_ab, c_hidden]
+            if ag_idx.numel() == 0:
+                feats.append(h_ab.mean(dim=0))
+                continue
+            d = torch.cdist(ca[b, ab_idx], ca[b, ag_idx])      # [N_ab, N_ag]
+            min_d = d.min(dim=-1).values                       # [N_ab] dist to nearest antigen
+            w = torch.softmax(-min_d / tau, dim=0).unsqueeze(-1)  # contact residues -> high weight
+            feats.append((h_ab * w).sum(dim=0))
+        pooled = torch.stack(feats, dim=0)                     # [B, c_hidden]
+        return self.iface_proj(pooled)                         # [B, iface_dim]
+
     def forward(
             self,
             sfea_tns: torch.Tensor,
@@ -87,9 +123,6 @@ class FRBranch(nn.Module):
             antibody_local_coords: torch.Tensor,
             rota_xt: torch.Tensor,
             trsl_xt_scaled: torch.Tensor,       # c_in-scaled noisy centered trsl (network input)
-            trsl_xt_centered: torch.Tensor,     # centered noisy trsl (for EDM c_skip assembly)
-            fr_c_skip: torch.Tensor,
-            fr_c_out: torch.Tensor,
             trsl_mu: torch.Tensor,
             trsl_scale: torch.Tensor,           # sigma_data, de-normalize x0
             fr_sigma_trsl: torch.Tensor,
@@ -105,12 +138,17 @@ class FRBranch(nn.Module):
                 antibody_mask = antibody_mask.unsqueeze(0)
 
             ab_mask_bool = antibody_mask.to(torch.bool)
+            ag_b = antigen_mask.to(torch.bool)
+            if ag_b.ndim == 1:
+                ag_b = ag_b.unsqueeze(0)
+
             res_in     = torch.cat([sfea_tns, sfea_tns_init, encd_tns], dim=-1)
             res_hidden = self.res_proj(res_in)
             mask_f     = ab_mask_bool.unsqueeze(-1).to(res_hidden.dtype)
             denom      = mask_f.sum(dim=1).clamp_min(1.0)
             pooled     = (res_hidden * mask_f).sum(dim=1) / denom   # [B, c_hidden]
             pooled     = self.pool_proj(pooled)                      # [B, c_hidden]
+
 
             sigma = fr_sigma_trsl.view(-1).clamp_min(1e-8)
             c_noise = 0.25 * torch.log(sigma)                        # Karras noise embedding
@@ -120,28 +158,24 @@ class FRBranch(nn.Module):
             ca = curr_coords[:, :, 1, :]                                  # [B, L, 3]
             ab_f = ab_mask_bool.unsqueeze(-1).to(ca.dtype)                # [B, L, 1]
             ab_com = (ca * ab_f).sum(dim=1) / ab_f.sum(dim=1).clamp_min(1.0)   # [B, 3]
-            ag_b = antigen_mask.to(torch.bool)
-            if ag_b.ndim == 1:
-                ag_b = ag_b.unsqueeze(0)
             ag_f = ag_b.unsqueeze(-1).to(ca.dtype)
             ag_com = (ca * ag_f).sum(dim=1) / ag_f.sum(dim=1).clamp_min(1.0)
             global_ctx = torch.cat([ab_com, ag_com, ab_com - ag_com], dim=-1).to(pooled.dtype)  # [B, 9]
 
-            # # TRSL: EDM x0-prediction. Network outputs F_theta, assembled by c_skip/c_out.
-            # F_theta = self.trsl_head(torch.cat([pooled, trsl_xt_scaled.to(pooled.dtype), noise_feat, global_ctx], dim=-1))
-            # c_s = fr_c_skip.view(-1, 1).to(pooled.dtype)
-            # c_o = fr_c_out.view(-1, 1).to(pooled.dtype)
-            # trsl_x0_centered = c_s * trsl_xt_centered.to(pooled.dtype) + c_o * F_theta
-            # trsl_x0_final    = trsl_x0_centered + trsl_mu.view(-1, 3).to(pooled.dtype)
+            # A1: interface-weighted antibody pooling. Weight each antibody residue
+            # by softmin distance to antigen CA, so contact residues dominate the
+            # pose context (the pose head now sees "where it docks", not just mean).
+            iface_feat = self._interface_pool(res_hidden, ca, ab_mask_bool, ag_b)  # [B, iface_dim]
 
             # TRSL: direct x0-prediction (normalized clean centered translation)
-            x0c_norm = self.trsl_head(torch.cat([pooled, trsl_xt_scaled.to(pooled.dtype), noise_feat, global_ctx], dim=-1))
+            trsl_in = torch.cat([pooled, trsl_xt_scaled.to(pooled.dtype), noise_feat, global_ctx, iface_feat], dim=-1)
+            x0c_norm = self.trsl_head(trsl_in)
             t_scale = trsl_scale.view(-1, 1).to(pooled.dtype)
             trsl_x0_final = x0c_norm * t_scale + trsl_mu.view(-1, 3).to(pooled.dtype)
 
             # ROTA: direct clean-frame prediction (x0-prediction on SO(3)), no composition.
             rota_xt_flat = rota_xt.reshape(rota_xt.shape[0], 9).to(dtype=pooled.dtype)
-            rota_feat = torch.cat([pooled, rota_xt_flat, noise_feat, global_ctx], dim=-1)
+            rota_feat = torch.cat([pooled, rota_xt_flat, noise_feat, global_ctx, iface_feat], dim=-1)
             updated_rota = self._gram_schmidt(self.rota_head(rota_feat))
 
             # rebuild global antibody coordinates from predicted clean pose

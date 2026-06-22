@@ -13,16 +13,15 @@ data:
   forward_chunk_size: 256
   max_antigen_len: 256  # 384
 
-
 model:
   ppi_ckpt: "/root/private_data/luog/codex/IgGM/checkpoints/esm_ppi_650m_ab.pth"
   design_ckpt: ""
-  igso3_buffer: "/root/private_data/luog/codex/IgGM/checkpoints/igso3_buffer.pth"
+  igso3_buffer: "/root/private_data/luog/codex/IgGM/checkpoints/igso3_buffer.pth" 
 
 optimizer:
-  lr: 1.0e-4
+  lr: 5.0e-4
   weight_decay: 1.0e-2
-  grad_clip: 5.0
+  grad_clip: 1.0
 
 scheduler:
   name: cosine
@@ -42,7 +41,7 @@ trainer:
   accelerator: gpu
   devices: [0] 
   log_every_n_steps: 10
-  accumulate_grad_batches: 1
+  accumulate_grad_batches: 4
   num_sanity_val_steps: 1
   strategy: ddp
   ddp_static_graph: false
@@ -51,12 +50,12 @@ trainer:
 wandb:
   disabled: false # true or false
   project: IgGM
-  run_name: Iggm_lightning_training_debug_one0620
+  run_name: Iggm_lightning_training_debug_one0621
   entity: "mllm-csu"
   api_key: "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"
 
 runtime:
-  output_dir: outputs/Iggm_lightning_training_debug_one0620
+  output_dir: outputs/Iggm_lightning_training_debug_one0621
   seed: 56
   resume: False
   run_test: true
@@ -70,3 +69,4 @@ stage_training:
   mix_cdr_all: 2
   lazy_cache_size: 128
   occupancy_mode: joint_predict
+

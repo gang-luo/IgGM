@@ -42,7 +42,7 @@ class OptimizerConfig:
     name: str = "adamw"
     lr: float = 1e-4
     weight_decay: float = 1e-2
-    betas: tuple[float, float] = (0.5, 0.999) # 0.9
+    betas: tuple[float, float] = (0.9, 0.999) # 0.9 / 0.5
     eps: float = 1e-8
 
 
@@ -123,6 +123,8 @@ class IgGMLightningModule(pl.LightningModule):
         self.stage_cfg = stage_cfg or StageTrainingConfig()
         self.atom14_sync = Atom14SeqSync()
         self._skip_optimizer_step_due_to_oom = False
+        # A4: prob of applying training-time self-conditioning per step (0 disables).
+        self.self_cond_prob = 0.0 # 0.5
 
     @staticmethod
     def _ddp_any_true(flag: bool) -> bool:
@@ -251,6 +253,10 @@ class IgGMLightningModule(pl.LightningModule):
 
     def _shared_step(self, batch: Dict[str, Any], stage: str) -> torch.Tensor:
         idx_step = int(batch["idx_step"])
+        # # train: importance-sample step (log-normal sigma) instead of dataloader's
+        # # uniform pick, to concentrate on the high-info SNR~1 band.
+        # if stage == "train" and hasattr(self.diffuser, "sample_step"):
+        #     idx_step = self.diffuser.sample_step()
         payload = batch.get("payload")
         if payload is None:
             raise RuntimeError("Dataset must provide resolved `payload` for lazy loading.")
@@ -258,12 +264,28 @@ class IgGMLightningModule(pl.LightningModule):
 
         self._apply_stage_mask(prot_data_curr, payload)
         inputs_addi = batch.get("inputs_addi")
-        
+
         local_fail = False
         inputs = outputs = loss_dict = None
 
         # try:
         inputs = self._build_inputs_cm(prot_data_curr, idx_step)
+
+        # A4: training-time self-conditioning (Chen et al. 2022). With prob
+        # self_cond_prob, run one no-grad forward to get x0_hat, then feed it back
+        # as conditioning (step all-zeros mode). The other fraction trains the
+        # cold-start path (inputs_addi=None) so inference without prior still works.
+        if (inputs_addi is None and stage == "train"
+                and self.self_cond_prob > 0.0 and random.random() < self.self_cond_prob):
+            with torch.no_grad():
+                out_sc = self.model(inputs, inputs_addi=None, chunk_size=batch.get("chunk_size"))
+            inputs_addi = {
+                "step": [0],
+                "sfea": out_sc["sfea"].detach(),
+                "pfea": out_sc["pfea"].detach(),
+                "cord": out_sc["3d"]["cord"][-1].detach(),
+            }
+
         outputs = self.model(inputs, inputs_addi=inputs_addi, chunk_size=batch.get("chunk_size"))
         loss_dict = self._compute_loss(inputs, outputs)
 

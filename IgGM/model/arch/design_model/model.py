@@ -9,7 +9,6 @@ from IgGM.model.layer import PPIEmbedding, ContactEmebedding, ChainRelativePosit
 from IgGM.model.layer.embedding import SinusoidalPositionEmbedding, RelativePositionEmbedding, StructEncoder, \
     RcEmbedNet
 from IgGM.model.module.evoformer import EvoformerStackSS
-from IgGM.protein.prot_constants import RESD_NAMES_1C
 from ..base_model import BaseModel
 from ..core.module import PairPredictor, StructureModule
 from ...build import MODEL_REGISTRY
@@ -27,8 +26,8 @@ class DesignModel(BaseModel):
             n_dims_sfea=192,  # number of dimensions in single features (D_s)
             n_dims_pfea=128,  # number of dimensions in pair features (D_p)
             n_dims_penc=64,  # number of dimensions in positional encodings
-            n_lyrs_2d=4,  # number of <EvoformerBlockSS> layers
-            n_lyrs_3d=2,  # number of <AF2SMod> layers
+            n_lyrs_2d=8,  # number of <EvoformerBlockSS> layers
+            n_lyrs_3d=4,  # number of <AF2SMod> layers
             # n_lyrs_2d=16,  # number of <EvoformerBlockSS> layers
             # n_lyrs_3d=8,  # number of <AF2SMod> layers
             pred_oxyg=True,  # whether to predict backbone oxygen atoms' 3D coordinates
@@ -201,7 +200,6 @@ class DesignModel(BaseModel):
           > pfea-i: initial pair features of size N x L x L x D_pi (for $x_{t + 1}$)
           > sfea-u: updated single features of size N x L x D_s (for $\hat{x}_{0}$)
           > pfea-u: updated pair features of size N x L x L x D_p (for $\hat{x}_{0}$)
-          > logt: residue type classification logits of size N x C x L (for $\hat{x}_{0}$)
           > cord: per-atom 3D coordinates of size N x L x M x 3 (for $\hat{x}_{0}$)
         """
         
@@ -223,7 +221,6 @@ class DesignModel(BaseModel):
                 inputs_sc = {
                     'sfea': outputs['sfea'].detach(),
                     'pfea': outputs['pfea'].detach(),
-                    'logt': outputs['1d'].permute(0, 2, 1).detach(),  # N x L x C
                     'cord': outputs['3d']['cord'][-1].detach(),
                 }
             else:
@@ -296,7 +293,7 @@ class DesignModel(BaseModel):
         # update single & pair features w/ self-conditioning inputs
         if inputs_sc is not None:
             rc_inputs = {
-                'sfea': inputs_sc['sfea'] + self.net['linear-lt-sd'](inputs_sc['logt']),
+                'sfea': inputs_sc['sfea'],
                 'pfea': inputs_sc['pfea'],
                 'cord': inputs_sc['cord'],
             }
@@ -309,7 +306,7 @@ class DesignModel(BaseModel):
 
         # AF2SMod
         region_metadata = self.__extract_region_metadata(inputs)
-        sfea_tns_st, cord_list, plddt_list, trsl_list, rota_list, loop_cords, pi_logits, clean_label_list = self.net['af2_smod'](
+        _, cord_list, plddt_list, trsl_list, rota_list, loop_cords, pi_logits, clean_label_list = self.net['af2_smod'](
             inputs['seq-p'], sfea_tns, pfea_tns, penc_tns,
             cord_tns_init=inputs['cord-p'],
             cmsk_tns_init=inputs['cmsk-p'],
@@ -317,11 +314,6 @@ class DesignModel(BaseModel):
             chunk_size=chunk_size,
             region_metadata=region_metadata,
         )
-
-        # predict denoised amino-acid sequences
-        sfea_tns_st = self.net['norm_aa'](sfea_tns_st)
-        logt_tns_aa = self.net['aa_pred'](sfea_tns_st)
-        logt_tns_aa = logt_tns_aa.permute(0, 2, 1)  # move classification logits to the 2nd dim.
 
         # predict inter-residue geometries
         logt_tns_cb, logt_tns_om, logt_tns_th, logt_tns_ph = self.net['da_pred'](pfea_tns)
@@ -334,7 +326,6 @@ class DesignModel(BaseModel):
             'sfea': sfea_tns,
             'mask': inputs['pmsk'],
             'pfea': pfea_tns,
-            '1d': logt_tns_aa,
             '2d': {
                 'cb': logt_tns_cb,
                 'om': logt_tns_om,
@@ -385,15 +376,6 @@ class DesignModel(BaseModel):
             pred_schn=False,
         )
 
-        # residue type predictor
-        net['norm_aa'] = nn.LayerNorm(self.n_dims_sfea)
-        net['aa_pred'] = nn.Linear(self.n_dims_sfea, len(RESD_NAMES_1C))
-        # net['aa_pred'] = nn.Sequential(
-        #     nn.Linear(self.n_dims_sfea, self.n_dims_sfea),
-        #     nn.ReLU(),
-        #     nn.Linear(self.n_dims_sfea, len(RESD_NAMES_1C))
-        # )
-
         # PairPredictor (auxiliary predictions for inter-residue geometries)
         net['da_pred'] = PairPredictor(
             c_z=self.n_dims_pfea,
@@ -401,7 +383,6 @@ class DesignModel(BaseModel):
         )
 
         # RcEmbedNet (for self-conditioning inputs)
-        net['linear-lt-sd'] = nn.Linear(len(RESD_NAMES_1C), self.n_dims_sfea)
         net['rc_embed-sd'] = RcEmbedNet(
             n_dims_mfea=self.n_dims_sfea,
             n_dims_pfea=self.n_dims_pfea,

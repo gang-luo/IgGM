@@ -151,15 +151,15 @@ class CDRLoopHead(nn.Module):
         atom_decoder_in = torch.cat([atom_feat, token_feat, xt_in], dim=-1)
         atom_hidden = self.atom_decoder(atom_decoder_in)
 
-        # ===== 纯残差输出 F_θ（无 c_skip/c_out，由外部 StructureModule 组装）=====
+        # =====  F_θ  =====
         F_theta = self.coord_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
         F_theta = F_theta * loop_atom_valid_mask.unsqueeze(-1).to(F_theta.dtype)
         # ========================================================================
 
-        # topology head（辅助损失，不变）
+        # topology head
         pi_logits = self.topology_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
 
-        # occupancy head（不变）
+        # occupancy head
         occ_raw = self.occ_head(token_feat).squeeze(-1)
         occ_logits = torch.flip(torch.cumsum(torch.flip(occ_raw, dims=[-1]), dim=-1), dims=[-1])
         occ_logits = occ_logits.masked_fill(~loop_valid_res_mask, -20.0)

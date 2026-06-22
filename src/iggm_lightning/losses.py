@@ -22,10 +22,14 @@ from openfold.utils.loss import find_structural_violations, violation_loss
 @dataclass
 class IgGMLossConfig:
     backbone_weight: float = 1.0
-    cdr_all_atom_weight: float = 0.2
-    vio_weight: float = 0.02
+    cdr_all_atom_weight: float = 5.0
     smooth_lddt_weight: float = 1.0
     bond_weight: float = 1.0
+    vio_weight: float = 0.02
+    # A3: min-SNR loss weighting (Hang et al. 2023). Off by default; enable when
+    # scaling to many samples to balance gradients across noise levels.
+    use_snr_weight: bool = False # 单样本关闭
+    snr_gamma: float = 5.0
 
 
 class IgGMPaperLoss:
@@ -214,6 +218,7 @@ class IgGMPaperLoss:
     # ----------------------------------------------------------------
     # 主 loss 函数
     # ----------------------------------------------------------------
+
     def _aligned_backbone_cdr_vio_loss(self, inputs: Dict, outputs: Dict) -> Dict:
         pred = outputs["3d"]["cord"][-1]
         atom14_tgt = self._ensure_batched(
@@ -225,11 +230,11 @@ class IgGMPaperLoss:
         ab_mask = self._normalize_res_mask(inputs["pmsk-ligand"], bsz, seq_len).to(pred.device)
         cdr_mask = self._normalize_res_mask(inputs["cdr_mask"], bsz, seq_len).to(pred.device)
 
-        # loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, cmsk, cdr_mask)
-        # loss_bond = self._compute_bond_loss(pred, atom14_tgt, cmsk, cdr_mask)
+        loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, cmsk, cdr_mask)
+        loss_bond = self._compute_bond_loss(pred, atom14_tgt, cmsk, cdr_mask)
         
-        loss_smooth_lddt = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-        loss_bond = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        # loss_smooth_lddt = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        # loss_bond = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
 
         loop_atom_valid_mask = inputs.get("loop_atom_supervise_mask", inputs["loop_atom_valid_mask"])
 
@@ -252,6 +257,10 @@ class IgGMPaperLoss:
             )
             loss_cdr = loss_cdr + w * loss_cdr_l
         loss_cdr = loss_cdr / weight_sum
+
+
+
+
 
         # FR backbone loss (multi-layer)
         loss_trsl = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
@@ -276,6 +285,15 @@ class IgGMPaperLoss:
             + self.cfg.smooth_lddt_weight * loss_smooth_lddt
         )
 
+        # A3: min-SNR weighting. Scales the whole loss per noise level so mid-sigma
+        # steps (which carry the learnable signal) are not drowned by high-sigma noise.
+        if self.cfg.use_snr_weight:
+            sigma = inputs["sigama_t"]["sigma_raw"].to(device=pred.device, dtype=pred.dtype).view(-1).clamp_min(1e-6)
+            sigma_data = inputs['anchor_frame_meta']['trsl_scale'].to(device=pred.device, dtype=pred.dtype).view(-1)
+            snr = (sigma_data / sigma) ** 2
+            w = torch.clamp(snr, max=self.cfg.snr_gamma) / (snr + 1.0)
+            total = total * w.mean()
+
         if self.idx_save % 50 == 0:
             import time
             ts = int(time.time())
@@ -283,7 +301,7 @@ class IgGMPaperLoss:
                 'perturb': inputs['cord-p'],
                 'pre': pred,
                 'clean': atom14_tgt,
-            }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S613_{ts}.pt')
+            }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S621_{ts}.pt')
         self.idx_save += 1
 
         return {
