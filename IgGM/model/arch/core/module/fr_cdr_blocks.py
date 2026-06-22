@@ -57,12 +57,12 @@ class FRBranch(nn.Module):
         )
 
         self.trsl_head = nn.Sequential(
-            nn.Linear(c_hidden + 3 + 32 + 9 + self.iface_dim, c_hidden),
+            nn.Linear(c_hidden + 3 + 9 + self.iface_dim, c_hidden),
             nn.SiLU(),
             nn.Linear(c_hidden, 3),              # normalized clean centered translation (x0)
         )
         self.rota_head = nn.Sequential(
-            nn.Linear(c_hidden + 9 + 32 + 9 + self.iface_dim, c_hidden),
+            nn.Linear(c_hidden + 9 + 9 + self.iface_dim, c_hidden),
             nn.SiLU(),
             nn.Linear(c_hidden, 6),              # clean frame 6D representation (x0 on SO(3))
         )
@@ -149,10 +149,9 @@ class FRBranch(nn.Module):
             pooled     = (res_hidden * mask_f).sum(dim=1) / denom   # [B, c_hidden]
             pooled     = self.pool_proj(pooled)                      # [B, c_hidden]
 
-
-            sigma = fr_sigma_trsl.view(-1).clamp_min(1e-8)
-            c_noise = 0.25 * torch.log(sigma)                        # Karras noise embedding
-            noise_feat = self.noise_embed(c_noise.unsqueeze(-1))     # [B, 32]
+            # sigma = fr_sigma_trsl.view(-1).clamp_min(1e-8)
+            # c_noise = 0.25 * torch.log(sigma)                        # Karras noise embedding
+            # noise_feat = self.noise_embed(c_noise.unsqueeze(-1))     # [B, 32]
 
             # global context: antigen is centered at origin, so ab_com encodes global pose
             ca = curr_coords[:, :, 1, :]                                  # [B, L, 3]
@@ -168,14 +167,16 @@ class FRBranch(nn.Module):
             iface_feat = self._interface_pool(res_hidden, ca, ab_mask_bool, ag_b)  # [B, iface_dim]
 
             # TRSL: direct x0-prediction (normalized clean centered translation)
-            trsl_in = torch.cat([pooled, trsl_xt_scaled.to(pooled.dtype), noise_feat, global_ctx, iface_feat], dim=-1)
-            x0c_norm = self.trsl_head(trsl_in)
+            trsl_in = torch.cat([pooled, trsl_xt_scaled.to(pooled.dtype), global_ctx, iface_feat], dim=-1)
+            # x0c_norm = self.trsl_head(trsl_in)
+            x0c_norm = trsl_xt_scaled.to(pooled.dtype) + self.trsl_head(trsl_in)
+
             t_scale = trsl_scale.view(-1, 1).to(pooled.dtype)
             trsl_x0_final = x0c_norm * t_scale + trsl_mu.view(-1, 3).to(pooled.dtype)
 
             # ROTA: direct clean-frame prediction (x0-prediction on SO(3)), no composition.
             rota_xt_flat = rota_xt.reshape(rota_xt.shape[0], 9).to(dtype=pooled.dtype)
-            rota_feat = torch.cat([pooled, rota_xt_flat, noise_feat, global_ctx, iface_feat], dim=-1)
+            rota_feat = torch.cat([pooled, rota_xt_flat, global_ctx, iface_feat], dim=-1)
             updated_rota = self._gram_schmidt(self.rota_head(rota_feat))
 
             # rebuild global antibody coordinates from predicted clean pose
@@ -194,6 +195,7 @@ class FRBranch(nn.Module):
             return {
                 'fr_coords':      updated,
                 'sfea_tns':       sfea_tns + global_delta_feat,
+                'trsl_xt_scaled':     x0c_norm,
                 'trsl':           trsl_x0_final,
                 'rota':           updated_rota,
                 'mask':           (denom.squeeze(-1) > 0).to(torch.bool),
@@ -274,7 +276,7 @@ class CDRFusionBlock(nn.Module):
         self,
         *,
         sfea_tns_for_cdr: torch.Tensor,     
-        sfea_tns_orig: torch.Tensor,        
+        sfea_tns_init: torch.Tensor,        
         encd_tns: torch.Tensor,
         fr_coords: torch.Tensor,     
      
@@ -298,21 +300,20 @@ class CDRFusionBlock(nn.Module):
         local_pos = torch.arange(loop_global_res_indices.shape[-1], device=sfea_tns_for_cdr.device, dtype=torch.long)
 
         loop_frame_rota, loop_frame_trsl = extract_trsl_rota_from_noisefr(
-            fr_coords.detach(),
+            fr_coords,
             loop_global_res_indices,
             loop_true_len,
             loop_left_anchor_idx,
             loop_right_anchor_idx,
         )
 
-        # =====================================================================
-        # P1 核心修改：CDR 使用 detach 后的 sfea（sfea_tns_for_cdr）
-        # =====================================================================
         loop_sfea = self._gather_loop_features(sfea_tns_for_cdr, loop_global_res_indices, loop_valid_res_mask)
+        loop_sfea_init = self._gather_loop_features(sfea_tns_init, loop_global_res_indices, loop_valid_res_mask)
         loop_encd = self._gather_loop_features(encd_tns, loop_global_res_indices, loop_valid_res_mask)
 
         cdr_pred = self.cdr_loop(
             loop_sfea=loop_sfea,
+            loop_sfea_init = loop_sfea_init,
             loop_encd=loop_encd,
             loop_xt_scaled=loop_xt_scaled,  
             loop_type_ids=loop_type_ids,
@@ -351,11 +352,12 @@ class CDRFusionBlock(nn.Module):
             pred_x0_local,
             loop_global_res_indices,
             loop_valid_res_mask,
-            sfea_tns_orig, 
+            sfea_tns_for_cdr, 
         )
 
         return {
             'cdr_pred': cdr_pred,
+            'loop_xt_scaled': x0_norm,
             'pred_x0_local': pred_x0_local, # Return physical coordinates for Loss
             'pred_loop_global': pred_loop_global,
             'loop_frame_rota': loop_frame_rota,

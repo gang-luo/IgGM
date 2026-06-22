@@ -231,10 +231,10 @@ class IgGMPaperLoss:
         cdr_mask = self._normalize_res_mask(inputs["cdr_mask"], bsz, seq_len).to(pred.device)
 
         loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, cmsk, cdr_mask)
-        loss_bond = self._compute_bond_loss(pred, atom14_tgt, cmsk, cdr_mask)
+        # loss_bond = self._compute_bond_loss(pred, atom14_tgt, cmsk, cdr_mask)
         
         # loss_smooth_lddt = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-        # loss_bond = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        loss_bond = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
 
         loop_atom_valid_mask = inputs.get("loop_atom_supervise_mask", inputs["loop_atom_valid_mask"])
 

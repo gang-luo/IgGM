@@ -110,7 +110,7 @@ class StructureModule(nn.Module):
             rota_xt = rota_xt.unsqueeze(0).expand(n_smpls, -1, -1).contiguous()
         # if trsl_xt.ndim == 1:
         #     trsl_xt = trsl_xt.unsqueeze(0).expand(n_smpls, -1)
-        rota_xt0 = rota_xt.detach().clone()
+        rota_x0 = rota_xt.detach().clone()
         # trsl_xt0 = trsl_xt.detach().clone()
 
         antibody_local_coords = region_metadata['antibody_local_coords'].to(device=device, dtype=dtype)
@@ -149,14 +149,19 @@ class StructureModule(nn.Module):
 
         cdr_xt_centered = region_metadata['cdr_meta']['cdr_xt_centered'].to(device=device, dtype=dtype)
 
-        # input feature normalization: network receives c_in-scaled (~N(0,1)) inputs
-        trsl_xt_scaled = trsl_xt_centered * fr_c_in.view(-1, 1) if fr_c_in.numel() > 1 else trsl_xt_centered * fr_c_in
-        loop_xt_scaled = cdr_xt_centered * cdr_c_in
+        # # input feature normalization: network receives c_in-scaled (~N(0,1)) inputs
+        # trsl_xt_scaled = trsl_xt_centered * fr_c_in.view(-1, 1) if fr_c_in.numel() > 1 else trsl_xt_centered * fr_c_in
+        # loop_xt_scaled = cdr_xt_centered * cdr_c_in
+
+        trsl_xt_scaled = trsl_xt_centered / trsl_scale
+        loop_xt_scaled = cdr_xt_centered / cdr_scale
+        loop_xt_scaled = loop_xt_scaled.unsqueeze(0)
 
         for layer_idx in range(n_lyrs):
             curr_coords = curr_coords.detach()
-            rota_xt_in = rota_xt0
-            # trsl_xt_in = trsl_xt0
+            rota_xt = rota_x0.detach()
+            trsl_xt_scaled = trsl_xt_scaled.detach()
+            loop_xt_scaled = loop_xt_scaled.detach()
 
             # 1. percpt_xt sfea
             if self.activation_checkpoint:
@@ -180,23 +185,24 @@ class StructureModule(nn.Module):
                 antigen_mask=antigen_mask,
                 curr_coords=curr_coords,
                 antibody_local_coords=antibody_local_coords,
-                rota_xt=rota_xt_in,
+                rota_xt=rota_xt,
                 trsl_xt_scaled=trsl_xt_scaled,     # c_in-scaled input for the head
                 trsl_mu=trsl_mu,
                 trsl_scale=trsl_scale,
                 fr_sigma_trsl=fr_sigma_trsl,
             )
-            fr_coords = fr_out['fr_coords']
-            sfea_tns = fr_out['sfea_tns']
-            pred_trsl  = fr_out['trsl']
-            pred_rota  = fr_out['rota']
+            # for cdr and save for loss
+            trsl_xt_scaled  = fr_out['trsl_xt_scaled']
+            rota_x0  = fr_out['rota']
+            trsl_x0  = fr_out['trsl']
 
-            sfea_tns_for_cdr = sfea_tns
+            sfea_tns_for_cdr = fr_out['sfea_tns']
+            fr_coords = fr_out['fr_coords']
 
             # 3. CDR
             cdr_out = self.net['cdr_fusion_block'](
                 sfea_tns_for_cdr=sfea_tns_for_cdr, 
-                sfea_tns_orig=sfea_tns, 
+                sfea_tns_init=sfea_tns_init, 
                 encd_tns=encd_tns,
                 fr_coords=fr_coords,
                 
@@ -220,6 +226,7 @@ class StructureModule(nn.Module):
             )
 
             curr_coords = cdr_out['merged_coords']
+            loop_xt_scaled = cdr_out['loop_xt_scaled']
             sfea_tns = cdr_out['sfea_after_cdr']
 
             # 4. pLDDT 
@@ -228,8 +235,8 @@ class StructureModule(nn.Module):
             # 5. maybe create a dta for abag-binding?
 
             cord_list.append(curr_coords.clone())
-            trsl_list.append(pred_trsl.clone())
-            rota_list.append(pred_rota.clone())
+            trsl_list.append(trsl_x0.clone())
+            rota_list.append(rota_x0.clone())
             loop_cords.append(cdr_out['pred_x0_local'].clone())
             plddt_list.append(plddt_dict)
 
