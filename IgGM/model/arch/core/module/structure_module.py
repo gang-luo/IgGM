@@ -117,14 +117,12 @@ class StructureModule(nn.Module):
         if antibody_local_coords.ndim == 3:
             antibody_local_coords = antibody_local_coords.unsqueeze(0).expand(n_smpls, -1, -1, -1).clone()
 
-        # 原始带噪 CDR 局部坐标（在循环内不更新）
         loop_xt_local = region_metadata['noisy_loop_local_coords'].to(device=device, dtype=dtype)
         if loop_xt_local.ndim == 4:
             loop_xt_local = loop_xt_local.unsqueeze(0).expand(n_smpls, -1, -1, -1, -1).clone()
 
         cdr_mask = self._expand_batch_mask(region_metadata['cdr_mask'].to(device=device, dtype=torch.bool), n_smpls)
         antigen_mask = ~antibody_mask
-
 
         fr_sigma_trsl = region_metadata['anchor_frame_meta']['fr_sigma_trsl'].detach().clone()
         if fr_sigma_trsl.ndim == 1:
@@ -152,6 +150,9 @@ class StructureModule(nn.Module):
         # input feature normalization: network receives c_in-scaled (~N(0,1)) inputs
         trsl_xt_scaled = trsl_xt_centered * fr_c_in.view(-1, 1) if fr_c_in.numel() > 1 else trsl_xt_centered * fr_c_in
         loop_xt_scaled = cdr_xt_centered * cdr_c_in
+
+        trsl_xt_scaled = torch.zeros_like(trsl_xt_scaled)
+        loop_xt_scaled = torch.zeros_like(loop_xt_scaled)
 
         for layer_idx in range(n_lyrs):
             curr_coords = curr_coords.detach()
@@ -196,7 +197,7 @@ class StructureModule(nn.Module):
             # 3. CDR
             cdr_out = self.net['cdr_fusion_block'](
                 sfea_tns_for_cdr=sfea_tns_for_cdr, 
-                sfea_tns_orig=sfea_tns, 
+                sfea_tns_init=sfea_tns_init, 
                 encd_tns=encd_tns,
                 fr_coords=fr_coords,
                 

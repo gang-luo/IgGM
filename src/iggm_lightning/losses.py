@@ -28,7 +28,7 @@ class IgGMLossConfig:
     vio_weight: float = 0.02
     # A3: min-SNR loss weighting (Hang et al. 2023). Off by default; enable when
     # scaling to many samples to balance gradients across noise levels.
-    use_snr_weight: bool = False # 单样本关闭
+    use_snr_weight: bool = False 
     snr_gamma: float = 5.0
 
 
@@ -231,10 +231,10 @@ class IgGMPaperLoss:
         cdr_mask = self._normalize_res_mask(inputs["cdr_mask"], bsz, seq_len).to(pred.device)
 
         loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, cmsk, cdr_mask)
-        loss_bond = self._compute_bond_loss(pred, atom14_tgt, cmsk, cdr_mask)
+        # loss_bond = self._compute_bond_loss(pred, atom14_tgt, cmsk, cdr_mask)
         
         # loss_smooth_lddt = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-        # loss_bond = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        loss_bond = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
 
         loop_atom_valid_mask = inputs.get("loop_atom_supervise_mask", inputs["loop_atom_valid_mask"])
 
@@ -245,20 +245,26 @@ class IgGMPaperLoss:
 
         # CDR x0-space loss: per-layer linear weight (refinement emphasis, sigma-independent)
         loss_cdr = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-        weight_sum = 0.0
-        for l in range(n_layers):
-            w = float(l + 1)
-            weight_sum += w
-            loss_cdr_l = self._cdr_all_atom_mse(
-                loop_cords_list[l],
+        # weight_sum = 0.0
+        # for l in range(n_layers):
+        #     w = float(l + 1)
+        #     weight_sum += w
+        #     loss_cdr_l = self._cdr_all_atom_mse(
+        #         loop_cords_list[l],
+        #         clean_loop_local_gt,
+        #         loop_atom_valid_mask,
+        #         cdr_scale,
+        #     )
+        #     loss_cdr = loss_cdr + w * loss_cdr_l
+        # loss_cdr = loss_cdr / weight_sum
+
+
+        loss_cdr = self._cdr_all_atom_mse(
+                loop_cords_list[-1],
                 clean_loop_local_gt,
                 loop_atom_valid_mask,
                 cdr_scale,
             )
-            loss_cdr = loss_cdr + w * loss_cdr_l
-        loss_cdr = loss_cdr / weight_sum
-
-
 
 
 
@@ -278,21 +284,36 @@ class IgGMPaperLoss:
         loss_backbone = loss_backbone / n_layers
 
         loss_vio = torch.zeros_like(loss_backbone)
+
+        # A3: per-object min-SNR weighting (Hang et al. 2023).
+        # Each diffused object uses ITS OWN (sigma_data, sigma_t) -> w = min(SNR,gamma)/(SNR+1).
+        # trsl: sigma_t=fr_sigma_trsl, sigma_data=trsl_scale.
+        # cdr : sigma_t=cdr_sigma,     sigma_data=cdr_scale.
+        # rota: SO(3) has no Euclidean SNR -> weight = 1 (no SNR reweight).
+        if self.cfg.use_snr_weight:
+            def _min_snr(sig_t, sig_d):
+                sig_t = sig_t.to(device=pred.device, dtype=pred.dtype).view(-1).clamp_min(1e-6)
+                sig_d = sig_d.to(device=pred.device, dtype=pred.dtype).view(-1).clamp_min(1e-6)
+                snr = (sig_d / sig_t) ** 2
+                return (torch.clamp(snr, max=self.cfg.snr_gamma) / (snr + 1.0)).mean()
+
+            w_trsl = _min_snr(inputs['anchor_frame_meta']['fr_sigma_trsl'],
+                              inputs['anchor_frame_meta']['trsl_scale'])
+            w_cdr  = _min_snr(inputs['cdr_meta']['cdr_sigma'],
+                              inputs['cdr_meta']['cdr_scale'])
+            w_rota = 1.0   # SO(3): no Euclidean SNR reweight
+        else:
+            w_trsl = w_cdr = w_rota = 1.0
+
+        # backbone = w_rota * rota + w_trsl * trsl (per-object weighted, then summed)
+        loss_backbone_w = 2.0 * w_rota * loss_rota + w_trsl * loss_trsl
+
         total = (
-            self.cfg.backbone_weight * loss_backbone
-            + self.cfg.cdr_all_atom_weight * loss_cdr
+            self.cfg.backbone_weight * loss_backbone_w
+            + self.cfg.cdr_all_atom_weight * w_cdr * loss_cdr
             + self.cfg.bond_weight * loss_bond
             + self.cfg.smooth_lddt_weight * loss_smooth_lddt
         )
-
-        # A3: min-SNR weighting. Scales the whole loss per noise level so mid-sigma
-        # steps (which carry the learnable signal) are not drowned by high-sigma noise.
-        if self.cfg.use_snr_weight:
-            sigma = inputs["sigama_t"]["sigma_raw"].to(device=pred.device, dtype=pred.dtype).view(-1).clamp_min(1e-6)
-            sigma_data = inputs['anchor_frame_meta']['trsl_scale'].to(device=pred.device, dtype=pred.dtype).view(-1)
-            snr = (sigma_data / sigma) ** 2
-            w = torch.clamp(snr, max=self.cfg.snr_gamma) / (snr + 1.0)
-            total = total * w.mean()
 
         if self.idx_save % 50 == 0:
             import time

@@ -86,29 +86,15 @@ class Diffuser:
         sigmas = (self.sigma_min**(1/self.rho) + step_indices * (self.sigma_max**(1/self.rho) - self.sigma_min**(1/self.rho))) ** self.rho
         self.sigmas = sigmas.float()
 
-        # # EDM-style importance sampling over steps: weight ~ log-normal in sigma,
-        # # centered at sigma_data(~25) so most steps land in the high-info SNR~1 band
-        # # instead of the near-clean / near-pure-noise tails (uniform-step is bad here).
-        # self.sigma_sample_mean = math.log(25.0)   # center at data scale
-        # self.sigma_sample_std = 1.0               # ~1 decade spread
-        # log_s = torch.log(self.sigmas[1:].clamp_min(1e-8).double())
-        # w = torch.exp(-0.5 * ((log_s - self.sigma_sample_mean) / self.sigma_sample_std) ** 2)
-        # self.step_probs = (w / w.sum()).float()   # prob over steps 1..n_steps
-
         # 1. Basic Data and Statistical Preparation (Add CDR stats alongside TRSL)
         self.trsl_mu = torch.tensor([-0.2222, 0.9051, 0.1434], dtype=torch.float32)
         self.trsl_scale = torch.tensor(26.0823, dtype=torch.float32) # std (sigma_data)
 
         # Example CDR stats (Replace with your actual computed stats)
         self.cdr_mu = torch.tensor([0,0,0], dtype=torch.float32) 
-        self.cdr_scale = torch.tensor(6, dtype=torch.float32) # std (sigma_data)
+        self.cdr_scale = torch.tensor(6.0, dtype=torch.float32) # std (sigma_data)
 
         self.__build_igso3_list_ve()
-
-    # def sample_step(self):
-    #     """Importance-sample a diffusion step from the log-normal sigma weights."""
-    #     idx = torch.multinomial(self.step_probs, 1).item() + 1   # steps are 1..n_steps
-    #     return int(idx)
 
     def _sample_probabilities(self, aa_seq_orig, pmsk_vec, idxs_step, device):
         """Sample noisy residue-type distributions; shared by legacy and fr_cdr_sync modes."""

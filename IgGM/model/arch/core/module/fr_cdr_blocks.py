@@ -68,10 +68,8 @@ class FRBranch(nn.Module):
         )
         self.delta_feat = nn.Linear(c_hidden, c_s)
 
-        # trsl: 小初始化即可（目标 O(1)）
         nn.init.zeros_(self.trsl_head[-1].weight)
         nn.init.zeros_(self.trsl_head[-1].bias)
-        # rota: 权重置零 + bias 设为 identity 帧前两列，保证初始输出是合法旋转(单位阵)
         nn.init.zeros_(self.rota_head[-1].weight)
         with torch.no_grad():
             self.rota_head[-1].bias.copy_(torch.tensor([1., 0., 0., 0., 1., 0.]))
@@ -198,10 +196,6 @@ class FRBranch(nn.Module):
                 'rota':           updated_rota,
                 'mask':           (denom.squeeze(-1) > 0).to(torch.bool),
             }
-    
-# ---------------------------------------------------------------------------
-# CDRFusionBlock（关键修改）
-# ---------------------------------------------------------------------------
 
 class CDRFusionBlock(nn.Module):
     """CDR denoise + FR/CDR merge + output packing in one block.
@@ -274,7 +268,7 @@ class CDRFusionBlock(nn.Module):
         self,
         *,
         sfea_tns_for_cdr: torch.Tensor,     
-        sfea_tns_orig: torch.Tensor,        
+        sfea_tns_init: torch.Tensor,        
         encd_tns: torch.Tensor,
         fr_coords: torch.Tensor,     
      
@@ -309,6 +303,8 @@ class CDRFusionBlock(nn.Module):
         # P1 核心修改：CDR 使用 detach 后的 sfea（sfea_tns_for_cdr）
         # =====================================================================
         loop_sfea = self._gather_loop_features(sfea_tns_for_cdr, loop_global_res_indices, loop_valid_res_mask)
+        loop_sfea_init = self._gather_loop_features(sfea_tns_init, loop_global_res_indices, loop_valid_res_mask)
+        loop_sfea = loop_sfea + loop_sfea_init
         loop_encd = self._gather_loop_features(encd_tns, loop_global_res_indices, loop_valid_res_mask)
 
         cdr_pred = self.cdr_loop(
@@ -346,12 +342,12 @@ class CDRFusionBlock(nn.Module):
             loop_atom_valid_mask,
         )
 
-        # sfea 反馈（写回 sfea_tns_orig，保持梯度流）
+        # sfea 写回 sfea_tns_orig
         sfea_after_cdr = self._feedback_sfea(
             pred_x0_local,
             loop_global_res_indices,
             loop_valid_res_mask,
-            sfea_tns_orig, 
+            sfea_tns_for_cdr, 
         )
 
         return {

@@ -1,16 +1,16 @@
 
 data:
-  metadata: data/sabdab_2603/processed/sabdab_2603/metadata.json
-  pdb_dir: data/sabdab_2603/processed/pdb
-  samples_dir: data/sabdab_2603/processed/sabdab_2603/samples
-  train_ids: data/sabdab_2603/processed/split_onetest/train_prot_ids.txt
-  val_ids: data/sabdab_2603/processed/split_onetest/val_prot_ids.txt
-  test_ids: data/sabdab_2603/processed/split_onetest/test_prot_ids.txt
-  train_clusters: data/sabdab_2603/processed/split_onetest/train_prot_cluster.txt
+  metadata: data/sabdab/sabdab/metadata.json
+  pdb_dir: data/sabdab/pdb
+  samples_dir: data/sabdab/sabdab/samples
+  train_ids: data/sabdab/sabdab_file/split_debug_one/train_prot_ids.txt
+  val_ids: data/sabdab/sabdab_file/split_debug_one/val_prot_ids.txt
+  test_ids: data/sabdab/sabdab_file/split_debug_one/test_prot_ids.txt
+  train_clusters: data/sabdab/sabdab_file/split_debug_one/train_prot_cluster.txt
   batch_size: 1
   num_workers: 1
   n_steps: 200
-  forward_chunk_size: 128
+  forward_chunk_size: 256
   max_antigen_len: 256  # 384
 
 model:
@@ -22,9 +22,15 @@ model:
   igso3_buffer: "/root/private_data/luog/codex/IgGM/checkpoints/igso3_buffer.pth"
 
 optimizer:
-  lr: 5.0e-4
+  lr: 1.0e-4
   weight_decay: 1.0e-2
-  grad_clip: 10.0
+  grad_clip: 1.0
+
+scheduler:
+  name: cosine
+  t_max: 500
+  eta_min: 1.0e-6
+  warmup_steps: 20
 
 loss:
   # gamma: 0.8
@@ -54,7 +60,7 @@ wandb:
 
 
 runtime:
-  output_dir: outputs/lightning_train
+  output_dir: outputs/Iggm_lightning_training_debug_one0621
   seed: 56
   resume: False
   run_test: true
@@ -68,4 +74,4 @@ stage_training:
   mix_cdr_all: 2
   lazy_cache_size: 128
   occupancy_mode: joint_predict
-  
+
