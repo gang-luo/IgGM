@@ -229,30 +229,9 @@ class CDRFusionBlock(nn.Module):
 
     @staticmethod
     def _local_to_global_loop_coords(coords_local, loop_frame_rota, loop_frame_trsl, loop_atom_valid_mask):
-        """
-        Convert loop-local coordinates to global coordinates.
-        
-        Args:
-            coords_local: [B, N_loop, L_max, 14, 3] - local coordinates
-            loop_frame_rota: [B, N_loop, 3, 3] - rotation matrices
-            loop_frame_trsl: [B, N_loop, 3] - translation vectors
-            loop_atom_valid_mask: [B, N_loop, L_max, 14] - valid atom mask
-            
-        Returns:
-            global_coords: [B, N_loop, L_max, 14, 3] - global coordinates
-            
-        Formula: global = local @ R^T + t
-        """
-        # Rotate: local @ R^T
-        rotated = torch.einsum('bnlac,bndc->bnlad', coords_local, loop_frame_rota)
-        
-        # Translate
-        t_expanded = loop_frame_trsl.unsqueeze(2).unsqueeze(3)  # [B, N_loop, 1, 1, 3]
-        global_coords = rotated + t_expanded
-        
-        # Apply mask
+        global_coords = torch.matmul(coords_local, loop_frame_rota.transpose(-1, -2).unsqueeze(2))
+        global_coords = global_coords + loop_frame_trsl.unsqueeze(-2).unsqueeze(-2)
         return global_coords * loop_atom_valid_mask.unsqueeze(-1).to(global_coords.dtype)
-
 
     def _feedback_sfea(self, pred_x0_local, loop_global_res_indices, loop_valid_res_mask, sfea_tns):
         bsz = pred_x0_local.shape[0]
@@ -336,7 +315,7 @@ class CDRFusionBlock(nn.Module):
             cdr_sigma=cdr_sigma,
         )
 
-        x0_norm = cdr_pred['x0_norm']
+        x0_norm = cdr_pred['F_theta']
         # direct x0-prediction: de-normalize and add mean
         c_scale = cdr_scale.view(1, 1, 1, 1, 1).to(dtype=x0_norm.dtype)
         c_mu    = cdr_mu.view(1, 1, 1, 1, 3).to(dtype=x0_norm.dtype)

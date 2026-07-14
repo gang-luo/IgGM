@@ -33,6 +33,30 @@ class StructureMetrics:
         tgt = tgt.float()
         return torch.sqrt(((pred - tgt) ** 2).sum(dim=-1).mean().clamp_min(1e-8))
 
+    # @staticmethod
+    # def _kabsch_align(pred: torch.Tensor, tgt: torch.Tensor):
+    #     pred = pred.float()
+    #     tgt = tgt.float()
+
+    #     pred_mean = pred.mean(dim=0, keepdim=True)
+    #     tgt_mean = tgt.mean(dim=0, keepdim=True)
+
+    #     pred_c = pred - pred_mean
+    #     tgt_c = tgt - tgt_mean
+
+    #     h = (pred_c.transpose(0, 1) @ tgt_c).float()
+    #     u, _, vh = torch.linalg.svd(h, full_matrices=False)
+    #     v = vh.transpose(-2, -1)
+
+    #     r = (v @ u.transpose(0, 1)).float()
+    #     if torch.det(r.float()) < 0:
+    #         v = v.clone()
+    #         v[:, -1] *= -1
+    #         r = (v @ u.transpose(0, 1)).float()
+
+    #     pred_aligned = pred_c @ r + tgt_mean
+    #     return pred_aligned.float(), tgt.float()
+
     @staticmethod
     def _kabsch_align(pred: torch.Tensor, tgt: torch.Tensor):
         pred = pred.float()
@@ -44,17 +68,19 @@ class StructureMetrics:
         pred_c = pred - pred_mean
         tgt_c = tgt - tgt_mean
 
-        h = (pred_c.transpose(0, 1) @ tgt_c).float()
-        u, _, vh = torch.linalg.svd(h, full_matrices=False)
-        v = vh.transpose(-2, -1)
+        h = pred_c.transpose(0, 1) @ tgt_c
+        u, _, vh = torch.linalg.svd(h.float(), full_matrices=False)
 
-        r = (v @ u.transpose(0, 1)).float()
-        if torch.det(r.float()) < 0:
-            v = v.clone()
-            v[:, -1] *= -1
-            r = (v @ u.transpose(0, 1)).float()
+        d = torch.ones(3, device=h.device, dtype=h.dtype)
+        d[-1] = torch.where(
+            torch.det(u @ vh) < 0,
+            h.new_tensor(-1.0),
+            h.new_tensor(1.0),
+        )
+        r = u @ torch.diag(d) @ vh
 
         pred_aligned = pred_c @ r + tgt_mean
+        
         return pred_aligned.float(), tgt.float()
 
     @staticmethod

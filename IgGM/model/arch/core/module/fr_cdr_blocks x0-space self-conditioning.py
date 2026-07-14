@@ -209,6 +209,9 @@ class CDRFusionBlock(nn.Module):
     def __init__(self, c_s: int = 384, max_positions: int = 64):
         super().__init__()
         self.cdr_loop = CDRLoopHead(c_s=c_s, max_positions=max_positions)
+
+        self.refine_step_scale = 1.0
+
         self.loop_feedback = nn.Sequential(
             nn.LayerNorm(14 * 3),
             nn.Linear(14 * 3, c_s),
@@ -309,6 +312,7 @@ class CDRFusionBlock(nn.Module):
         cdr_mu: torch.Tensor,
         cdr_scale: torch.Tensor,
         cdr_sigma:torch.Tensor,
+        prev_x0_local: torch.Tensor | None = None,
     ):
         local_pos = torch.arange(loop_global_res_indices.shape[-1], device=sfea_tns_for_cdr.device, dtype=torch.long)
 
@@ -325,6 +329,31 @@ class CDRFusionBlock(nn.Module):
         loop_sfea = loop_sfea + loop_sfea_init
         loop_encd = self._gather_loop_features(encd_tns, loop_global_res_indices, loop_valid_res_mask)
 
+        mask = loop_atom_valid_mask.unsqueeze(-1).to(loop_xt_scaled.dtype)
+
+        c_scale = cdr_scale.view(1, 1, 1, 1, 1).to(dtype=loop_xt_scaled.dtype)
+        c_mu = cdr_mu.view(1, 1, 1, 1, 3).to(dtype=loop_xt_scaled.dtype)
+
+        if prev_x0_local is None:
+            prev_x0_scaled = torch.zeros_like(loop_xt_scaled)
+            has_prev = torch.zeros(
+                loop_valid_res_mask.shape + (1,),
+                device=loop_xt_scaled.device,
+                dtype=loop_xt_scaled.dtype,
+            )
+        else:
+            prev_x0_local = prev_x0_local.to(
+                device=loop_xt_scaled.device,
+                dtype=loop_xt_scaled.dtype,
+            )
+            prev_centered = (prev_x0_local - c_mu) * mask
+            prev_x0_scaled = prev_centered / c_scale.clamp_min(1e-6)
+            has_prev = torch.ones(
+                loop_valid_res_mask.shape + (1,),
+                device=loop_xt_scaled.device,
+                dtype=loop_xt_scaled.dtype,
+            )
+            
         cdr_pred = self.cdr_loop(
             loop_sfea=loop_sfea,
             loop_encd=loop_encd,
@@ -334,14 +363,36 @@ class CDRFusionBlock(nn.Module):
             loop_valid_res_mask=loop_valid_res_mask,
             loop_atom_valid_mask=loop_atom_valid_mask,
             cdr_sigma=cdr_sigma,
+            prev_x0_scaled=prev_x0_scaled,
+            has_prev=has_prev,
         )
 
-        x0_norm = cdr_pred['x0_norm']
-        # direct x0-prediction: de-normalize and add mean
-        c_scale = cdr_scale.view(1, 1, 1, 1, 1).to(dtype=x0_norm.dtype)
-        c_mu    = cdr_mu.view(1, 1, 1, 1, 3).to(dtype=x0_norm.dtype)
-        pred_x0_physical = x0_norm * c_scale + c_mu
-        pred_x0_local = pred_x0_physical * loop_atom_valid_mask.unsqueeze(-1).to(pred_x0_physical.dtype)
+        # x0_norm = cdr_pred['F_theta']
+        # # direct x0-prediction: de-normalize and add mean
+        # c_scale = cdr_scale.view(1, 1, 1, 1, 1).to(dtype=x0_norm.dtype)
+        # c_mu    = cdr_mu.view(1, 1, 1, 1, 3).to(dtype=x0_norm.dtype)
+        # pred_x0_physical = x0_norm * c_scale + c_mu
+        # pred_x0_local = pred_x0_physical * loop_atom_valid_mask.unsqueeze(-1).to(pred_x0_physical.dtype)
+
+        if prev_x0_local is None:
+            sigma = cdr_sigma.view(-1, 1, 1, 1, 1).to(dtype=loop_xt_scaled.dtype)
+            sigma_geom = torch.as_tensor(0.75, device=sigma.device, dtype=sigma.dtype)
+            geom_gate = sigma_geom.pow(2) / (sigma.pow(2) + sigma_geom.pow(2))
+            c_skip_eff = c_skip * geom_gate
+
+
+            # First layer: coarse denoise from original x_t.
+            # If you already use geometry-gated c_skip, pass the gated c_skip here.
+            F_theta = cdr_pred["F_theta"]
+            pred_x0_centered = c_skip_eff * cdr_xt_centered + c_out * F_theta
+        else:
+            # Later layers: deterministic x0-space refinement.
+            # No EDM assembly on prev_x0.
+            prev_centered = (prev_x0_local.to(dtype=loop_xt_scaled.dtype) - c_mu) * mask
+            delta_x0 = self.refine_step_scale * cdr_pred["delta_norm"]
+            pred_x0_centered = prev_centered + delta_x0
+
+        pred_x0_local = (pred_x0_centered + c_mu) * mask
 
         # Global coordinate mapping using anchor frame
         pred_loop_global = self._local_to_global_loop_coords(

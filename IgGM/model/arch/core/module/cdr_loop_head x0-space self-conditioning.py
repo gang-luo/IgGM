@@ -32,12 +32,25 @@ class CDRLoopHead(nn.Module):
             nn.Linear(c_token, c_token),
         )
 
-        # xt_scaled + token_cond + atom_mask
+        # xt_scaled + prev_x0_scaled + token_cond + atom_mask + has_prev
+        atom_encoder_in_dim = n_atom * 3 + n_atom * 3 + c_token + n_atom + 1
+
         self.atom_encoder = nn.Sequential(
-            nn.LayerNorm(n_atom * 3 + c_token + n_atom),
-            nn.Linear(n_atom * 3 + c_token + n_atom, c_atom),
+            nn.LayerNorm(atom_encoder_in_dim),
+            nn.Linear(atom_encoder_in_dim, c_atom),
             nn.ReLU(),
             nn.Linear(c_atom, c_atom),
+        )
+
+        # atom_feat + token_feat + xt_scaled + prev_x0_scaled
+        atom_decoder_in_dim = c_atom + c_token + n_atom * 3 + n_atom * 3
+
+        self.atom_decoder = nn.Sequential(
+            nn.LayerNorm(atom_decoder_in_dim),
+            nn.Linear(atom_decoder_in_dim, c_atom),
+            nn.ReLU(),
+            nn.Linear(c_atom, c_atom),
+            nn.ReLU(),
         )
 
         self.token_trunk = nn.Sequential(
@@ -47,16 +60,15 @@ class CDRLoopHead(nn.Module):
             nn.Linear(c_token, c_token),
         )
 
-        self.atom_decoder = nn.Sequential(
-            nn.LayerNorm(c_atom + c_token + n_atom * 3),
-            nn.Linear(c_atom + c_token + n_atom * 3, c_atom),
-            nn.ReLU(),
-            nn.Linear(c_atom, c_atom),
-            nn.ReLU(),
-        )
-
         #  F_θ
-        self.coord_head = nn.Linear(c_atom, n_atom * 3)
+        self.coord_head = nn.Linear(c_atom, n_atom * 3)   # coarse x0 / EDM residual
+        self.delta_head = nn.Linear(c_atom, n_atom * 3)   # x0-space refinement delta
+
+        nn.init.zeros_(self.coord_head.weight)
+        nn.init.zeros_(self.coord_head.bias)
+        nn.init.zeros_(self.delta_head.weight)
+        nn.init.zeros_(self.delta_head.bias)
+
         self.occ_head = nn.Linear(c_token, 1)
 
         self.spatial_negotiator = nn.MultiheadAttention(c_token, num_heads=8, batch_first=True)
@@ -88,6 +100,8 @@ class CDRLoopHead(nn.Module):
         loop_valid_res_mask: torch.Tensor,  # [B, N_loop, L_max] bool
         loop_atom_valid_mask: torch.Tensor, # [B, N_loop, L_max, N_atom] bool
         cdr_sigma: torch.Tensor,       
+        prev_x0_scaled: torch.Tensor | None = None,
+        has_prev: torch.Tensor | None = None,
     ) -> dict:
         bsz, n_loop, lmax = loop_xt_scaled.shape[:3]
         device, dtype = loop_sfea.device, loop_sfea.dtype
@@ -107,12 +121,31 @@ class CDRLoopHead(nn.Module):
         )
         token_cond = (token_cond + self.noise_to_token(noise_feat)) * loop_valid_res_mask.unsqueeze(-1).to(dtype)
 
-        # loop_xt_scaled 已在外部完成 c_in 缩放，方差 ~O(1)，直接 reshape 使用
-        xt_in = loop_xt_scaled.reshape(bsz, n_loop, lmax, -1)   # [B, N_loop, L_max, N_atom*3]
+        xt_in = loop_xt_scaled.reshape(bsz, n_loop, lmax, -1)
         atom_mask = loop_atom_valid_mask.to(dtype)
 
+        if prev_x0_scaled is None:
+            prev_x0_scaled = torch.zeros_like(loop_xt_scaled)
+
+        prev_in = prev_x0_scaled.reshape(bsz, n_loop, lmax, -1)
+
+        if has_prev is None:
+            has_prev = torch.zeros(
+                bsz, n_loop, lmax, 1,
+                device=device,
+                dtype=dtype,
+            )
+        else:
+            has_prev = has_prev.to(device=device, dtype=dtype)
+            if has_prev.ndim == 3:
+                has_prev = has_prev.unsqueeze(-1)
+
+
         # atom encoder
-        atom_encoder_in = torch.cat([xt_in, token_cond, atom_mask], dim=-1)
+        atom_encoder_in = torch.cat(
+            [xt_in, prev_in, token_cond, atom_mask, has_prev],
+            dim=-1,
+        )
         atom_feat = self.atom_encoder(atom_encoder_in)
         atom_feat = atom_feat * loop_valid_res_mask.unsqueeze(-1).to(dtype)
 
@@ -128,13 +161,18 @@ class CDRLoopHead(nn.Module):
         token_feat = token_feat * loop_valid_res_mask.unsqueeze(-1).to(dtype)
 
         # token -> atom decoding
-        atom_decoder_in = torch.cat([atom_feat, token_feat, xt_in], dim=-1)
+        atom_decoder_in = torch.cat(
+            [atom_feat, token_feat, xt_in, prev_in],
+            dim=-1,
+        )
+
         atom_hidden = self.atom_decoder(atom_decoder_in)
 
-        # =====  F_θ  =====
         x0_norm = self.coord_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
         x0_norm = x0_norm * loop_atom_valid_mask.unsqueeze(-1).to(x0_norm.dtype)
-        # ========================================================================
+
+        delta_norm = self.delta_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
+        delta_norm = delta_norm * loop_atom_valid_mask.unsqueeze(-1).to(delta_norm.dtype)
 
         # topology head
         pi_logits = self.topology_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
@@ -145,8 +183,9 @@ class CDRLoopHead(nn.Module):
         occ_logits = occ_logits.masked_fill(~loop_valid_res_mask, -20.0)
 
         return {
-            'x0_norm': x0_norm,               
-            'pred_occupancy_logits': occ_logits,
-            'loop_update_feat': token_feat * loop_valid_res_mask.unsqueeze(-1).to(token_feat.dtype),
-            'pi_logits': pi_logits,
+            "F_theta": x0_norm,
+            "delta_norm": delta_norm,
+            "pred_occupancy_logits": occ_logits,
+            "loop_update_feat": token_feat * loop_valid_res_mask.unsqueeze(-1).to(token_feat.dtype),
+            "pi_logits": pi_logits,
         }

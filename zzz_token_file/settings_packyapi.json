@@ -1,0 +1,17 @@
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-BPER9fDw2BxgDKf8qATdA09lVRloUKBoKGiNazmEJ3Kmi18e",
+    "ANTHROPIC_BASE_URL": "https://www.packyapi.com",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5-20251001",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "claude-haiku",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-fable-5",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "claude-fable-5",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-haiku-4-5-20251001",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "claude-haiku",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"
+  },
+  "model": "opus",
+  "effortLevel": "high"
+}

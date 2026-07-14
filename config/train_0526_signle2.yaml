@@ -23,14 +23,14 @@ model:
   igso3_buffer: "/root/private_data/luog/codex/IgGM/checkpoints/igso3_buffer.pth"
 
 optimizer:
-  lr: 5.0e-4
+  lr: 1.0e-4
   weight_decay: 1.0e-2
   grad_clip: 10.0
 
 scheduler:
   name: cosine
   t_max: 1000
-  eta_min: 5.0e-6
+  eta_min: 1.0e-6
 
 loss:
   vio_weight: 0.02

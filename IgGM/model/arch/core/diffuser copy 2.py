@@ -54,7 +54,7 @@ class Diffuser:
         self.fr_noise_scale_trsl = float(1.0)
         self.fr_noise_scale_rota =  float(1.0)
         # CDR sigma_data~24.7; coef 1.0 -> sigma_cdr up to 3x sigma_data (from-scratch denoise)
-        self.cdr_local_noise_scale =  float(0.25) # 1.0
+        self.cdr_local_noise_scale =  float(0.1) # 1.0
 
         # rota angle-noise schedule (run & __build_igso3_list_ve must match)
         self.rota_noise_factor = 0.025
@@ -207,7 +207,7 @@ class Diffuser:
     def run(self, prot_data_orig, idxs_step=None, return_time_steps=False):
         """Build a synchronized noisy state with FR rigid motion + CDR local diffusion."""
 
-        idxs_step = 100
+        # idxs_step = 150
         # torch.manual_seed(42)
         # random.seed(42)
 
@@ -366,7 +366,7 @@ class Diffuser:
 
             "seq-p": aa_seqs_pert,
             "cord-p": cord_tns_noisy.unsqueeze(0), # 
-            "cmsk-p": cmsk_mat_orig.unsqueeze(0),  # 结构扰动不改变原子mask/// 可能间接泄漏氨基酸类型？
+            "cmsk-p": cmsk_mat_orig.unsqueeze(0),  # 结构扰动不改变原子mask
 
             "asym-id": prot_data_orig["asym_id"].detach().clone(),
             "a-cord": prot_data_orig["a-cord"].detach().clone(),

@@ -132,8 +132,8 @@ class CDRLoopHead(nn.Module):
         atom_hidden = self.atom_decoder(atom_decoder_in)
 
         # =====  F_θ  =====
-        x0_norm = self.coord_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
-        x0_norm = x0_norm * loop_atom_valid_mask.unsqueeze(-1).to(x0_norm.dtype)
+        F_theta = self.coord_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
+        F_theta = F_theta * loop_atom_valid_mask.unsqueeze(-1).to(F_theta.dtype)
         # ========================================================================
 
         # topology head
@@ -145,7 +145,7 @@ class CDRLoopHead(nn.Module):
         occ_logits = occ_logits.masked_fill(~loop_valid_res_mask, -20.0)
 
         return {
-            'x0_norm': x0_norm,               
+            'F_theta': F_theta,                 # [B, N_loop, L_max, N_atom, 3] 纯残差
             'pred_occupancy_logits': occ_logits,
             'loop_update_feat': token_feat * loop_valid_res_mask.unsqueeze(-1).to(token_feat.dtype),
             'pi_logits': pi_logits,

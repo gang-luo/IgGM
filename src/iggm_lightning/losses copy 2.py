@@ -22,7 +22,7 @@ from openfold.utils.loss import find_structural_violations, violation_loss
 @dataclass
 class IgGMLossConfig:
     backbone_weight: float = 1.0
-    cdr_all_atom_weight: float = 10.0
+    cdr_all_atom_weight: float = 5.0
     smooth_lddt_weight: float = 1.0
     bond_weight: float = 1.0
     vio_weight: float = 0.02
@@ -203,16 +203,27 @@ class IgGMPaperLoss:
         loop_atom_valid_mask = loop_atom_valid_mask.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
         valid_mask = loop_atom_valid_mask.unsqueeze(-1)
         
-        # Calculate Physical MSE
-        sq_diff = F.mse_loss(pred_loop_local, clean_loop_local, reduction='none') * valid_mask
-        
-        # Scale to match the implicit normalized EDM objective space
-        c_scale = cdr_scale.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype).view(-1, 1, 1, 1, 1)
-        sq_diff = sq_diff / (c_scale ** 2)
+        # 物理空间MSE（移除标准化）
+        sq_diff = ((pred_loop_local - clean_loop_local) ** 2) * valid_mask
         
         denom = valid_mask.sum(dim=(1, 2, 3, 4)).clamp_min(1.0)
         loss_per_batch = sq_diff.sum(dim=(1, 2, 3, 4)) / (3.0 * denom)
         return loss_per_batch.mean()
+
+
+    # physical MSE
+    def _cdr_all_atom_mse_physical(self, pred_loop_local, clean_loop_local, loop_atom_valid_mask, cdr_scale):
+        if clean_loop_local.ndim == 4:
+            clean_loop_local = clean_loop_local.unsqueeze(0)
+        if loop_atom_valid_mask.ndim == 3:
+            loop_atom_valid_mask = loop_atom_valid_mask.unsqueeze(0)
+        clean_loop_local = clean_loop_local.to(pred_loop_local.device, pred_loop_local.dtype)
+        valid = loop_atom_valid_mask.to(pred_loop_local.device, pred_loop_local.dtype).unsqueeze(-1)
+        sq = (pred_loop_local - clean_loop_local) ** 2 * valid
+        denom = valid.sum(dim=(1, 2, 3, 4)).clamp_min(1.0)
+        # raw physical MSE per coord (Å²); w(t) handles all sigma/scale normalization
+        return (sq.sum(dim=(1, 2, 3, 4)) / (3.0 * denom)).mean()
+
 
     # ----------------------------------------------------------------
     # 主 loss 函数
@@ -326,7 +337,7 @@ class IgGMPaperLoss:
                 'perturb': inputs['cord-p'],
                 'pre': pred,
                 'clean': atom14_tgt,
-            }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S0709_{ts}.pt')
+            }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S0708_{ts}.pt')
         self.idx_save += 1
 
         return {
@@ -347,18 +358,19 @@ class IgGMPaperLoss:
     def _backbone_mse_layer(self, inputs, pre_trsl, pre_rota):
         meta = inputs['anchor_frame_meta']
         device, dtype = pre_trsl.device, pre_trsl.dtype
-        tgt_trsl   = meta['trsl_orig'].to(device=device, dtype=dtype).view(-1, 3)
-        tgt_rota   = meta['rota_orig'].to(device=device, dtype=torch.float32)
-        sigma_data = meta['trsl_scale'].to(device=device, dtype=dtype).view(-1, 1).clamp_min(1e-4)
+        tgt_trsl = meta['trsl_orig'].to(device=device, dtype=dtype).view(-1, 3)
+        tgt_rota = meta['rota_orig'].to(device=device, dtype=torch.float32)
 
-        # TRSL: normalized x0 MSE (uniform weighting)
-        loss_trsl = (((pre_trsl.view(-1, 3) - tgt_trsl) / sigma_data) ** 2).sum(-1).mean()
+        # TRSL: 物理空间MSE
+        loss_trsl = ((pre_trsl.view(-1, 3) - tgt_trsl) ** 2).sum(-1).mean()
 
-        # ROTA: geodesic loss on clean frame
+        # ROTA: Frobenius范数（更稳定）
         pre_r = pre_rota.to(device=device, dtype=torch.float32)
         R_rel = torch.matmul(pre_r.transpose(-1, -2), tgt_rota)
-        rotvec = skew2vec(log_rmat(R_rel))
-        loss_rota = (rotvec ** 2).sum(-1).mean().to(dtype)
+        I = torch.eye(3, device=R_rel.device, dtype=R_rel.dtype)
+        diff = I.unsqueeze(0) - R_rel
+        # 添加权重因子使旋转loss和平移loss尺度匹配
+        loss_rota = ((diff ** 2).sum(dim=(-2, -1)).mean() * 5.0).to(dtype)
 
-        loss_backbone = 2.0 * loss_rota + loss_trsl
+        loss_backbone = loss_rota + loss_trsl
         return loss_backbone, loss_trsl, loss_rota

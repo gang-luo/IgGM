@@ -1,0 +1,13 @@
+model_provider = "rightcode"
+model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+network_access = "enabled"
+disable_response_storage = true
+windows_wsl_setup_acknowledged = true
+model_verbosity = "high"
+
+[model_providers.rightcode]
+name = "rightcode"
+base_url = "https://right.codes/codex/v1"
+wire_api = "responses"
+requires_openai_auth = true

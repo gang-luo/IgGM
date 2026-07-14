@@ -151,6 +151,7 @@ class StructureModule(nn.Module):
         trsl_xt_scaled = trsl_xt_centered * fr_c_in.view(-1, 1) if fr_c_in.numel() > 1 else trsl_xt_centered * fr_c_in
         loop_xt_scaled = cdr_xt_centered * cdr_c_in
 
+        prev_cdr_x0_local = None
         for layer_idx in range(n_lyrs):
             curr_coords = curr_coords.detach()
             rota_xt_in = rota_xt0
@@ -215,11 +216,16 @@ class StructureModule(nn.Module):
                 c_out=cdr_c_out,
                 cdr_mu=cdr_mu,  
                 cdr_scale=cdr_scale,
-                cdr_sigma = cdr_sigma
+                cdr_sigma = cdr_sigma,
+                prev_x0_local=prev_cdr_x0_local,
             )
 
             curr_coords = cdr_out['merged_coords']
             sfea_tns = cdr_out['sfea_after_cdr']
+            
+            # x0-space self-conditioning for the next StructureModule layer.
+            # Detach first for stability; later can ablate no-detach.
+            prev_cdr_x0_local = cdr_out["pred_x0_local"].detach()
 
             # 4. pLDDT 
             plddt_dict = self.net['plddt'](sfea_tns.detach())

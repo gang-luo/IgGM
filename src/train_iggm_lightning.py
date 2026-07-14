@@ -320,7 +320,7 @@ def main() -> None:
             name=args.run_name,
             save_dir=str(out),
             entity=(args.entity or None),
-            log_model=True,
+            log_model=False,
         )
 
     trainer = pl.Trainer(

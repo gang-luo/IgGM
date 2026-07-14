@@ -54,7 +54,7 @@ class Diffuser:
         self.fr_noise_scale_trsl = float(1.0)
         self.fr_noise_scale_rota =  float(1.0)
         # CDR sigma_data~24.7; coef 1.0 -> sigma_cdr up to 3x sigma_data (from-scratch denoise)
-        self.cdr_local_noise_scale =  float(0.25) # 1.0
+        self.cdr_local_noise_scale =  float(0.1) # 1.0
 
         # rota angle-noise schedule (run & __build_igso3_list_ve must match)
         self.rota_noise_factor = 0.025
@@ -207,7 +207,7 @@ class Diffuser:
     def run(self, prot_data_orig, idxs_step=None, return_time_steps=False):
         """Build a synchronized noisy state with FR rigid motion + CDR local diffusion."""
 
-        idxs_step = 100
+        # idxs_step = 150
         # torch.manual_seed(42)
         # random.seed(42)
 
@@ -281,36 +281,17 @@ class Diffuser:
         fr_c_skip = (trsl_std**2) / (sigma_trsl**2 + trsl_std**2)
         fr_c_out  = (sigma_trsl * trsl_std) / denom_trsl
 
-        # # ---------------------------------------------------------
-        # # Modality 2: CDR Local Atoms
-        # # ---------------------------------------------------------
-        # clean_loop_local_coords, _, _ = extract_per_loop_clean_local_coords(
-        #     cord_tns_orig, 
-        #     loop_global_res_indices,
-        #     loop_true_len,
-        #     loop_left_anchor_idx,
-        #     loop_right_anchor_idx,
-        #     loop_atom_supervise_mask,
-        # )
-        
         # ---------------------------------------------------------
         # Modality 2: CDR Local Atoms
         # ---------------------------------------------------------
-        # 先用干净坐标构建临时全局坐标
-        temp_coords_for_cdr_label = cord_tns_orig.clone()
-        temp_coords_for_cdr_label[antibody_mask] = noisy_ab_cord_tns[antibody_mask]
-        
-        # 使用带噪FR+干净CDR的混合坐标来提取局部坐标
         clean_loop_local_coords, _, _ = extract_per_loop_clean_local_coords(
-            temp_coords_for_cdr_label,  # ← FR是带噪的，CDR是干净的
+            cord_tns_orig, 
             loop_global_res_indices,
             loop_true_len,
             loop_left_anchor_idx,
             loop_right_anchor_idx,
             loop_atom_supervise_mask,
         )
-
-
         cdr_mu = self.cdr_mu.to(device=device, dtype=dtype)
         cdr_std = self.cdr_scale.to(device=device, dtype=dtype)
 
@@ -366,7 +347,7 @@ class Diffuser:
 
             "seq-p": aa_seqs_pert,
             "cord-p": cord_tns_noisy.unsqueeze(0), # 
-            "cmsk-p": cmsk_mat_orig.unsqueeze(0),  # 结构扰动不改变原子mask/// 可能间接泄漏氨基酸类型？
+            "cmsk-p": cmsk_mat_orig.unsqueeze(0),  # 结构扰动不改变原子mask
 
             "asym-id": prot_data_orig["asym_id"].detach().clone(),
             "a-cord": prot_data_orig["a-cord"].detach().clone(),

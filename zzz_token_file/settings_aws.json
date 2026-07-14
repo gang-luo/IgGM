@@ -1,0 +1,8 @@
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-8160935570aa403187db0685332d986f",
+    "ANTHROPIC_BASE_URL": "https://right.codes/claude-aws",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  },
+  "model": "opus[1m]"
+}

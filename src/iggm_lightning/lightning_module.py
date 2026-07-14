@@ -297,6 +297,7 @@ class IgGMLightningModule(pl.LightningModule):
         self.log(f"{stage}/loss_bond", loss_dict["loss_bond"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
         self.log(f"{stage}/loss_trsl", loss_dict["loss_trsl"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
         self.log(f"{stage}/loss_rota", loss_dict["loss_rota"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+        self.log(f"{stage}/w_cdr", loss_dict["w_cdr"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
 
         # except Exception as exc:
         #     local_fail = True

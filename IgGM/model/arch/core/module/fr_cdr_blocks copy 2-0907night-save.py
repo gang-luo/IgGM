@@ -336,7 +336,7 @@ class CDRFusionBlock(nn.Module):
             cdr_sigma=cdr_sigma,
         )
 
-        x0_norm = cdr_pred['x0_norm']
+        x0_norm = cdr_pred['F_theta']
         # direct x0-prediction: de-normalize and add mean
         c_scale = cdr_scale.view(1, 1, 1, 1, 1).to(dtype=x0_norm.dtype)
         c_mu    = cdr_mu.view(1, 1, 1, 1, 3).to(dtype=x0_norm.dtype)

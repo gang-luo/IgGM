@@ -22,7 +22,7 @@ from openfold.utils.loss import find_structural_violations, violation_loss
 @dataclass
 class IgGMLossConfig:
     backbone_weight: float = 1.0
-    cdr_all_atom_weight: float = 10.0
+    cdr_all_atom_weight: float = 5.0
     smooth_lddt_weight: float = 1.0
     bond_weight: float = 1.0
     vio_weight: float = 0.02
@@ -214,6 +214,20 @@ class IgGMPaperLoss:
         loss_per_batch = sq_diff.sum(dim=(1, 2, 3, 4)) / (3.0 * denom)
         return loss_per_batch.mean()
 
+    # physical MSE
+    def _cdr_all_atom_mse_physical(self, pred_loop_local, clean_loop_local, loop_atom_valid_mask, cdr_scale):
+        if clean_loop_local.ndim == 4:
+            clean_loop_local = clean_loop_local.unsqueeze(0)
+        if loop_atom_valid_mask.ndim == 3:
+            loop_atom_valid_mask = loop_atom_valid_mask.unsqueeze(0)
+        clean_loop_local = clean_loop_local.to(pred_loop_local.device, pred_loop_local.dtype)
+        valid = loop_atom_valid_mask.to(pred_loop_local.device, pred_loop_local.dtype).unsqueeze(-1)
+        sq = (pred_loop_local - clean_loop_local) ** 2 * valid
+        denom = valid.sum(dim=(1, 2, 3, 4)).clamp_min(1.0)
+        # raw physical MSE per coord (Å²); w(t) handles all sigma/scale normalization
+        return (sq.sum(dim=(1, 2, 3, 4)) / (3.0 * denom)).mean()
+
+
     # ----------------------------------------------------------------
     # 主 loss 函数
     # ----------------------------------------------------------------
@@ -326,7 +340,7 @@ class IgGMPaperLoss:
                 'perturb': inputs['cord-p'],
                 'pre': pred,
                 'clean': atom14_tgt,
-            }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S0709_{ts}.pt')
+            }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S0708_{ts}.pt')
         self.idx_save += 1
 
         return {
