@@ -27,7 +27,7 @@ class DesignModel(BaseModel):
             n_dims_pfea=128,  # number of dimensions in pair features (D_p)
             n_dims_penc=64,  # number of dimensions in positional encodings
             n_lyrs_2d=4,  # number of <EvoformerBlockSS> layers
-            n_lyrs_3d=4,  # number of <AF2SMod> layers
+            n_lyrs_3d=1,  # number of <AF2SMod> layers
             # n_lyrs_2d=16,  # number of <EvoformerBlockSS> layers
             # n_lyrs_3d=8,  # number of <AF2SMod> layers
             pred_oxyg=True,  # whether to predict backbone oxygen atoms' 3D coordinates
@@ -306,7 +306,7 @@ class DesignModel(BaseModel):
 
         # AF2SMod
         region_metadata = self.__extract_region_metadata(inputs)
-        _, cord_list, plddt_list, trsl_list, rota_list, loop_cords, pi_logits, clean_label_list = self.net['af2_smod'](
+        _, cord_list, plddt_list, trsl_list, rota_list, loop_cords, pi_logits, clean_label_list,trsl_residual_list,rota_vec_norm_list = self.net['af2_smod'](
             inputs['seq-p'], sfea_tns, pfea_tns, penc_tns,
             cord_tns_init=inputs['cord-p'],
             cmsk_tns_init=inputs['cmsk-p'],
@@ -340,6 +340,8 @@ class DesignModel(BaseModel):
                 'loop_cords': loop_cords,
                 'pi_logits': pi_logits,
                 'clean_labels': clean_label_list,
+                "trsl_residual": trsl_residual_list,
+                "rota_vec_norm": rota_vec_norm_list,
             },
         }
         return outputs
@@ -391,14 +393,12 @@ class DesignModel(BaseModel):
 
     def __extract_region_metadata(self, inputs):
         keys = [
-        'antibody_mask', 'antibody_local_coords',
-        'fr_mask', 'cdr_mask', 'loop_masks', 'loop_type_ids', 'loop_names',
-        'loop_left_anchor_idx', 'loop_right_anchor_idx', 'loop_true_len', 'loop_lmax',
-        'loop_occ_target', 'loop_valid_res_mask', 'loop_atom_valid_mask',
-        'loop_atom_supervise_mask',
-        'loop_global_res_indices', 'clean_fr_reference', 'clean_loop_local_coords',
-        'clean_coords_global',           
-        'noisy_loop_local_coords', 'anchor_frame_meta', 'cdr_meta', 'sigama_t', 'step', # <--- 【新增 'cdr_meta'】
+            "antibody_mask","antigen_mask","antibody_local_coords","fr_mask","cdr_mask",
+            "loop_masks","loop_type_ids","loop_names","loop_left_anchor_idx","loop_right_anchor_idx",
+            "loop_true_len","loop_lmax","loop_occ_target","loop_valid_res_mask","loop_atom_valid_mask",
+            "loop_atom_supervise_mask","loop_global_res_indices","clean_fr_reference",
+            "clean_loop_local_coords","clean_coords_global",
+            "noisy_loop_local_coords","anchor_frame_meta","cdr_meta","sigama_t","step",
         ]
         return {k: inputs[k] for k in keys if k in inputs}
 

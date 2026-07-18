@@ -126,6 +126,12 @@ class IgGMLightningModule(pl.LightningModule):
         # A4: prob of applying training-time self-conditioning per step (0 disables).
         self.self_cond_prob = 0.0 # 0.5
 
+        
+        self.register_buffer("_rota_pred_energy_ema", torch.tensor(0.0), persistent=False)
+        self.register_buffer("_rota_target_energy_ema", torch.tensor(0.0), persistent=False)
+        self.register_buffer("_rota_dot_ema", torch.tensor(0.0), persistent=False)
+        self._rota_diag_initialized = False
+
     @staticmethod
     def _ddp_any_true(flag: bool) -> bool:
         """Synchronize boolean failure flags across ranks for DDP-safe fallbacks."""
@@ -298,6 +304,59 @@ class IgGMLightningModule(pl.LightningModule):
         self.log(f"{stage}/loss_trsl", loss_dict["loss_trsl"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
         self.log(f"{stage}/loss_rota", loss_dict["loss_rota"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
         self.log(f"{stage}/w_cdr", loss_dict["w_cdr"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+        self.log(f"{stage}/loss_trsl_residual", loss_dict["loss_trsl_residual"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+        self.log(f"{stage}/loss_rota_residual", loss_dict["loss_rota_residual"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+
+
+        if stage == "train":
+            diag = loss_dict["rotation_diag"]
+            decay = 0.95
+
+            if not self._rota_diag_initialized:
+                self._rota_pred_energy_ema.copy_(diag["pred_energy"])
+                self._rota_target_energy_ema.copy_(diag["target_energy"])
+                self._rota_dot_ema.copy_(diag["dot"])
+                self._rota_diag_initialized = True
+            else:
+                self._rota_pred_energy_ema.lerp_(diag["pred_energy"], 1.0 - decay)
+                self._rota_target_energy_ema.lerp_(diag["target_energy"], 1.0 - decay)
+                self._rota_dot_ema.lerp_(diag["dot"], 1.0 - decay)
+
+            eps = 1e-8
+            pred_energy = self._rota_pred_energy_ema
+            target_energy = self._rota_target_energy_ema
+            dot = self._rota_dot_ema
+
+            norm_ratio = torch.sqrt(
+                (pred_energy + eps) / (target_energy + eps)
+            )
+            energy_cosine = dot / torch.sqrt(
+                (pred_energy * target_energy).clamp_min(eps)
+            )
+            energy_gain = (
+                2.0 * dot - pred_energy
+            ) / target_energy.clamp_min(eps)
+
+            self.log(
+                "train/rota_norm_ratio", norm_ratio,
+                on_step=True, on_epoch=False, prog_bar=False,
+                sync_dist=True, add_dataloader_idx=False,
+            )
+            self.log(
+                "train/rota_energy_cosine", energy_cosine,
+                on_step=True, on_epoch=False, prog_bar=False,
+                sync_dist=True, add_dataloader_idx=False,
+            )
+            self.log(
+                "train/rota_energy_gain", energy_gain,
+                on_step=True, on_epoch=False, prog_bar=False,
+                sync_dist=True, add_dataloader_idx=False,
+            )
+            
+        # self.log(f"{stage}/loss_closure", loss_dict["loss_closure"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+        # self.log(f"{stage}/loss_marker_topology", loss_dict["loss_marker_topology"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+        # self.log(f"{stage}/loss_marker_count", loss_dict["loss_marker_count"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+        # self.log(f"{stage}/loss_marker_aar", loss_dict["loss_marker_aar"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
 
         # except Exception as exc:
         #     local_fail = True
@@ -452,9 +511,9 @@ class IgGMLightningModule(pl.LightningModule):
         if self.ema is not None:
             self.ema.update(self.model)
 
-    def on_after_backward(self):
-        fr = self.model.net["af2_smod"].net["fr_branch"]
-        tw = fr.trsl_head[-1].weight.grad
-        qw = fr.rota_head[-1].weight.grad
-        print("trsl_head.weight.grad:", None if tw is None else tw.norm().item())
-        print("rota_head.weight.grad:", None if qw is None else qw.norm().item())
+    # def on_after_backward(self):
+    #     fr = self.model.net["af2_smod"].net["fr_branch"]
+    #     tw = fr.trsl_head[-1].weight.grad
+    #     qw = fr.rota_head[-1].weight.grad
+    #     print("trsl_head.weight.grad:", None if tw is None else tw.norm().item())
+    #     print("rota_head.weight.grad:", None if qw is None else qw.norm().item())

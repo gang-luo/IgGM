@@ -12,3 +12,5 @@ data/test
 
 openfold/*
 .ipynb_checkpoints
+zzz_token_file/*
+auth.json

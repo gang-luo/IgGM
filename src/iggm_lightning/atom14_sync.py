@@ -41,13 +41,13 @@ class Atom14SeqSync:
         "Y": BoltzResidueCode(0, 2),  "W": BoltzResidueCode(0, 0),
     }
 
-    def __init__(self, decode_threshold: float = 1.0) -> None: # 0.5
-            self.decode_threshold = float(decode_threshold)
-            # n_real
-            self._n_real_dict: Dict[str, int] = {
-                aa: len(ATOM_NAMES_PER_RESD[RESD_MAP_1TO3[aa]]) 
-                for aa in RESD_NAMES_1C
-            }
+    def __init__(self, decode_threshold: float = 1.0) -> None:
+        self.decode_threshold = float(decode_threshold)
+        self._n_real_dict: Dict[str, int] = {
+            aa: len(ATOM_NAMES_PER_RESD[RESD_MAP_1TO3[aa]])
+            for aa in RESD_NAMES_1C
+        }
+
 
     @staticmethod
     def _build_residue_meta() -> Dict[str, Dict[str, int]]:
@@ -101,35 +101,73 @@ class Atom14SeqSync:
         cmsk_n14_tf: torch.Tensor,
         cdr_mask: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """Create atom14 target where CDR padded slots are markers superposed to fixed N(0)/O(3)."""
         cord = self._ensure_l14x3(cord_n14_tf).clone()
         cmsk = self._ensure_l14(cmsk_n14_tf).clone().to(torch.bool)
         cdr_mask = cdr_mask.to(torch.bool).view(-1)
 
         if len(seq) != cord.shape[0]:
-            raise ValueError(f"Sequence/coord length mismatch: len(seq)={len(seq)} vs L={cord.shape[0]}")
+            raise ValueError(
+                f"Sequence/coord length mismatch: len(seq)={len(seq)} "
+                f"vs L={cord.shape[0]}"
+            )
 
-        N_IDX, O_IDX = 0, 3
+        marker_class = torch.full(
+            (cord.shape[0], 14),
+            -100,
+            dtype=torch.long,
+            device=cord.device,
+        )
+        marker_count_target = torch.zeros(
+            (cord.shape[0], 2),
+            dtype=cord.dtype,
+            device=cord.device,
+        )
+
+        n_idx = 0
+        o_idx = 3
+
         for ridx, aa in enumerate(seq):
-            if ridx >= cdr_mask.numel() or not bool(cdr_mask[ridx]) or aa not in self._n_real_dict:
+            if (
+                ridx >= cdr_mask.numel()
+                or not bool(cdr_mask[ridx])
+                or aa not in self._n_real_dict
+            ):
                 continue
 
             n_real = self._n_real_dict[aa]
             code = self._BOLTZ_CODEBOOK[aa]
-            
+
+            marker_class[ridx, :n_real] = 0
+            marker_count_target[ridx, 0] = float(code.n_on_n)
+            marker_count_target[ridx, 1] = float(code.n_on_o)
+
             missing_slots = list(range(n_real, 14))
-            anchors = [N_IDX] * code.n_on_n + [O_IDX] * code.n_on_o
+            marker_types = [1] * code.n_on_n + [2] * code.n_on_o
+            marker_anchors = [n_idx] * code.n_on_n + [o_idx] * code.n_on_o
 
-            if len(missing_slots) != len(anchors):
-                raise RuntimeError(f"Marker count mismatch for residue {aa} at idx={ridx}")
+            if not (
+                len(missing_slots)
+                == len(marker_types)
+                == len(marker_anchors)
+            ):
+                raise RuntimeError(
+                    f"Marker count mismatch for residue {aa} at idx={ridx}"
+                )
 
-            for slot, anchor_idx in zip(missing_slots, anchors):
+            for slot, marker_type, anchor_idx in zip(
+                missing_slots,
+                marker_types,
+                marker_anchors,
+            ):
                 cord[ridx, slot] = cord[ridx, anchor_idx]
                 cmsk[ridx, slot] = True
+                marker_class[ridx, slot] = marker_type
 
         return {
             "cords_atom14": cord,
             "cmsk_atom14": cmsk.to(dtype=cmsk_n14_tf.dtype),
+            "atom14_marker_class": marker_class,
+            "atom14_marker_count_target": marker_count_target,
         }
 
     def _count_no_markers(self, residue_atoms: torch.Tensor, residue_mask: torch.Tensor) -> Tuple[int, int]:

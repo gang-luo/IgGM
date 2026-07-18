@@ -58,30 +58,39 @@ class StructureMetrics:
     #     return pred_aligned.float(), tgt.float()
 
     @staticmethod
-    def _kabsch_align(pred: torch.Tensor, tgt: torch.Tensor):
-        pred = pred.float()
-        tgt = tgt.float()
-
-        pred_mean = pred.mean(dim=0, keepdim=True)
-        tgt_mean = tgt.mean(dim=0, keepdim=True)
-
-        pred_c = pred - pred_mean
-        tgt_c = tgt - tgt_mean
-
-        h = pred_c.transpose(0, 1) @ tgt_c
-        u, _, vh = torch.linalg.svd(h.float(), full_matrices=False)
-
-        d = torch.ones(3, device=h.device, dtype=h.dtype)
-        d[-1] = torch.where(
-            torch.det(u @ vh) < 0,
-            h.new_tensor(-1.0),
-            h.new_tensor(1.0),
-        )
-        r = u @ torch.diag(d) @ vh
-
-        pred_aligned = pred_c @ r + tgt_mean
+    def _kabsch_align(pred: torch.Tensor, tgt: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Align pred to tgt using the Kabsch algorithm (row-vector convention)."""
+        orig_dtype = pred.dtype
+        device_type = "cuda" if pred.is_cuda else "cpu"
         
-        return pred_aligned.float(), tgt.float()
+        # 强制关闭自动混合精度 (AMP)，防止矩阵乘法 (@) 将数据打回 bfloat16
+        with torch.autocast(device_type=device_type, enabled=False):
+            pred = pred.to(torch.float32)
+            tgt = tgt.to(torch.float32)
+
+            # 使用 dim=-2 兼容 (B, N, 3) 和 (N, 3)
+            pred_mean = pred.mean(dim=-2, keepdim=True)
+            tgt_mean = tgt.mean(dim=-2, keepdim=True)
+
+            pred_c = pred - pred_mean
+            tgt_c = tgt - tgt_mean
+
+            # 计算协方差矩阵 H (pred^T @ tgt)
+            h = pred_c.transpose(-2, -1) @ tgt_c
+            u, _, vh = torch.linalg.svd(h, full_matrices=False)
+
+            # 反射校正 (Reflection correction)，同时兼容 batch 维度
+            d = torch.ones_like(h[..., 0])  # Shape: (B, 3) or (3,)
+            d[..., -1] = torch.sign(torch.det(u @ vh))
+            
+            # 使用 diag_embed 构造对角矩阵，支持 Batched 运算
+            r = u @ torch.diag_embed(d) @ vh
+
+            # 应用旋转和平移
+            pred_aligned = pred_c @ r + tgt_mean
+
+        return pred_aligned.to(orig_dtype), tgt.to(orig_dtype)
+    
 
     @staticmethod
     def _extract_loop_indices(cdr_sequences: Mapping[str, List[int]] | None, seq_lengths: Mapping[str, int] | None) -> Dict[str, List[int]]:

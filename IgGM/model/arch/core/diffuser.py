@@ -114,6 +114,12 @@ class Diffuser:
         return prob_tns_orig, prob_tns_pert, aa_seqs_pert
 
     @staticmethod
+    def _rotation_rms_angle(rotations: torch.Tensor) -> torch.Tensor:
+        rotations = rotations.float()
+        cos_angle = ((rotations.diagonal(dim1=-2, dim2=-1).sum(-1) - 1.0) * 0.5).clamp(-1.0, 1.0)
+        return torch.acos(cos_angle).square().mean().sqrt()
+
+    @staticmethod
     def _build_antibody_rigid_params(cord_tns_orig, cmsk_mat_orig, antibody_mask):
         import contextlib
 
@@ -207,7 +213,7 @@ class Diffuser:
     def run(self, prot_data_orig, idxs_step=None, return_time_steps=False):
         """Build a synchronized noisy state with FR rigid motion + CDR local diffusion."""
 
-        idxs_step = 100
+        # idxs_step = 100
         # torch.manual_seed(42)
         # random.seed(42)
 
@@ -218,9 +224,12 @@ class Diffuser:
         cord_tns_orig = prot_data_orig["cords_atom14"]
         cmsk_mat_orig = prot_data_orig["cmsk"]
         cmsk_mat_orig14 = prot_data_orig["cmsk_atom14"]
+        atom14_type_target = prot_data_orig["atom14_type_target"]
 
         pmsk_vec = prot_data_orig["mask_design"]
         antibody_mask = prot_data_orig["mask_ab"].to(device=device, dtype=torch.bool)
+        antigen_mask = prot_data_orig.get("antigen_mask", ~antibody_mask).to(device=device, dtype=torch.bool)
+        antigen_com = cord_tns_orig[antigen_mask, 1].mean(dim=0)
 
         fr_mask = prot_data_orig["fr_mask"].to(device=device, dtype=torch.bool)
         cdr_mask = prot_data_orig["cdr_mask"].to(device=device, dtype=torch.bool)
@@ -264,12 +273,15 @@ class Diffuser:
         trsl_xt_physical = trsl_xt_centered + trsl_mu
         
         # Random rotation (existing logic)
-        sigma_rota = torch.clamp(sigma_t * self.fr_noise_scale_rota * self.rota_noise_factor, max=self.rota_noise_max)
-        # sigma_rota = torch.clamp(sigma_t * self.fr_noise_scale_rota * 0.1, max=3.14)
+        sigma_rota = torch.clamp(
+            sigma_t * self.fr_noise_scale_rota * self.rota_noise_factor,
+            max=self.rota_noise_max,
+        )
         rota_buf = self.rota_buf_list_fwd[idxs_step].to(device=device, dtype=dtype)
+        rota_rms = self.rota_rms_list_fwd[idxs_step].to(device=device, dtype=dtype)
         fr_rotation = rota_buf[random.randrange(self.rota_buf_size)]
-        rota_xt = torch.matmul(fr_rotation, rota_orig)
-
+        rota_xt = torch.matmul(rota_orig, fr_rotation)
+        
         # Build noisy antibody complex
         noisy_ab_cord_tns = cord_tns_orig.clone()
         noisy_ab_cord_tns[antibody_mask] = local_to_global_coords(ab_local_coords, rota_xt, trsl_xt_physical)
@@ -284,25 +296,10 @@ class Diffuser:
         # # ---------------------------------------------------------
         # # Modality 2: CDR Local Atoms
         # # ---------------------------------------------------------
-        # clean_loop_local_coords, _, _ = extract_per_loop_clean_local_coords(
-        #     cord_tns_orig, 
-        #     loop_global_res_indices,
-        #     loop_true_len,
-        #     loop_left_anchor_idx,
-        #     loop_right_anchor_idx,
-        #     loop_atom_supervise_mask,
-        # )
-        
-        # ---------------------------------------------------------
-        # Modality 2: CDR Local Atoms
-        # ---------------------------------------------------------
-        # 先用干净坐标构建临时全局坐标
         temp_coords_for_cdr_label = cord_tns_orig.clone()
-        temp_coords_for_cdr_label[antibody_mask] = noisy_ab_cord_tns[antibody_mask]
-        
-        # 使用带噪FR+干净CDR的混合坐标来提取局部坐标
-        clean_loop_local_coords, _, _ = extract_per_loop_clean_local_coords(
-            temp_coords_for_cdr_label,  # ← FR是带噪的，CDR是干净的
+        temp_coords_for_cdr_label[antibody_mask] = noisy_ab_cord_tns[    antibody_mask]
+        clean_loop_local_coords, clean_anchor_rots,clean_anchor_trans = extract_per_loop_clean_local_coords(
+            temp_coords_for_cdr_label,
             loop_global_res_indices,
             loop_true_len,
             loop_left_anchor_idx,
@@ -310,6 +307,30 @@ class Diffuser:
             loop_atom_supervise_mask,
         )
 
+        n_loops = loop_global_res_indices.shape[0]
+        n_atoms = cord_tns_orig.shape[-2]
+        loop_anchor_local_coords = torch.zeros((n_loops, 2, n_atoms, 3),dtype=dtype,device=device,)
+        loop_anchor_atom_mask = torch.zeros((n_loops, 2, n_atoms),dtype=torch.bool,device=device,)
+        for loop_idx in range(n_loops):
+            true_len = int(loop_true_len[loop_idx].item())
+            left_idx = int(loop_left_anchor_idx[loop_idx].item())
+            right_idx = int(loop_right_anchor_idx[loop_idx].item())
+
+            if true_len <= 0 or left_idx < 0 or right_idx < 0:
+                continue
+
+            anchor_indices = torch.tensor(    [left_idx, right_idx],    device=device,    dtype=torch.long,)
+            anchor_coords_global = temp_coords_for_cdr_label[anchor_indices]
+            anchor_mask = cmsk_mat_orig[anchor_indices].to(torch.bool)
+
+            anchor_coords_local = global_to_local_coords(
+                anchor_coords_global,
+                clean_anchor_rots[loop_idx],
+                clean_anchor_trans[loop_idx],
+            )
+            anchor_coords_local = anchor_coords_local * anchor_mask.unsqueeze(-1).to(dtype)
+            loop_anchor_local_coords[loop_idx] = anchor_coords_local
+            loop_anchor_atom_mask[loop_idx] = anchor_mask
 
         cdr_mu = self.cdr_mu.to(device=device, dtype=dtype)
         cdr_std = self.cdr_scale.to(device=device, dtype=dtype)
@@ -363,6 +384,7 @@ class Diffuser:
             "cmsk_atom14": cmsk_mat_orig14,
             "pmsk": pmsk_vec,
             "pmsk-ligand": prot_data_orig["mask_ab"],
+            "atom14_type_target": atom14_type_target,
 
             "seq-p": aa_seqs_pert,
             "cord-p": cord_tns_noisy.unsqueeze(0), # 
@@ -371,6 +393,7 @@ class Diffuser:
             "asym-id": prot_data_orig["asym_id"].detach().clone(),
             "a-cord": prot_data_orig["a-cord"].detach().clone(),
             "a-cmsk": prot_data_orig["a-cmsk"].detach().clone(),
+
 
             "fr_mask": fr_mask.detach().clone(),
             "cdr_mask": cdr_mask.detach().clone(),
@@ -394,17 +417,19 @@ class Diffuser:
                 "trsl_orig": trsl_x0.detach().clone(),
                 "rota_orig": rota_orig.detach().clone(),
                 "rota_xt": rota_xt.detach().clone(),
-                
-                # Pass the centered noisy inputs for network assembly
-                "trsl_xt_centered": trsl_xt_centered.detach().clone(), 
+                "antigen_com": antigen_com.detach().clone(),
+
+                "trsl_xt_centered": trsl_xt_centered.detach().clone(),
+                "trsl_xt_physical": trsl_xt_physical.detach().clone(),
                 "trsl_mu": trsl_mu.detach().clone(),
                 "trsl_scale": trsl_std.detach().clone(),
-                
+
                 "fr_sigma_trsl": sigma_trsl.detach().clone(),
                 "fr_sigma_rota": sigma_rota.detach().clone(),
+                "fr_rota_rms": rota_rms.detach().clone(),
 
-                "fr_c_in": fr_c_in.detach().clone(),    
-                "fr_c_skip": fr_c_skip.detach().clone(),  
+                "fr_c_in": fr_c_in.detach().clone(),
+                "fr_c_skip": fr_c_skip.detach().clone(),
                 "fr_c_out": fr_c_out.detach().clone(),
             },
             "cdr_meta": {
@@ -421,6 +446,9 @@ class Diffuser:
             },
             "antibody_local_coords": ab_local_coords.detach().clone(),
             "antibody_mask": antibody_mask.detach().clone(),
+            "antigen_mask": antigen_mask.detach().clone(),
+            "loop_anchor_local_coords": (loop_anchor_local_coords.detach().clone()),
+            "loop_anchor_atom_mask": (loop_anchor_atom_mask.detach().clone()),
             "occupancy_mode": self.occupancy_mode,
             "sigama_t": {
                 "cord_scale": torch.as_tensor(self.cord_scale, device=device, dtype=dtype),
@@ -482,22 +510,41 @@ class Diffuser:
                 rota_buf = self.igso3_buffer.sample(stdev.item(), self.rota_buf_size)
             self.rota_buf_list_bwd.append(rota_buf)
 
+    # def __build_igso3_list_ve(self):
+    #     """根据 sigma 构建 SO(3) 旋转噪声缓冲"""
+    #     logging.info('building VE IGSO(3) distributions ...')
+    #     self.rota_buf_list_fwd = [None] 
+    #     # 把线性的距离 sigma 映射到角度 sigma (假设 1A 大致对应 0.1 rad 的旋转剧烈程度)
+    #     # for sigma in self.sigmas[1:]:
+    #     #     stdev = torch.clamp(sigma * self.fr_noise_scale_rota * 0.1, max=3.14)
+    #     for sigma in self.sigmas[1:]:
+    #         stdev = torch.clamp(sigma * self.fr_noise_scale_rota * self.rota_noise_factor, max=self.rota_noise_max)
+    #         if self.igso3_buffer is None:
+    #             igso3 = IsotropicGaussianSO3(eps=stdev.view(1))
+    #             rota_buf = igso3.sample_batch(torch.Size([self.rota_buf_size]))[:, 0]
+    #         else:
+    #             rota_buf = self.igso3_buffer.sample(stdev.item(), self.rota_buf_size)
+    #         self.rota_buf_list_fwd.append(rota_buf)
+ 
+
     def __build_igso3_list_ve(self):
-        """根据 sigma 构建 SO(3) 旋转噪声缓冲"""
-        logging.info('building VE IGSO(3) distributions ...')
-        self.rota_buf_list_fwd = [None] 
-        # 把线性的距离 sigma 映射到角度 sigma (假设 1A 大致对应 0.1 rad 的旋转剧烈程度)
-        # for sigma in self.sigmas[1:]:
-        #     stdev = torch.clamp(sigma * self.fr_noise_scale_rota * 0.1, max=3.14)
+        logging.info("building VE IGSO(3) distributions ...")
+        self.rota_buf_list_fwd = [None]
+        self.rota_rms_list_fwd = [None]
+
         for sigma in self.sigmas[1:]:
-            stdev = torch.clamp(sigma * self.fr_noise_scale_rota * self.rota_noise_factor, max=self.rota_noise_max)
+            stdev = torch.clamp(
+                sigma * self.fr_noise_scale_rota * self.rota_noise_factor,
+                max=self.rota_noise_max,
+            )
             if self.igso3_buffer is None:
                 igso3 = IsotropicGaussianSO3(eps=stdev.view(1))
                 rota_buf = igso3.sample_batch(torch.Size([self.rota_buf_size]))[:, 0]
             else:
                 rota_buf = self.igso3_buffer.sample(stdev.item(), self.rota_buf_size)
+
             self.rota_buf_list_fwd.append(rota_buf)
- 
+            self.rota_rms_list_fwd.append(self._rotation_rms_angle(rota_buf))
       
 class VarianceSchedule():
     """General variance schedule for DDPM training & sampling.
