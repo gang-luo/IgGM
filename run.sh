@@ -43,4 +43,5 @@ python src/train_iggm_lightning.py --config config/train_overfit_0714_A.yaml
 python src/train_iggm_lightning.py --config config/train_overfit_0714_B.yaml
 
 python src/train_iggm_lightning.py --config config/train_overfit_all_0716.yaml
-
+python src/train_iggm_lightning.py --config config/train_overfit_all_0720.yaml
+python src/train_iggm_lightning.py --config config/train_overfit_all_0720.yaml

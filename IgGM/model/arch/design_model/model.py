@@ -306,10 +306,10 @@ class DesignModel(BaseModel):
 
         # AF2SMod
         region_metadata = self.__extract_region_metadata(inputs)
-        _, cord_list, plddt_list, trsl_list, rota_list, loop_cords, pi_logits, clean_label_list,trsl_residual_list,rota_vec_norm_list = self.net['af2_smod'](
+        _, cord_list, plddt_list, trsl_list, rota_list, loop_cords, pi_logits, clean_label_list,trsl_residual_list,rota_vec_norm_list, seq_logits = self.net['af2_smod'](
             inputs['seq-p'], sfea_tns, pfea_tns, penc_tns,
             cord_tns_init=inputs['cord-p'],
-            cmsk_tns_init=inputs['cmsk-p'],
+            cmsk_tns_init=inputs.get('cmsk-perc', inputs['cmsk-p']),
             rmsk_vec_motf=rmsk_vec_motf,
             chunk_size=chunk_size,
             region_metadata=region_metadata,
@@ -342,6 +342,7 @@ class DesignModel(BaseModel):
                 'clean_labels': clean_label_list,
                 "trsl_residual": trsl_residual_list,
                 "rota_vec_norm": rota_vec_norm_list,
+                "seq_logits": seq_logits,
             },
         }
         return outputs
@@ -476,6 +477,6 @@ class DesignModel(BaseModel):
     def __calc_pfea_tns_st(self, inputs):
         """Calculate structure encodings."""
 
-        pfea_tns = self.st_encoder(inputs['cord-p'], inputs['cmsk-p'])
+        pfea_tns = self.st_encoder(inputs['cord-p'], inputs.get('cmsk-perc', inputs['cmsk-p']))
 
         return pfea_tns

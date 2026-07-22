@@ -306,6 +306,7 @@ class IgGMLightningModule(pl.LightningModule):
         self.log(f"{stage}/w_cdr", loss_dict["w_cdr"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
         self.log(f"{stage}/loss_trsl_residual", loss_dict["loss_trsl_residual"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
         self.log(f"{stage}/loss_rota_residual", loss_dict["loss_rota_residual"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
+        self.log(f"{stage}/loss_seq", loss_dict["loss_seq"], prog_bar=True, on_step=False, on_epoch=True, add_dataloader_idx=False)
 
 
         if stage == "train":

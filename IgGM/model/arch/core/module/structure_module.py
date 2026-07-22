@@ -289,6 +289,7 @@ class StructureModule(nn.Module):
                 rota_vec_norm_list.append(fr_out["rota_vec_norm"].clone())
 
             pi_logits = cdr_out["cdr_pred"]["pi_logits"]
+            seq_logits = cdr_out["cdr_pred"].get("seq_logits")
 
             return (
                 sfea_tns,
@@ -301,6 +302,7 @@ class StructureModule(nn.Module):
                 clean_label_list,
                 trsl_residual_list,
                 rota_vec_norm_list,
+                seq_logits,
             )
 
     @staticmethod

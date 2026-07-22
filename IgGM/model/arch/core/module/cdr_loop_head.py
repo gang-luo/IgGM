@@ -149,6 +149,15 @@ class CDRLoopHead(nn.Module):
         self.occ_head = nn.Linear(c_token, 1)
         self.topology_head = nn.Sequential(nn.LayerNorm(c_atom), nn.Linear(c_atom, n_atom * 3))
 
+        # Sequence head (co-design, scheme B): predict 20-class residue-type
+        # logits directly from the per-residue loop token, decoupling type from
+        # the geometry readout. Trained with cross-entropy (default weight 0).
+        self.n_aa_types = 20
+        self.seq_head = nn.Sequential(
+            nn.LayerNorm(c_token), nn.Linear(c_token, c_token),
+            nn.SiLU(), nn.Linear(c_token, self.n_aa_types),
+        )
+
         self.noise_embed = nn.Sequential(nn.Linear(1, 32), nn.SiLU(), nn.Linear(32, 32))
         self.noise_to_token = nn.Linear(32, c_token)
 
@@ -265,9 +274,14 @@ class CDRLoopHead(nn.Module):
         occ_logits = torch.flip(torch.cumsum(torch.flip(occ_raw, dims=[-1]), dim=-1), dims=[-1])
         occ_logits = occ_logits.masked_fill(~valid_res_mask, -20.0)
 
+        # Sequence-type logits per loop residue: [bsz, n_loop, lmax, 20].
+        seq_logits = self.seq_head(token_feat)
+        seq_logits = seq_logits * valid_res_mask.unsqueeze(-1).to(seq_logits.dtype)
+
         return {
             "x0_norm": x0_norm,
             "pred_occupancy_logits": occ_logits,
             "loop_update_feat": token_feat * valid_res_mask.unsqueeze(-1).to(token_feat.dtype),
             "pi_logits": pi_logits,
+            "seq_logits": seq_logits,
         }

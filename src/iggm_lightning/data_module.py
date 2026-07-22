@@ -190,10 +190,10 @@ class _ProteinSampleDataset(Dataset):
                 "cords_atom14": atom14_sup["cords_atom14"],
                 "cmsk_atom14": atom14_sup["cmsk_atom14"],
                 "atom14_marker_class": atom14_sup["atom14_marker_class"],
-                "atom14_type_target": atom14_sup["atom14_type_target"],
                 "atom14_marker_count_target": atom14_sup[
                     "atom14_marker_count_target"
                 ],
+                "atom14_type_target": atom14_sup.get("atom14_type_target"),
                 "mask_design": mask_design,
                 "mask_ab": complex_data["mask_ab"],
                 "asym_id": complex_data["asym_id"],

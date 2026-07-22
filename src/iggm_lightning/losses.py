@@ -14,7 +14,10 @@ from typing import Dict, List, Optional,Sequence
 import torch
 import torch.nn.functional as F
 
-from IgGM.protein.prot_constants import RESD_NAMES_1C, restype_atom14_to_atom37
+from IgGM.protein.prot_constants import (
+    RESD_NAMES_1C,
+    restype_atom14_to_atom37,
+)
 from IgGM.utils import skew2vec, log_rmat
 from openfold.utils.loss import find_structural_violations, violation_loss
 
@@ -44,6 +47,8 @@ class IgGMLossConfig:
     vio_weight: float = 0.02
 
     fr_global_aux_weight: float = 0.1
+    # Scheme B: sequence-head cross-entropy (co-design). 0.0 -> inert.
+    seq_head_weight: float = 0.5
     marker_distance_threshold: float = 0.5
     marker_distance_temperature: float = 0.08
     marker_assignment_temperature: float = 0.08
@@ -227,7 +232,13 @@ class IgGMPaperLoss:
         """Utility to extract loop-specific features from a full-sequence tensor."""
         if loop_global_res_indices.ndim == 2: loop_global_res_indices = loop_global_res_indices.unsqueeze(0)
         if loop_valid_res_mask.ndim == 2: loop_valid_res_mask = loop_valid_res_mask.unsqueeze(0)
-        if full_tensor.ndim == 2: full_tensor = full_tensor.unsqueeze(0)
+        # Normalize to [B, L, *tail]:
+        #   per-residue scalar label [L] -> [1, L]  (empty tail)
+        #   unbatched feature tensor  [L, feat] -> [1, L, feat]
+        if full_tensor.ndim == 1:
+            full_tensor = full_tensor.unsqueeze(0)          # [1, L]
+        elif full_tensor.ndim == 2 and full_tensor.shape[0] != loop_global_res_indices.shape[0]:
+            full_tensor = full_tensor.unsqueeze(0)          # [1, L, feat]
 
         batch_size, n_loop, lmax = loop_global_res_indices.shape
         if full_tensor.shape[0] == 1 and batch_size > 1:
@@ -598,6 +609,33 @@ class IgGMPaperLoss:
         loss_per_batch = sq_diff.sum(dim=(1, 2, 3, 4)) / (3.0 * denom)
         return loss_per_batch.mean()
 
+    # ------------------------------------------------------------------
+    # Scheme B: sequence-head cross-entropy (co-design).
+    # Predicts residue type directly from the per-residue loop token, so the
+    # sequence is a first-class model output rather than a geometry readout.
+    # NOTE: token_feat is still gated by loop_atom_valid_mask inside CDRLoopHead,
+    # so this signal is not yet fully independent of n_real (see loop-assembly
+    # leak); a clean version requires fixing that mask leak. Default weight 0.
+    # ------------------------------------------------------------------
+    def _cdr_sequence_ce_loss(
+        self,
+        seq_logits: torch.Tensor,        # [B, n_loop, lmax, 20]
+        loop_type_target: torch.Tensor,  # [B, n_loop, lmax] codebook idx, -100 ignore
+    ) -> torch.Tensor:
+        zero = seq_logits.new_tensor(0.0)
+        if seq_logits is None or loop_type_target is None:
+            return zero
+        if seq_logits.ndim == 3:
+            seq_logits = seq_logits.unsqueeze(0)
+        if loop_type_target.ndim == 2:
+            loop_type_target = loop_type_target.unsqueeze(0)
+        n_cls = seq_logits.shape[-1]
+        tgt = loop_type_target.to(device=seq_logits.device, dtype=torch.long)
+        if not bool((tgt != -100).any()):
+            return zero
+        return F.cross_entropy(
+            seq_logits.reshape(-1, n_cls), tgt.reshape(-1), ignore_index=-100
+        )
 
     # ==========================================
     # Backbone loss: x0-space MSE (trsl) + geodesic (rota), sigma-independent
@@ -759,6 +797,18 @@ class IgGMPaperLoss:
             else:
                 w_cdr = pred.new_tensor(1.0)
 
+            # Scheme B: sequence-head CE (inert unless seq_head_weight > 0).
+            loss_seq = pred.new_tensor(0.0)
+            seq_logits = outputs["3d"].get("seq_logits")
+            if self.cfg.seq_head_weight > 0.0: # and seq_logits is not None and "atom14_type_target" in inputs
+                loop_type_target = self._gather_full_tensor_to_loops(
+                    inputs["atom14_type_target"],
+                    inputs["loop_global_res_indices"],
+                    inputs["loop_valid_res_mask"],
+                    fill_value=-100,
+                ).to(torch.long)
+                loss_seq = self._cdr_sequence_ce_loss(seq_logits, loop_type_target)
+
             # # 7. Loss aggregation with config weights
             # total = (
             #     self.cfg.backbone_weight * loss_backbone
@@ -776,6 +826,7 @@ class IgGMPaperLoss:
                 + self.cfg.cdr_all_atom_weight * w_cdr * loss_cdr
                 + self.cfg.bond_weight * loss_bond
                 + self.cfg.smooth_lddt_weight * loss_smooth_lddt
+                + self.cfg.seq_head_weight * loss_seq
                 # + self.cfg.vio_weight * loss_vio
             )
 
@@ -786,7 +837,7 @@ class IgGMPaperLoss:
                     'perturb': inputs['cord-p'],
                     'pre': pred,
                     'clean': atom14_tgt,
-                }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S0717_{ts}.pt')
+                }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S0721_{ts}.pt')
             self.idx_save += 1
 
             return {
@@ -801,7 +852,8 @@ class IgGMPaperLoss:
                 
                 "loss_trsl_residual": loss_trsl_residual,
                 "loss_rota_residual": loss_rota_residual,
-                
+                "loss_seq": loss_seq,
+
                 "w_cdr": w_cdr,
                 "rotation_diag": rotation_diag,
             }

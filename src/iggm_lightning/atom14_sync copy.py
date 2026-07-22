@@ -13,11 +13,7 @@ from typing import Dict, List, Tuple
 
 import torch
 
-from IgGM.protein.prot_constants import (
-    ATOM_NAMES_PER_RESD,
-    RESD_MAP_1TO3,
-    RESD_NAMES_1C,
-)
+from IgGM.protein.prot_constants import ATOM_NAMES_PER_RESD, RESD_MAP_1TO3, RESD_NAMES_1C
 
 
 @dataclass(frozen=True)
@@ -126,13 +122,6 @@ class Atom14SeqSync:
             dtype=cord.dtype,
             device=cord.device,
         )
-        # Per-residue type label (codebook / RESD_NAMES_1C index) for the RAMF
-        # decodability margin loss; -100 = ignore (non-CDR / unknown residue).
-        # Indexing matches IDEAL_ATOM14_COORDS[i] <-> RESD_NAMES_1C[i].
-        type_target = torch.full(
-            (cord.shape[0],), -100, dtype=torch.long, device=cord.device
-        )
-        aa_to_type_idx = {aa: i for i, aa in enumerate(RESD_NAMES_1C)}
 
         n_idx = 0
         o_idx = 3
@@ -144,9 +133,6 @@ class Atom14SeqSync:
                 or aa not in self._n_real_dict
             ):
                 continue
-
-            if aa in aa_to_type_idx:
-                type_target[ridx] = aa_to_type_idx[aa]
 
             n_real = self._n_real_dict[aa]
             code = self._BOLTZ_CODEBOOK[aa]
@@ -182,7 +168,6 @@ class Atom14SeqSync:
             "cmsk_atom14": cmsk.to(dtype=cmsk_n14_tf.dtype),
             "atom14_marker_class": marker_class,
             "atom14_marker_count_target": marker_count_target,
-            "atom14_type_target": type_target,
         }
 
     def _count_no_markers(self, residue_atoms: torch.Tensor, residue_mask: torch.Tensor) -> Tuple[int, int]:

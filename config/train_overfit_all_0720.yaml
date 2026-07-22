@@ -3,9 +3,9 @@ data:
   metadata: data/sabdab/sabdab/metadata.json
   pdb_dir: data/sabdab/pdb
   samples_dir: data/sabdab/sabdab/samples
-  train_ids: data/sabdab/sabdab_file/split_debug_one/val_prot_ids.txt
+  train_ids: data/sabdab/sabdab_file/split_debug_one/train_prot_ids.txt
   val_ids: data/sabdab/sabdab_file/split_debug_one/val_prot_ids.txt
-  test_ids: data/sabdab/sabdab_file/split_debug_one/val_prot_ids.txt
+  test_ids: data/sabdab/sabdab_file/split_debug_one/test_prot_ids.txt
   train_clusters: data/sabdab/sabdab_file/split_debug_one/train_prot_cluster.txt
   batch_size: 1
   num_workers: 2
@@ -15,7 +15,7 @@ data:
 
 model:
   ppi_ckpt: "/root/private_data/luog/codex/IgGM/checkpoints/esm_ppi_650m_ab.pth"
-  design_ckpt: "/root/private_data/luog/codex/IgGM2/outputs/Iggm_lightning_training_all_0720/checkpoints/best-epoch=1999-val_tm_score=0.0000.ckpt"
+  design_ckpt: ""
   igso3_buffer: "/root/private_data/luog/codex/IgGM/checkpoints/igso3_buffer.pth" 
 
 optimizer:
@@ -23,6 +23,11 @@ optimizer:
   weight_decay: 0.0 # 1.0e-3
   grad_clip: 1.0
 
+# scheduler:
+#   name: cosine
+#   t_max: 2000
+#   eta_min: 1.0e-5
+#   warmup_steps: 20
 scheduler:
   name: common_lr
 
@@ -42,14 +47,14 @@ trainer:
   ddp_find_unused_parameters: true
 
 wandb:
-  disabled: true # true or false
+  disabled: false # true or false
   project: IgGM
-  run_name: Iggm_lightning_training_nono
+  run_name: Iggm_lightning_training_all_0721
   entity: "mllm-csu"
   api_key: "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"
 
 runtime:
-  output_dir: outputs/Iggm_lightning_training_nono
+  output_dir: outputs/Iggm_lightning_training_all_0721
   seed: 56
   resume: false
   run_test: true

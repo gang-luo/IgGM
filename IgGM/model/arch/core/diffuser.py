@@ -224,7 +224,6 @@ class Diffuser:
         cord_tns_orig = prot_data_orig["cords_atom14"]
         cmsk_mat_orig = prot_data_orig["cmsk"]
         cmsk_mat_orig14 = prot_data_orig["cmsk_atom14"]
-        atom14_type_target = prot_data_orig["atom14_type_target"]
 
         pmsk_vec = prot_data_orig["mask_design"]
         antibody_mask = prot_data_orig["mask_ab"].to(device=device, dtype=torch.bool)
@@ -376,6 +375,17 @@ class Diffuser:
             loop_atom_supervise_mask,
         )
 
+        # Perception mask (atom14-open, leak-free). The structural perception /
+        # denoising path (cmsk_tns_init, st_encoder) must NOT see the real-atom
+        # occupancy of CDR residues -- that occupancy equals n_real, a constant
+        # (noise-independent) leak of the residue type. For CDR residues we use
+        # the full-14 mask (cmsk_atom14 == all-True there, because build_supervision
+        # fills every marker slot), which carries zero type information; non-CDR
+        # residues keep their real-atom mask. cmsk-p is kept unchanged for losses.
+        cmsk_perc = torch.where(
+            cdr_mask.view(-1, 1), cmsk_mat_orig14.to(torch.bool), cmsk_mat_orig.to(torch.bool)
+        ).to(cmsk_mat_orig.dtype)
+
         prot_data_pert = {
             "step": [idxs_step],
             "seq-o": aa_seq_orig,
@@ -384,11 +394,14 @@ class Diffuser:
             "cmsk_atom14": cmsk_mat_orig14,
             "pmsk": pmsk_vec,
             "pmsk-ligand": prot_data_orig["mask_ab"],
-            "atom14_type_target": atom14_type_target,
+            # soft passthrough: only present if the datamodule supplied it;
+            # consumed only by the (default-off) RAMF decodability margin loss.
+            "atom14_type_target": prot_data_orig.get("atom14_type_target"),
 
             "seq-p": aa_seqs_pert,
-            "cord-p": cord_tns_noisy.unsqueeze(0), # 
-            "cmsk-p": cmsk_mat_orig.unsqueeze(0),  # 结构扰动不改变原子mask/// 可能间接泄漏氨基酸类型？
+            "cord-p": cord_tns_noisy.unsqueeze(0), #
+            "cmsk-p": cmsk_mat_orig.unsqueeze(0),  # real-atom mask, for losses only
+            "cmsk-perc": cmsk_perc.unsqueeze(0),   # atom14-open perception mask (leak-free)
 
             "asym-id": prot_data_orig["asym_id"].detach().clone(),
             "a-cord": prot_data_orig["a-cord"].detach().clone(),
