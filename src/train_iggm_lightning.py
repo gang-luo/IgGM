@@ -42,7 +42,6 @@ if str(ROOT) not in sys.path:
 from IgGM.model import DesignModel, esm_ppi_650m_ab
 from IgGM.model.arch.core.diffuser import Diffuser
 from IgGM.model.factory import build_design_model_module, build_ppi_featurizer_module
-from IgGM.utils import IGSO3Buffer
 from iggm_lightning import (
     IgGMLightningModule,
     IgGMLossConfig,
@@ -124,7 +123,8 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
 
     p.add_argument("--ppi_ckpt", default=model.get("ppi_ckpt", ""))
     p.add_argument("--design_ckpt", default=model.get("design_ckpt", ""))
-    p.add_argument("--igso3_buffer", default=model.get("igso3_buffer", ""))
+    p.add_argument("--rota_angle_rms_min", type=float, default=float(diffusion.get("rota_angle_rms_min", 0.005)))
+    p.add_argument("--rota_schedule_gamma", type=float, default=float(diffusion.get("rota_schedule_gamma", 1.5)))
 
     p.add_argument("--sched_name", default=scheduler.get("name", "common_lr"))
     p.add_argument("--sched_t_max", type=int, default=int(scheduler.get("t_max", 10000)))
@@ -252,13 +252,11 @@ def main() -> None:
     else:
         design_model = DesignModel(n_dims_sfea_init=model_cfg.c_s, n_dims_pfea_init=model_cfg.c_p)
 
-    igso3 = None
-    if args.igso3_buffer:
-        igso3 = IGSO3Buffer()
-        igso3.load(args.igso3_buffer)
     diffuser = Diffuser(
-        igso3_buffer=igso3,
+        n_steps=args.n_steps,
         occupancy_mode=args.occupancy_mode,
+        rota_angle_rms_min=args.rota_angle_rms_min,
+        rota_schedule_gamma=args.rota_schedule_gamma,
     )
     
     if args.sched_name != "common_lr":

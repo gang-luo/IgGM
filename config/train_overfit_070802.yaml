@@ -16,7 +16,10 @@ data:
 model:
   ppi_ckpt: "/root/private_data/luog/codex/IgGM/checkpoints/esm_ppi_650m_ab.pth"
   design_ckpt: ""
-  igso3_buffer: "/root/private_data/luog/codex/IgGM/checkpoints/igso3_buffer.pth" 
+
+diffusion:
+  rota_angle_rms_min: 0.005
+  rota_schedule_gamma: 1.5
 
 optimizer:
   lr: 1.0e-4

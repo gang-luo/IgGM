@@ -5,18 +5,17 @@ Notes:
     types in the amino-acid sequence.
 """
 
-import logging
 import math
-import random
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch import nn
 
 from IgGM.protein import AtomMapper
 from IgGM.protein.prot_constants import RESD_NAMES_1C
 from IgGM.utils import (
-    IsotropicGaussianSO3,
+    OnlineIGSO3Schedule,
     extract_clean_fr_reference,
     extract_per_loop_clean_local_coords,
     global_to_local_coords,
@@ -36,13 +35,16 @@ from IgGM.utils import (
 class Diffuser:
     """Protein diffusion model for amino-acid sequences & backbone structures."""
 
+    ROTATION_BASE_SEED = 20250722
+
     def __init__(
             self,
             n_steps=200,  # number of time steps in the diffusion process
             pert_seq=True,  # whether to perturb amino-acid sequences
             cord_scale=4.0,  # coordinate scaling factor (in Angstrom)
-            igso3_buffer=None,  # buffered rotational matrices sampled from IGSO(3) distributions
             occupancy_mode="joint_predict",
+            rota_angle_rms_min=0.005,
+            rota_schedule_gamma=1.5,
     ):
         """Constructor function."""
 
@@ -50,19 +52,18 @@ class Diffuser:
         self.n_steps = n_steps
         self.pert_seq = pert_seq
         self.cord_scale = cord_scale
-        self.igso3_buffer = igso3_buffer
         self.fr_noise_scale_trsl = float(1.0)
-        self.fr_noise_scale_rota =  float(1.0)
         # CDR sigma_data~24.7; coef 1.0 -> sigma_cdr up to 3x sigma_data (from-scratch denoise)
         self.cdr_local_noise_scale =  float(0.25) # 1.0
 
-        # rota angle-noise schedule (run & __build_igso3_list_ve must match)
-        self.rota_noise_factor = 0.025
-        self.rota_noise_max = 1.5      # ~86 deg cap, avoid near-uniform SO(3)
+        self.rota_angle_rms_min = float(rota_angle_rms_min)
+        self.rota_schedule_gamma = float(rota_schedule_gamma)
+        self.haar_angle_rms = math.sqrt(math.pi ** 2 / 3.0 + 2.0)
+        if self.rota_angle_rms_min <= 0 or self.rota_schedule_gamma <= 0:
+            raise ValueError("rotation angle RMS minimum and schedule gamma must be positive")
 
         self.occupancy_mode = occupancy_mode
 
-        self.rota_buf_size = 1024  # number of rotation matrices buffered for each IGSO(3) distr.
         self.atom_mapper = AtomMapper()
         self.resd_names = RESD_NAMES_1C  # 20 standard AA type tokens
         self.n_tokns = len(self.resd_names)
@@ -71,10 +72,7 @@ class Diffuser:
         # initialize variance schedules
         self.seq_schedule = CosineSchedule(n_steps=self.n_steps, offset=0.008, beta_max=0.999)
         self.trsl_schedule = LinearSchedule(n_steps=self.n_steps, beta_min=0.01, beta_max=0.999)
-        self.rota_schedule = CosineSchedule(n_steps=self.n_steps, offset=0.008, beta_max=0.999)
-
-        self.__build_trmat_list() # prepare transition matrices for sequence perturbation
-        self.__build_igso3_list() # prepare IGSO(3) distributions for rotation perturbation
+        self.__build_trmat_list()
 
         # --- 新增: EDM (VE) 连续时间连续噪声调度 (Karras et al. 2022) ---
         self.sigma_min = 0.01
@@ -94,7 +92,20 @@ class Diffuser:
         self.cdr_mu = torch.tensor([0,0,0], dtype=torch.float32) 
         self.cdr_scale = torch.tensor(6.0, dtype=torch.float32) # std (sigma_data)
 
-        self.__build_igso3_list_ve()
+        self._rotation_rank = None
+        self.__build_rotation_schedule()
+
+    def __build_rotation_schedule(self) -> None:
+        sigma_data_pose = torch.sqrt(self.trsl_scale * (self.cdr_scale / self.cdr_local_noise_scale))
+        noise_fraction = self.sigmas.double() / torch.sqrt(self.sigmas.double().square() + sigma_data_pose.double().square())
+        progress = ((noise_fraction - noise_fraction[1]) / (noise_fraction[-1] - noise_fraction[1]).clamp_min(1e-12)).clamp(0.0, 1.0)
+        angle_rms = torch.zeros(self.n_steps + 1, dtype=torch.float64)
+        angle_rms[1:] = self.rota_angle_rms_min + (
+            self.haar_angle_rms - self.rota_angle_rms_min
+        ) * progress[1:].pow(self.rota_schedule_gamma)
+        angle_rms[-1] = self.haar_angle_rms
+        self.rota_angle_rms_schedule = angle_rms.float()
+        self.rota_sampler = OnlineIGSO3Schedule(angle_rms, seed=self.ROTATION_BASE_SEED)
 
     def _sample_probabilities(self, aa_seq_orig, pmsk_vec, idxs_step, device):
         """Sample noisy residue-type distributions; shared by legacy and fr_cdr_sync modes."""
@@ -114,10 +125,17 @@ class Diffuser:
         return prob_tns_orig, prob_tns_pert, aa_seqs_pert
 
     @staticmethod
-    def _rotation_rms_angle(rotations: torch.Tensor) -> torch.Tensor:
-        rotations = rotations.float()
-        cos_angle = ((rotations.diagonal(dim1=-2, dim2=-1).sum(-1) - 1.0) * 0.5).clamp(-1.0, 1.0)
-        return torch.acos(cos_angle).square().mean().sqrt()
+    def _validate_rotation(rotation: torch.Tensor, name: str) -> None:
+        with torch.amp.autocast(device_type=rotation.device.type, enabled=False):
+            rotation_f32 = rotation.float()
+            eye = torch.eye(3, device=rotation.device, dtype=torch.float32)
+            orth_error = (rotation_f32.transpose(-1, -2) @ rotation_f32 - eye).abs().amax()
+            det_error = (torch.det(rotation_f32) - 1.0).abs()
+            is_finite = torch.isfinite(rotation_f32).all()
+        if not is_finite or orth_error > 5e-4 or det_error > 5e-4:
+            raise RuntimeError(
+                f"invalid {name}: orth_error={float(orth_error):.3e}, det_error={float(det_error):.3e}"
+            )
 
     @staticmethod
     def _build_antibody_rigid_params(cord_tns_orig, cmsk_mat_orig, antibody_mask):
@@ -212,16 +230,22 @@ class Diffuser:
 
     def run(self, prot_data_orig, idxs_step=None, return_time_steps=False):
         """Build a synchronized noisy state with FR rigid motion + CDR local diffusion."""
+        device_type = prot_data_orig["cord"].device.type
+        with torch.amp.autocast(device_type=device_type, enabled=False):
+            return self._run_impl(prot_data_orig, idxs_step, return_time_steps)
 
-        # idxs_step = 100
-        # torch.manual_seed(42)
-        # random.seed(42)
+    def _run_impl(self, prot_data_orig, idxs_step=None, return_time_steps=False):
+
+        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+        if rank != self._rotation_rank:
+            self.rota_sampler.generator.manual_seed(self.ROTATION_BASE_SEED + rank)
+            self._rotation_rank = rank
 
         device = prot_data_orig["cord"].device
-        dtype = prot_data_orig["cord"].dtype
+        dtype = torch.float32
 
         aa_seq_orig = prot_data_orig["seq"]
-        cord_tns_orig = prot_data_orig["cords_atom14"]
+        cord_tns_orig = prot_data_orig["cords_atom14"].float()
         cmsk_mat_orig = prot_data_orig["cmsk"]
         cmsk_mat_orig14 = prot_data_orig["cmsk_atom14"]
 
@@ -255,6 +279,7 @@ class Diffuser:
             cmsk_mat_orig14,
             antibody_mask,
         )
+        self._validate_rotation(rota_orig, "clean antibody rotation")
         
         trsl_mu = self.trsl_mu.to(device=device, dtype=dtype)
         trsl_std = self.trsl_scale.to(device=device, dtype=dtype)
@@ -271,15 +296,11 @@ class Diffuser:
         # Reconstruct physical noisy coordinates for 3D Evoformer
         trsl_xt_physical = trsl_xt_centered + trsl_mu
         
-        # Random rotation (existing logic)
-        sigma_rota = torch.clamp(
-            sigma_t * self.fr_noise_scale_rota * self.rota_noise_factor,
-            max=self.rota_noise_max,
-        )
-        rota_buf = self.rota_buf_list_fwd[idxs_step].to(device=device, dtype=dtype)
-        rota_rms = self.rota_rms_list_fwd[idxs_step].to(device=device, dtype=dtype)
-        fr_rotation = rota_buf[random.randrange(self.rota_buf_size)]
-        rota_xt = torch.matmul(rota_orig, fr_rotation)
+        rota_rms = self.rota_angle_rms_schedule[idxs_step].to(device=device, dtype=dtype)
+        fr_rotation = self.rota_sampler.sample(idxs_step, device=device, dtype=torch.float32)
+        rota_xt = torch.matmul(rota_orig.float(), fr_rotation).to(dtype=dtype)
+        self._validate_rotation(rota_xt, "noisy antibody rotation")
+        sigma_rota = rota_rms
         
         # Build noisy antibody complex
         noisy_ab_cord_tns = cord_tns_orig.clone()
@@ -440,6 +461,10 @@ class Diffuser:
                 "fr_sigma_trsl": sigma_trsl.detach().clone(),
                 "fr_sigma_rota": sigma_rota.detach().clone(),
                 "fr_rota_rms": rota_rms.detach().clone(),
+                "fr_igso3_eps": torch.as_tensor(
+                    self.rota_sampler.eps[idxs_step], device=device, dtype=dtype
+                ),
+                "fr_rota_is_haar": bool(idxs_step == self.n_steps),
 
                 "fr_c_in": fr_c_in.detach().clone(),
                 "fr_c_skip": fr_c_skip.detach().clone(),
@@ -498,67 +523,6 @@ class Diffuser:
             self.trmat_list_st.append(trmat_st)
             self.trmat_list_ac.append(trmat_ac)
 
-    def __build_igso3_list(self):
-        """Build a list of IGSO(3) distributions."""
-
-        # build IGSO(3) distributions for the forward process (x_{0} -> x_{t})
-        logging.info('building forward IGSO(3) distributions ...')
-        self.rota_buf_list_fwd = [None]  # skip the first entry
-        for idx, stdev in enumerate(self.rota_schedule.sigmas[1:]):
-            if self.igso3_buffer is None:
-                igso3 = IsotropicGaussianSO3(eps=stdev.view(1))
-                rota_buf = igso3.sample_batch(torch.Size([self.rota_buf_size]))[:, 0]
-            else:
-                rota_buf = self.igso3_buffer.sample(stdev.item(), self.rota_buf_size)
-            self.rota_buf_list_fwd.append(rota_buf)
-
-        # build IGSO(3) distributions for the backward process (x_{0} & x_{t} -> x_{t-1})
-        logging.info('building backward IGSO(3) distributions ...')
-        self.rota_buf_list_bwd = [None, None]  # skip the first two entries
-        for idx, stdev in enumerate(self.rota_schedule.betas_tld[2:]):
-            if self.igso3_buffer is None:
-                igso3 = IsotropicGaussianSO3(eps=stdev.view(1))
-                rota_buf = igso3.sample_batch(torch.Size([self.rota_buf_size]))[:, 0]
-            else:
-                rota_buf = self.igso3_buffer.sample(stdev.item(), self.rota_buf_size)
-            self.rota_buf_list_bwd.append(rota_buf)
-
-    # def __build_igso3_list_ve(self):
-    #     """根据 sigma 构建 SO(3) 旋转噪声缓冲"""
-    #     logging.info('building VE IGSO(3) distributions ...')
-    #     self.rota_buf_list_fwd = [None] 
-    #     # 把线性的距离 sigma 映射到角度 sigma (假设 1A 大致对应 0.1 rad 的旋转剧烈程度)
-    #     # for sigma in self.sigmas[1:]:
-    #     #     stdev = torch.clamp(sigma * self.fr_noise_scale_rota * 0.1, max=3.14)
-    #     for sigma in self.sigmas[1:]:
-    #         stdev = torch.clamp(sigma * self.fr_noise_scale_rota * self.rota_noise_factor, max=self.rota_noise_max)
-    #         if self.igso3_buffer is None:
-    #             igso3 = IsotropicGaussianSO3(eps=stdev.view(1))
-    #             rota_buf = igso3.sample_batch(torch.Size([self.rota_buf_size]))[:, 0]
-    #         else:
-    #             rota_buf = self.igso3_buffer.sample(stdev.item(), self.rota_buf_size)
-    #         self.rota_buf_list_fwd.append(rota_buf)
- 
-
-    def __build_igso3_list_ve(self):
-        logging.info("building VE IGSO(3) distributions ...")
-        self.rota_buf_list_fwd = [None]
-        self.rota_rms_list_fwd = [None]
-
-        for sigma in self.sigmas[1:]:
-            stdev = torch.clamp(
-                sigma * self.fr_noise_scale_rota * self.rota_noise_factor,
-                max=self.rota_noise_max,
-            )
-            if self.igso3_buffer is None:
-                igso3 = IsotropicGaussianSO3(eps=stdev.view(1))
-                rota_buf = igso3.sample_batch(torch.Size([self.rota_buf_size]))[:, 0]
-            else:
-                rota_buf = self.igso3_buffer.sample(stdev.item(), self.rota_buf_size)
-
-            self.rota_buf_list_fwd.append(rota_buf)
-            self.rota_rms_list_fwd.append(self._rotation_rms_angle(rota_buf))
-      
 class VarianceSchedule():
     """General variance schedule for DDPM training & sampling.
 

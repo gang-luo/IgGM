@@ -31,7 +31,7 @@ from openfold.utils.loss import find_structural_violations, violation_loss
 #     vio_weight: float = 0.02
 #     # A3: min-SNR loss weighting (Hang et al. 2023). Off by default; enable when
 #     # scaling to many samples to balance gradients across noise levels.
-#     use_snr_weight: bool = False 
+#     use_snr_weight: bool = False
 #     snr_gamma: float = 0.5 # 5.0
 
 @dataclass
@@ -85,7 +85,7 @@ class IgGMPaperLoss:
             "target_energy": target.square().sum(-1).mean().detach(),
             "dot": (pred * target).sum(-1).mean().detach(),
         }
-    
+
     @staticmethod
     def _so3_log_vector(rotation: torch.Tensor) -> torch.Tensor:
         rotation = rotation.float()
@@ -153,7 +153,7 @@ class IgGMPaperLoss:
         loss_trsl_residual = F.mse_loss(pred_trsl_residual, target_trsl_residual)
         loss_rota_residual = F.mse_loss(pred_rota_vec_norm, target_rota_vec_norm)
         return loss_trsl_residual, loss_rota_residual, rotation_diag
-        
+
     @staticmethod
     def _normalize_res_mask(mask, batch_size, seq_len):
         mask = mask.to(torch.bool)
@@ -252,7 +252,7 @@ class IgGMPaperLoss:
         # Expand source for gathering
         source = full_tensor.unsqueeze(1).expand(batch_size, n_loop, seq_len, *tail_shape)
         safe_indices = loop_global_res_indices.clamp(min=0, max=seq_len - 1)
-        
+
         index_shape = (batch_size, n_loop, lmax, *([1] * len(tail_shape)))
         gather_indices = safe_indices.view(index_shape).expand(batch_size, n_loop, lmax, *tail_shape)
 
@@ -406,7 +406,7 @@ class IgGMPaperLoss:
 
         # Ensure batch dimensions align
         tensors = [
-            clean_loop_local, loop_anchor_local_coords, 
+            clean_loop_local, loop_anchor_local_coords,
             loop_anchor_atom_mask, loop_atom_valid_mask, loop_true_len
         ]
         expanded = [
@@ -414,7 +414,7 @@ class IgGMPaperLoss:
             for t in tensors
         ]
         (
-            clean_loop_local, loop_anchor_local_coords, 
+            clean_loop_local, loop_anchor_local_coords,
             loop_anchor_atom_mask, loop_atom_valid_mask, loop_true_len
         ) = expanded
 
@@ -584,7 +584,7 @@ class IgGMPaperLoss:
         loss_intra = F.mse_loss(pred_bonds_intra[mask_intra], true_bonds_intra[mask_intra]) if mask_intra.any() else pred_coords.new_tensor(0.0)
         loss_inter = F.mse_loss(pred_bonds_inter[mask_inter], true_bonds_inter[mask_inter]) if mask_inter.any() else pred_coords.new_tensor(0.0)
         return loss_intra + loss_inter
-    
+
     # ----------------------------------------------------------------
     # CDR 局部坐标 Huber loss（不变，调用方更新了传入的 label）
     # ----------------------------------------------------------------
@@ -597,14 +597,14 @@ class IgGMPaperLoss:
         clean_loop_local = clean_loop_local.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
         loop_atom_valid_mask = loop_atom_valid_mask.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype)
         valid_mask = loop_atom_valid_mask.unsqueeze(-1)
-        
+
         # Calculate Physical MSE
         sq_diff = F.mse_loss(pred_loop_local, clean_loop_local, reduction='none') * valid_mask
-        
+
         # Scale to match the implicit normalized EDM objective space
         c_scale = cdr_scale.to(device=pred_loop_local.device, dtype=pred_loop_local.dtype).view(-1, 1, 1, 1, 1)
         sq_diff = sq_diff / (c_scale ** 2)
-        
+
         denom = valid_mask.sum(dim=(1, 2, 3, 4)).clamp_min(1.0)
         loss_per_batch = sq_diff.sum(dim=(1, 2, 3, 4)) / (3.0 * denom)
         return loss_per_batch.mean()
@@ -679,7 +679,7 @@ class IgGMPaperLoss:
             cmsk = self._ensure_batched(inputs["cmsk-p"], ndim_no_batch=2).to(
                 device=pred.device, dtype=torch.bool
             )
-            
+
             cdr_mask = self._normalize_res_mask(
                 inputs["cdr_mask"], batch_size, seq_len
             ).to(pred.device)
@@ -773,7 +773,7 @@ class IgGMPaperLoss:
             #     + loss_rota_residual
             #     + self.cfg.fr_global_aux_weight * loss_global_backbone
             # )
-            
+
             # 控制
             loss_backbone = (
                 loss_trsl_residual
@@ -818,7 +818,7 @@ class IgGMPaperLoss:
             #     # + self.cfg.vio_weight * loss_vio
             # )
 
-            # total = loss_backbone 
+            # total = loss_backbone
 
 
             total = (
@@ -833,10 +833,17 @@ class IgGMPaperLoss:
             if self.idx_save % 100 == 0:
                 import time
                 ts = int(time.time())
+                rota_meta = inputs["anchor_frame_meta"]
                 torch.save({
                     'perturb': inputs['cord-p'],
                     'pre': pred,
                     'clean': atom14_tgt,
+                    'step': inputs['step'],
+                    'sigma_raw': inputs['sigama_t']['sigma_raw'],
+                    'fr_rota_rms': rota_meta['fr_rota_rms'],
+                    'fr_igso3_eps': rota_meta['fr_igso3_eps'],
+                    'fr_rota_is_haar': rota_meta['fr_rota_is_haar'],
+                    'rota_xt': rota_meta['rota_xt'],
                 }, f'/root/private_data/luog/codex/IgGM2/see/seefile/S0721_{ts}.pt')
             self.idx_save += 1
 
@@ -849,7 +856,7 @@ class IgGMPaperLoss:
                 "loss_bond": loss_bond,
                 "loss_trsl": loss_trsl,
                 "loss_rota": loss_rota,
-                
+
                 "loss_trsl_residual": loss_trsl_residual,
                 "loss_rota_residual": loss_rota_residual,
                 "loss_seq": loss_seq,
@@ -871,7 +878,7 @@ class IgGMPaperLoss:
 
     #     loss_smooth_lddt = self._cdr_smooth_lddt_loss(pred, atom14_tgt, cmsk, cdr_mask)
     #     loss_bond = self._compute_bond_loss(pred, atom14_tgt, cmsk, cdr_mask)
-        
+
     #     # loss_smooth_lddt = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
     #     # loss_bond = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
 
@@ -980,4 +987,4 @@ class IgGMPaperLoss:
     #         "loss_rota": loss_rota,
     #         "w_cdr": w_cdr,
     #     }
-    
+

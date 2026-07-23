@@ -6,6 +6,7 @@ Notes:
 """
 import os
 import random
+import math
 from typing import Tuple
 
 import numpy as np
@@ -714,6 +715,126 @@ class IsotropicGaussianSO3(Distribution):
     @property
     def mean(self):
         return self._mean
+
+
+class OnlineIGSO3Schedule:
+    """Online IGSO(3) sampler parameterized by actual rotation-angle RMS."""
+
+    def __init__(self, angle_rms: torch.Tensor, seed: int = 0, calibration_size: int = 512):
+        angle_rms = torch.as_tensor(angle_rms, dtype=torch.float64, device="cpu").reshape(-1)
+        if angle_rms.numel() < 2 or angle_rms[0] != 0:
+            raise ValueError("angle_rms must contain t=0 identity followed by at least one noisy step")
+        if not torch.isfinite(angle_rms).all() or torch.any(angle_rms[1:] <= 0):
+            raise ValueError("non-zero timestep angle RMS values must be finite and positive")
+        if torch.any(angle_rms[1:] < angle_rms[:-1]):
+            raise ValueError("angle RMS schedule must be monotonically non-decreasing")
+
+        self.angle_rms = angle_rms
+        self.n_steps = angle_rms.numel() - 1
+        self.haar_rms = float(sqrt(pi ** 2 / 3.0 + 2.0))
+        if abs(float(angle_rms[-1]) - self.haar_rms) > 5e-4:
+            raise ValueError("the terminal angle RMS must equal the Haar-uniform SO(3) RMS")
+
+        self.generator = torch.Generator(device="cpu")
+        self.generator.manual_seed(int(seed))
+        self.eps = torch.zeros_like(angle_rms)
+        self.angle_locs = torch.empty(0, dtype=torch.float64)
+        self.angle_cdf = torch.empty((0, max(self.n_steps - 1, 0)), dtype=torch.float64)
+
+        if self.n_steps > 1:
+            n_log = calibration_size // 3
+            eps_grid = torch.cat([
+                torch.logspace(math.log10(0.003), math.log10(0.1), n_log, dtype=torch.float64),
+                torch.linspace(0.1, 3.0, calibration_size - n_log + 1, dtype=torch.float64)[1:],
+            ])
+            calibration = IsotropicGaussianSO3(eps_grid)
+            rms_grid = self._cdf_angle_rms(calibration.trap, calibration.trap_loc[:, 0])
+            rms_grid = torch.cummax(rms_grid, dim=0).values
+            targets = angle_rms[1:-1]
+            if targets.numel() and (targets[0] < rms_grid[0] or targets[-1] > rms_grid[-1]):
+                raise ValueError(
+                    f"angle RMS target range [{float(targets[0]):.6f}, {float(targets[-1]):.6f}] "
+                    f"is outside IGSO3 calibration range [{float(rms_grid[0]):.6f}, {float(rms_grid[-1]):.6f}]"
+                )
+            self.eps[1:-1] = self._interpolate_eps(targets, rms_grid, eps_grid)
+            distributions = IsotropicGaussianSO3(self.eps[1:-1])
+            self.angle_locs = distributions.trap_loc[:, 0].contiguous()
+            self.angle_cdf = distributions.trap.transpose(0, 1).contiguous()
+
+    @staticmethod
+    def _cdf_angle_rms(cdf: torch.Tensor, upper_locs: torch.Tensor) -> torch.Tensor:
+        zero_cdf = torch.zeros((1, cdf.shape[1]), dtype=cdf.dtype, device=cdf.device)
+        mass = torch.diff(torch.cat([zero_cdf, cdf], dim=0), dim=0).clamp_min(0.0)
+        lower_locs = torch.cat([torch.zeros(1, dtype=upper_locs.dtype), upper_locs[:-1]])
+        midpoint_sq = ((lower_locs + upper_locs) * 0.5).square().unsqueeze(-1)
+        return torch.sqrt((mass * midpoint_sq).sum(0) / mass.sum(0).clamp_min(1e-12))
+
+    @staticmethod
+    def _interpolate_eps(target: torch.Tensor, rms_grid: torch.Tensor, eps_grid: torch.Tensor) -> torch.Tensor:
+        if target.numel() == 0:
+            return target.clone()
+        idx_hi = torch.searchsorted(rms_grid, target).clamp(1, rms_grid.numel() - 1)
+        idx_lo = idx_hi - 1
+        rms_lo, rms_hi = rms_grid[idx_lo], rms_grid[idx_hi]
+        weight = (target - rms_lo) / (rms_hi - rms_lo).clamp_min(1e-12)
+        return torch.lerp(eps_grid[idx_lo], eps_grid[idx_hi], weight)
+
+    @staticmethod
+    def _axis_angle_to_matrix(axis: torch.Tensor, angle: torch.Tensor) -> torch.Tensor:
+        x, y, z = axis
+        zero = torch.zeros((), dtype=axis.dtype)
+        skew = torch.stack([zero, -z, y, z, zero, -x, -y, x, zero]).reshape(3, 3)
+        eye = torch.eye(3, dtype=axis.dtype)
+        return eye + torch.sin(angle) * skew + (1.0 - torch.cos(angle)) * (skew @ skew)
+
+    def _sample_igso3(self, idx_step: int) -> torch.Tensor:
+        cdf = self.angle_cdf[idx_step - 1]
+        uniform = torch.rand((), generator=self.generator, dtype=torch.float64)
+        idx_hi = int(torch.searchsorted(cdf, uniform).clamp(max=cdf.numel() - 1).item())
+        cdf_lo = cdf.new_tensor(0.0) if idx_hi == 0 else cdf[idx_hi - 1]
+        cdf_hi = cdf[idx_hi]
+        angle_lo = self.angle_locs.new_tensor(0.0) if idx_hi == 0 else self.angle_locs[idx_hi - 1]
+        angle_hi = self.angle_locs[idx_hi]
+        weight = ((uniform - cdf_lo) / (cdf_hi - cdf_lo).clamp_min(1e-12)).clamp(0.0, 1.0)
+        angle = torch.lerp(angle_lo, angle_hi, weight)
+        axis = torch.randn(3, generator=self.generator, dtype=torch.float64)
+        axis = axis / axis.norm().clamp_min(1e-12)
+        return self._axis_angle_to_matrix(axis, angle)
+
+    def _sample_haar(self) -> torch.Tensor:
+        quat = torch.randn(4, generator=self.generator, dtype=torch.float64)
+        quat = quat / quat.norm().clamp_min(1e-12)
+        w, x, y, z = quat
+        return torch.stack([
+            1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
+            2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
+            2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y),
+        ]).reshape(3, 3)
+
+    def sample(self, idx_step: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        idx_step = int(idx_step)
+        if idx_step < 0 or idx_step > self.n_steps:
+            raise ValueError(f"rotation timestep {idx_step} is outside [0, {self.n_steps}]")
+        if idx_step == 0:
+            rotation = torch.eye(3, dtype=torch.float64)
+        elif idx_step == self.n_steps:
+            rotation = self._sample_haar()
+        else:
+            rotation = self._sample_igso3(idx_step)
+        rotation = rotation.to(device=device, dtype=dtype)
+        with torch.amp.autocast(device_type=device.type, enabled=False):
+            rotation_f32 = rotation.float()
+            eye = torch.eye(3, device=device, dtype=torch.float32)
+            orth_error = (rotation_f32.transpose(-1, -2) @ rotation_f32 - eye).abs().amax()
+            det_error = (torch.det(rotation_f32) - 1.0).abs()
+            is_finite = torch.isfinite(rotation_f32).all()
+        if not is_finite or orth_error > 5e-4 or det_error > 5e-4:
+            raise RuntimeError(
+                f"invalid online SO(3) sample at t={idx_step}: "
+                f"orth_error={float(orth_error):.3e}, det_error={float(det_error):.3e}"
+            )
+        return rotation
+
 
 class IGSO3Buffer():
     """Buffered rotational matrices sampled from IGSO(3) distributions."""
