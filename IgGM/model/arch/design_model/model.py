@@ -27,7 +27,7 @@ class DesignModel(BaseModel):
             n_dims_pfea=128,  # number of dimensions in pair features (D_p)
             n_dims_penc=64,  # number of dimensions in positional encodings
             n_lyrs_2d=4,  # number of <EvoformerBlockSS> layers
-            n_lyrs_3d=1,  # number of <AF2SMod> layers
+            n_lyrs_3d=2,  # number of <AF2SMod> layers
             # n_lyrs_2d=16,  # number of <EvoformerBlockSS> layers
             # n_lyrs_3d=8,  # number of <AF2SMod> layers
             pred_oxyg=True,  # whether to predict backbone oxygen atoms' 3D coordinates

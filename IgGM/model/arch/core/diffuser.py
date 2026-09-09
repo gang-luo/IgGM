@@ -37,6 +37,18 @@ class Diffuser:
 
     ROTATION_BASE_SEED = 20250722
 
+    @staticmethod
+    def _bucket_timestep(idx_step: int) -> int:
+        idx_step = int(idx_step)
+
+        if idx_step <= 50:
+            return 25
+        if idx_step <= 100:
+            return 75
+        if idx_step <= 150:
+            return 125
+        return 175
+
     def __init__(
             self,
             n_steps=200,  # number of time steps in the diffusion process
@@ -85,6 +97,11 @@ class Diffuser:
         self.sigmas = sigmas.float()
 
         # 1. Basic Data and Statistical Preparation (Add CDR stats alongside TRSL)
+        # TODO(X2 followup): these stats were computed under the OLD all-antibody-CA
+        # canonical frame.  X2 switched the frame to FR-only atoms, which shifts the
+        # centroid by ~2.7 A (measured on 1bvk_B_A_C), i.e. ~10% of trsl_scale.
+        # Needs a rescan of the training set before multi-sample training.
+        # Harmless for single-sample overfit (one constant offset).
         self.trsl_mu = torch.tensor([-0.2222, 0.9051, 0.1434], dtype=torch.float32)
         self.trsl_scale = torch.tensor(26.0823, dtype=torch.float32) # std (sigma_data)
 
@@ -97,6 +114,7 @@ class Diffuser:
 
     def __build_rotation_schedule(self) -> None:
         sigma_data_pose = torch.sqrt(self.trsl_scale * (self.cdr_scale / self.cdr_local_noise_scale))
+        self.sigma_data_pose = sigma_data_pose  # kept for diagnostics (_log_forced_step)
         noise_fraction = self.sigmas.double() / torch.sqrt(self.sigmas.double().square() + sigma_data_pose.double().square())
         progress = ((noise_fraction - noise_fraction[1]) / (noise_fraction[-1] - noise_fraction[1]).clamp_min(1e-12)).clamp(0.0, 1.0)
         angle_rms = torch.zeros(self.n_steps + 1, dtype=torch.float64)
@@ -105,7 +123,8 @@ class Diffuser:
         ) * progress[1:].pow(self.rota_schedule_gamma)
         angle_rms[-1] = self.haar_angle_rms
         self.rota_angle_rms_schedule = angle_rms.float()
-        self.rota_sampler = OnlineIGSO3Schedule(angle_rms, seed=self.ROTATION_BASE_SEED)
+        self.rota_sampler = OnlineIGSO3Schedule(angle_rms, seed=56)
+        # self.rota_sampler = OnlineIGSO3Schedule(angle_rms, seed=self.ROTATION_BASE_SEED)
 
     def _sample_probabilities(self, aa_seq_orig, pmsk_vec, idxs_step, device):
         """Sample noisy residue-type distributions; shared by legacy and fr_cdr_sync modes."""
@@ -138,7 +157,16 @@ class Diffuser:
             )
 
     @staticmethod
-    def _build_antibody_rigid_params(cord_tns_orig, cmsk_mat_orig, antibody_mask):
+    def _build_antibody_rigid_params(
+        cord_tns_orig, cmsk_mat_orig, antibody_mask, fr_mask=None
+    ):
+        """Build rigid-body frame for antibody.
+
+        Args:
+            fr_mask: if provided, the canonical frame (rota_orig, trsl_orig) is built
+                     from FR atoms only; ab_local still covers all antibody residues
+                     (the CDR will be expressed in the FR-derived frame).
+        """
         import contextlib
 
         device = cord_tns_orig.device
@@ -151,6 +179,17 @@ class Diffuser:
         coords_ab_orig = cord_tns_orig[ab_mask]
         atom_mask_ab_orig = cmsk_mat_orig[ab_mask]
 
+        # --- X2: frame selection restricted to FR if requested ---
+        if fr_mask is not None:
+            fr_mask_ab = fr_mask[ab_mask].to(device=device, dtype=torch.bool)
+            if fr_mask_ab.sum() == 0:
+                raise ValueError("No FR residues found; cannot build frame.")
+            frame_sel = fr_mask_ab
+        else:
+            frame_sel = torch.ones(
+                coords_ab_orig.shape[0], device=device, dtype=torch.bool
+            )
+
         if device.type == "cuda":
             autocast_ctx = torch.amp.autocast(device_type="cuda", enabled=False)
         else:
@@ -161,12 +200,12 @@ class Diffuser:
             atom_mask_ab = atom_mask_ab_orig.float()
 
             ca = coords_ab[:, 1]
-            ca_mask = atom_mask_ab[:, 1].to(torch.bool)
+            ca_mask = (atom_mask_ab[:, 1] > 0.5) & frame_sel
 
             if ca_mask.sum() >= 3:
-                valid_points = ca[ca_mask] 
+                valid_points = ca[ca_mask]
             else:
-                valid_atom_mask = atom_mask_ab.to(torch.bool)
+                valid_atom_mask = (atom_mask_ab > 0.5) & frame_sel.unsqueeze(-1)
                 valid_points = coords_ab[valid_atom_mask]
 
             if valid_points.numel() == 0:
@@ -184,7 +223,11 @@ class Diffuser:
                 U = U.float()
 
                 # --- 核心强制对齐：彻底消灭 180 度翻转震荡 ---
-                n_ca_mask = atom_mask_ab[:, 0] * atom_mask_ab[:, 1]
+                # X2: guides must also come from FR only, else the sign
+                # disambiguation still depends on CDR conformation.
+                n_ca_mask = (
+                    atom_mask_ab[:, 0] * atom_mask_ab[:, 1] * frame_sel.float()
+                )
                 n_ca = coords_ab[:, 1] - coords_ab[:, 0]
 
                 # X轴向 N->CA 对齐
@@ -231,8 +274,50 @@ class Diffuser:
     def run(self, prot_data_orig, idxs_step=None, return_time_steps=False):
         """Build a synchronized noisy state with FR rigid motion + CDR local diffusion."""
         device_type = prot_data_orig["cord"].device.type
+
+        idxs_step = self._bucket_timestep(idxs_step)
+
+        # self.rota_sampler.generator.manual_seed(56)   # ← 私有 generator，torch.manual_seed 管不到
+        # torch.manual_seed(56)
+
+        # --- DEBUG OVERRIDE: pin the noise bucket ------------------------------
+        # AA2: 75.  Only the mid/low-noise regime tests whether the model can
+        # actually localise the pose.  At high noise (e.g. 120 -> rota_rms 66.8deg)
+        # most of the achievable loss drop is buyable by learning the shrinkage
+        # coefficient alone: a smooth-looking curve with no docking skill.
+        # Do NOT annotate the value in a comment -- see _log_forced_step below,
+        # which prints the real schedule numbers at runtime.
+        idxs_step = 100
+        self._log_forced_step(idxs_step)
+        # ----------------------------------------------------------------------
+
         with torch.amp.autocast(device_type=device_type, enabled=False):
             return self._run_impl(prot_data_orig, idxs_step, return_time_steps)
+
+    def _log_forced_step(self, idxs_step):
+        """AA3: print the ACTUAL schedule values once per distinct value, so that a
+        stale comment can never misrepresent which regime is being trained."""
+        seen = getattr(self, "_forced_step_logged", None)
+        if seen is None:
+            seen = set()
+            self._forced_step_logged = seen
+        if idxs_step in seen:
+            return
+        seen.add(idxs_step)
+        sigma = float(self.sigmas[idxs_step])
+        rms_deg = math.degrees(float(self.rota_angle_rms_schedule[idxs_step]))
+        msg = (
+            f"[Diffuser] FORCED idxs_step={idxs_step}  sigma={sigma:.4f}"
+            f"  rota_rms={rms_deg:.2f}deg"
+        )
+        sd = getattr(self, "sigma_data_pose", None)
+        if sd is not None:
+            sd = float(sd)
+            msg += (
+                f"  c_skip={sd ** 2 / (sigma ** 2 + sd ** 2):.4f}"
+                f"  c_out={sigma * sd / math.sqrt(sigma ** 2 + sd ** 2):.4f}"
+            )
+        print(msg, flush=True)
 
     def _run_impl(self, prot_data_orig, idxs_step=None, return_time_steps=False):
 
@@ -278,6 +363,7 @@ class Diffuser:
             cord_tns_orig,
             cmsk_mat_orig14,
             antibody_mask,
+            fr_mask=fr_mask,          # X2: frame from FR atoms only
         )
         self._validate_rotation(rota_orig, "clean antibody rotation")
         

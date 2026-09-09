@@ -44,4 +44,7 @@ python src/train_iggm_lightning.py --config config/train_overfit_0714_B.yaml
 
 python src/train_iggm_lightning.py --config config/train_overfit_all_0716.yaml
 python src/train_iggm_lightning.py --config config/train_overfit_all_0720.yaml
-python src/train_iggm_lightning.py --config config/train_overfit_all_0720.yaml
+python src/train_iggm_lightning.py --config config/train_overfit_all_0721.yaml
+
+nohup python src/train_iggm_lightning.py --config config/train_overfit_all_0721.yaml > log_runout/train_overfit_all_0908.log 2>&1 &
+

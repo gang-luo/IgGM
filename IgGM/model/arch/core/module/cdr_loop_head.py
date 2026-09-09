@@ -210,7 +210,7 @@ class CDRLoopHead(nn.Module):
         token_cond = (token_cond + self.noise_to_token(noise_feat)) * valid_res_mask.unsqueeze(-1).to(dtype)
 
         # 2. Atom & Token Encoders
-        xt_in = loop_xt_scaled.reshape(bsz, n_loop, lmax, -1)
+        xt_in = loop_xt_scaled.to(dtype).reshape(bsz, n_loop, lmax, -1)
         atom_encoder_in = torch.cat([xt_in, token_cond, atom_mask], dim=-1)
         atom_feat = self.atom_encoder(atom_encoder_in) * valid_res_mask.unsqueeze(-1).to(dtype)
 
@@ -262,7 +262,6 @@ class CDRLoopHead(nn.Module):
         atom_decoder_in = torch.cat([atom_feat, token_feat, xt_in], dim=-1)
         atom_hidden = self.atom_decoder(atom_decoder_in)
 
-        # Predict normalized coordinates
         x0_norm = self.coord_head(atom_hidden).view(bsz, n_loop, lmax, self.n_atom, 3)
         x0_norm = x0_norm * loop_atom_valid_mask.unsqueeze(-1).to(x0_norm.dtype)
 

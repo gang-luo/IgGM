@@ -115,6 +115,29 @@ restype_name_to_atom14_names = {
     'UNK': ['', '', '', '', '', '', '', '', '', '', '', '', '', ''],
 }
 
+SIDECHAIN_BONDS_PER_RESD = {
+    'ALA': [('CA', 'CB')],
+    'ARG': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD'), ('CD', 'NE'), ('NE', 'CZ'), ('CZ', 'NH1'), ('CZ', 'NH2')],
+    'ASN': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'OD1'), ('CG', 'ND2')],
+    'ASP': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'OD1'), ('CG', 'OD2')],
+    'CYS': [('CA', 'CB'), ('CB', 'SG')],
+    'GLN': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD'), ('CD', 'OE1'), ('CD', 'NE2')],
+    'GLU': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD'), ('CD', 'OE1'), ('CD', 'OE2')],
+    'GLY': [],
+    'HIS': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'ND1'), ('ND1', 'CE1'), ('CE1', 'NE2'), ('NE2', 'CD2'), ('CD2', 'CG')],
+    'ILE': [('CA', 'CB'), ('CB', 'CG1'), ('CB', 'CG2'), ('CG1', 'CD1')],
+    'LEU': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD1'), ('CG', 'CD2')],
+    'LYS': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD'), ('CD', 'CE'), ('CE', 'NZ')],
+    'MET': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'SD'), ('SD', 'CE')],
+    'PHE': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD1'), ('CG', 'CD2'), ('CD1', 'CE1'), ('CD2', 'CE2'), ('CE1', 'CZ'), ('CE2', 'CZ')],
+    'PRO': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD'), ('CD', 'N')],
+    'SER': [('CA', 'CB'), ('CB', 'OG')],
+    'THR': [('CA', 'CB'), ('CB', 'OG1'), ('CB', 'CG2')],
+    'TRP': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD1'), ('CG', 'CD2'), ('CD1', 'NE1'), ('NE1', 'CE2'), ('CE2', 'CD2'), ('CD2', 'CE3'), ('CE3', 'CZ3'), ('CZ3', 'CH2'), ('CH2', 'CZ2'), ('CZ2', 'CE2')],
+    'TYR': [('CA', 'CB'), ('CB', 'CG'), ('CG', 'CD1'), ('CG', 'CD2'), ('CD1', 'CE1'), ('CD2', 'CE2'), ('CE1', 'CZ'), ('CE2', 'CZ'), ('CZ', 'OH')],
+    'VAL': [('CA', 'CB'), ('CB', 'CG1'), ('CB', 'CG2')],
+}
+
 # atom type
 ATOM_TYPES = [
     'N',

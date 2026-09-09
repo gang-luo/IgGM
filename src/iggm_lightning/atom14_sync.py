@@ -187,33 +187,47 @@ class Atom14SeqSync:
 
     def _count_no_markers(self, residue_atoms: torch.Tensor, residue_mask: torch.Tensor) -> Tuple[int, int]:
         """
-        Count marker atoms within 0.5A threshold to fixed N (idx 0) or O (idx 3).
-        Relies on fixed layout where N is always at index 0 and O is always at index 3.
+        Count marker atoms within `self.decode_threshold` (1.0 A) of the fixed
+        N (idx 0) or O (idx 3) anchor.  Relies on the fixed atom14 layout: slots
+        0-3 are always the backbone N/CA/C/O, so markers can only ever land in
+        slots 4-13 (min n_real over the codebook is 4).
+
+        Slots 0-3 are ALL skipped, not just the two anchors.  Skipping only N/O
+        left the real CA and C in the scan, and their distances to their own
+        anchors are 1.46 A (CA-N) and 1.23 A (C-O) -- only 0.46 / 0.23 A of
+        margin under a 1.0 A threshold.  A predicted C=O bond compressed below
+        1.0 A therefore made the real C count as an O-marker and flipped the
+        decoded residue type, which is why loss_bond was implicitly guarding the
+        type channel.  Because n_real >= 4 for every residue, "slot < 4 is real
+        backbone" needs no knowledge of the residue type, so this skip is NOT an
+        n_real leak -- exactly the same standing as skipping N/O was.  Nearest
+        remaining real atom is CB at ~2.4 A, so the margin is now ~1.4 A.
         """
         n_idx, o_idx = 0, 3
         n_pos = residue_atoms[n_idx]
         o_pos = residue_atoms[o_idx]
         n_count, o_count = 0, 0
 
-        # Scan all 14 slots
+        # Scan the marker-eligible slots only (4-13).
         for atom_idx in range(14):
-            # Skip real N and O anchors, and unmasked padded slots
-            if atom_idx in (n_idx, o_idx) or not bool(residue_mask[atom_idx]):
+            # Skip the four real backbone slots, and unmasked padded slots.
+            if atom_idx < 4 or not bool(residue_mask[atom_idx]):
                 continue
-            
+
             atom = residue_atoms[atom_idx]
             d_n = torch.norm(atom - n_pos)
             d_o = torch.norm(atom - o_pos)
-            
-            # Physical atoms are > 1.0A away; < 0.5A means it's a virtual marker
+
+            # Farther than the threshold from both anchors => a real side-chain
+            # atom, not a marker.
             if float(min(d_n.item(), d_o.item())) > self.decode_threshold:
                 continue
-                
+
             if d_n <= d_o:
                 n_count += 1
             else:
                 o_count += 1
-                
+
         return n_count, o_count
 
     def decode_cdr_sequence(

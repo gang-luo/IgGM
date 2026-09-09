@@ -97,7 +97,7 @@ class StructureModule(nn.Module):
             pfea_tns = self.net["norm_p"](pfea_tns)
             sfea_tns = self.net["linear_s"](sfea_tns_init)
 
-            curr_coords = cord_tns_init.detach().clone()
+            curr_coords = cord_tns_init.detach().float().clone()
             curr_cmsk = cmsk_tns_init.detach().clone()
 
             cord_list, plddt_list, loop_cords = [], [], []
@@ -139,67 +139,69 @@ class StructureModule(nn.Module):
             loop_true_len = self._expand_batch_mask(region_metadata["loop_true_len"].to(device), n_smpls)
 
             # 4. Extract and expand framework and anchor spatial parameters
-            rota_xt = region_metadata["anchor_frame_meta"]["rota_xt"].to(device=device, dtype=dtype)
+            rota_xt = region_metadata["anchor_frame_meta"]["rota_xt"].to(device=device, dtype=torch.float32)
             if rota_xt.ndim == 2: rota_xt = rota_xt.unsqueeze(0)
             if rota_xt.shape[0] == 1 and n_smpls > 1: rota_xt = rota_xt.expand(n_smpls, -1, -1).contiguous()
             rota_xt0 = rota_xt.detach().clone()
 
-            trsl_xt_physical = region_metadata["anchor_frame_meta"]["trsl_xt_physical"].to(device=device, dtype=dtype)
+            trsl_xt_physical = region_metadata["anchor_frame_meta"]["trsl_xt_physical"].to(device=device, dtype=torch.float32)
             if trsl_xt_physical.ndim == 1: trsl_xt_physical = trsl_xt_physical.unsqueeze(0)
             if trsl_xt_physical.shape[0] == 1 and n_smpls > 1: trsl_xt_physical = trsl_xt_physical.expand(n_smpls, -1).contiguous()
 
-            antibody_local_coords = region_metadata["antibody_local_coords"].to(device=device, dtype=dtype)
+            antibody_local_coords = region_metadata["antibody_local_coords"].to(device=device, dtype=torch.float32)
             if antibody_local_coords.ndim == 3: antibody_local_coords = antibody_local_coords.unsqueeze(0)
             if antibody_local_coords.shape[0] == 1 and n_smpls > 1:
                 antibody_local_coords = antibody_local_coords.expand(n_smpls, -1, -1, -1).clone()
 
-            loop_xt_local = region_metadata["noisy_loop_local_coords"].to(device=device, dtype=dtype)
+            loop_xt_local = region_metadata["noisy_loop_local_coords"].to(device=device, dtype=torch.float32)
             if loop_xt_local.ndim == 4: loop_xt_local = loop_xt_local.unsqueeze(0)
             if loop_xt_local.shape[0] == 1 and n_smpls > 1:
                 loop_xt_local = loop_xt_local.expand(n_smpls, -1, -1, -1, -1).clone()
 
             # 5. Extract diffusion schedule parameters (sigmas, scale, mu, c_in)
-            fr_sigma_trsl = region_metadata["anchor_frame_meta"]["fr_sigma_trsl"].to(device, dtype=dtype).reshape(-1)
+            fr_sigma_trsl = region_metadata["anchor_frame_meta"]["fr_sigma_trsl"].to(device, dtype=torch.float32).reshape(-1)
             if fr_sigma_trsl.numel() == 1: fr_sigma_trsl = fr_sigma_trsl.expand(n_smpls)
 
-            fr_sigma_rota = region_metadata["anchor_frame_meta"]["fr_sigma_rota"].to(device, dtype=dtype).reshape(-1)
+            fr_sigma_rota = region_metadata["anchor_frame_meta"]["fr_sigma_rota"].to(device, dtype=torch.float32).reshape(-1)
             if fr_sigma_rota.numel() == 1: fr_sigma_rota = fr_sigma_rota.expand(n_smpls)
 
-            fr_c_in = region_metadata["anchor_frame_meta"]["fr_c_in"].to(device, dtype=dtype).reshape(-1)
+            fr_c_in = region_metadata["anchor_frame_meta"]["fr_c_in"].to(device, dtype=torch.float32).reshape(-1)
             if fr_c_in.numel() == 1: fr_c_in = fr_c_in.expand(n_smpls)
 
-            trsl_scale = region_metadata["anchor_frame_meta"]["trsl_scale"].to(device, dtype=dtype)
+            trsl_scale = region_metadata["anchor_frame_meta"]["trsl_scale"].to(device, dtype=torch.float32)
 
-            cdr_sigma = region_metadata["cdr_meta"]["cdr_sigma"].to(device, dtype=dtype).reshape(-1)
+            cdr_sigma = region_metadata["cdr_meta"]["cdr_sigma"].to(device, dtype=torch.float32).reshape(-1)
             if cdr_sigma.numel() == 1: cdr_sigma = cdr_sigma.expand(n_smpls)
 
-            cdr_c_in = region_metadata["cdr_meta"]["cdr_c_in"].to(device, dtype=dtype).reshape(-1)
+            cdr_c_in = region_metadata["cdr_meta"]["cdr_c_in"].to(device, dtype=torch.float32).reshape(-1)
             if cdr_c_in.numel() == 1: cdr_c_in = cdr_c_in.expand(n_smpls)
             cdr_c_in = cdr_c_in.view(n_smpls, 1, 1, 1, 1)
 
-            cdr_mu = region_metadata["cdr_meta"]["cdr_mu"].to(device=device, dtype=dtype)
-            cdr_scale = region_metadata["cdr_meta"]["cdr_scale"].to(device=device, dtype=dtype)
+            cdr_mu = region_metadata["cdr_meta"]["cdr_mu"].to(device=device, dtype=torch.float32)
+            cdr_scale = region_metadata["cdr_meta"]["cdr_scale"].to(
+                device=device, dtype=torch.float32
+            )
 
-            cdr_xt_centered = region_metadata["cdr_meta"]["cdr_xt_centered"].to(device=device, dtype=dtype)
+            cdr_xt_centered = region_metadata["cdr_meta"]["cdr_xt_centered"].to(device=device, dtype=torch.float32)
             if cdr_xt_centered.ndim == 4: cdr_xt_centered = cdr_xt_centered.unsqueeze(0)
             if cdr_xt_centered.shape[0] == 1 and n_smpls > 1:
                 cdr_xt_centered = cdr_xt_centered.expand(n_smpls, -1, -1, -1, -1).clone()
 
             loop_xt_scaled = cdr_xt_centered * cdr_c_in
 
-            fr_c_skip = region_metadata["anchor_frame_meta"]["fr_c_skip"].to(device=device,dtype=dtype,).reshape(-1)
+            fr_c_skip = region_metadata["anchor_frame_meta"]["fr_c_skip"].to(device=device,dtype=torch.float32,).reshape(-1)
             if fr_c_skip.numel() == 1:
                 fr_c_skip = fr_c_skip.expand(n_smpls)
-            fr_c_out = region_metadata["anchor_frame_meta"]["fr_c_out"].to(device=device,dtype=dtype,).reshape(-1)
+            fr_c_out = region_metadata["anchor_frame_meta"]["fr_c_out"].to(device=device,dtype=torch.float32,).reshape(-1)
             if fr_c_out.numel() == 1:
                 fr_c_out = fr_c_out.expand(n_smpls)
 
             fr_rota_rms = region_metadata["anchor_frame_meta"]["fr_rota_rms"].to(
-                device=device, dtype=dtype).reshape(-1)
+                device=device, dtype=torch.float32).reshape(-1)
             if fr_rota_rms.numel() == 1:
                 fr_rota_rms = fr_rota_rms.expand(n_smpls)
 
-            # 6. Iterative structural refinement layers
+            loop_context_local = loop_xt_local
             for layer_idx in range(n_lyrs):
                 curr_coords = curr_coords.detach()
 
@@ -269,13 +271,14 @@ class StructureModule(nn.Module):
                     loop_left_anchor_idx=loop_left_anchor_idx,
                     loop_right_anchor_idx=loop_right_anchor_idx,
                     loop_xt_scaled=loop_xt_scaled,
-                    loop_xt_local_physical=loop_xt_local,
+                    loop_context_local_physical=loop_context_local,
                     cdr_mu=cdr_mu,
                     cdr_scale=cdr_scale,
                     cdr_sigma=cdr_sigma,
                 )
 
                 curr_coords = cdr_out["merged_coords"]
+                loop_context_local = cdr_out["pred_x0_local"].detach()
                 sfea_tns = cdr_out["sfea_after_cdr"]
                 plddt_dict = self.net["plddt"](sfea_tns.detach())
 

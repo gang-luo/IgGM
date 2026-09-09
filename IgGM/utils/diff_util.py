@@ -919,3 +919,34 @@ def replace_with_mask(original_string, new_string, mask):
         if should_replace:
             original_list[i] = new_list[i]
     return ''.join(original_list)
+
+
+def so3_log_vector(rotation: torch.Tensor) -> torch.Tensor:
+    rotation = rotation.float()
+    skew = 0.5 * torch.stack(
+        [
+            rotation[..., 2, 1] - rotation[..., 1, 2],
+            rotation[..., 0, 2] - rotation[..., 2, 0],
+            rotation[..., 1, 0] - rotation[..., 0, 1],
+        ],
+        dim=-1,
+    )
+    sin_angle = torch.linalg.norm(skew, dim=-1)
+    cos_angle = ((rotation.diagonal(dim1=-2, dim2=-1).sum(-1) - 1.0) * 0.5).clamp(-1.0, 1.0)
+    angle = torch.atan2(sin_angle, cos_angle)
+    rotvec = skew * (angle / sin_angle.clamp_min(1e-7)).unsqueeze(-1)
+    rotvec = torch.where((angle < 1e-5).unsqueeze(-1), skew, rotvec)
+
+    near_pi = (torch.pi - angle).abs() < 1e-4
+    if near_pi.any():
+        sym = 0.5 * (
+            rotation[near_pi]
+            + torch.eye(3, device=rotation.device, dtype=torch.float32)
+        )
+        _, eigenvectors = torch.linalg.eigh(sym)
+        axes = eigenvectors[..., -1]
+        max_indices = axes.abs().argmax(dim=-1, keepdim=True)
+        signs = torch.gather(axes, -1, max_indices).sign()
+        signs = torch.where(signs == 0, torch.ones_like(signs), signs)
+        rotvec[near_pi] = axes * signs * angle[near_pi].unsqueeze(-1)
+    return rotvec

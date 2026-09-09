@@ -134,6 +134,12 @@ def _parser_with_defaults(defaults: Dict[str, Any]) -> argparse.ArgumentParser:
     p.add_argument("--lr", type=float, default=float(optim.get("lr", 1e-4)))
     p.add_argument("--weight_decay", type=float, default=float(optim.get("weight_decay", 1e-2)))
     p.add_argument("--grad_clip", type=float, default=float(optim.get("grad_clip", 1.0)))
+    # EMA is off unless a decay is given.  Validation runs on the EMA weights
+    # when enabled (see IgGMLightningModule.on_validation_start): it smooths the
+    # eval reading without touching the training gradients.
+    p.add_argument("--ema_decay", type=float, default=(
+        float(optim["ema_decay"]) if optim.get("ema_decay") is not None else None
+    ))
 
     p.add_argument("--vio_weight", type=float, default=float(loss_cfg.get("vio_weight", 0.02)))
     p.add_argument("--dockq_threshold", type=float, default=float(metric_cfg.get("dockq_threshold", 0.23)))
@@ -276,6 +282,7 @@ def main() -> None:
         scheduler_cfg = scheduler_cfg,
         optimizer_cfg=OptimizerConfig(lr=args.lr, weight_decay=args.weight_decay),
         grad_clip_val=args.grad_clip,
+        ema_decay=args.ema_decay,
         loss_cfg=IgGMLossConfig(
             # backbone_weight=args.backbone_weight,
             # cdr_all_atom_weight=args.cdr_all_atom_weight,
